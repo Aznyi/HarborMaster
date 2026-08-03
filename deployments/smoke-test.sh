@@ -86,6 +86,31 @@ json_field() {
   fi
 }
 
+# Reads the running process's UID via `docker top`.
+#
+# Invoked with NO ps arguments on purpose. The daemon runs `ps` on the host and
+# then requires a PID column so it can map rows back to the container's
+# processes; passing something like `-o user` yields a lone USER column and the
+# request fails with "Couldn't find PID field in ps output". The daemon's
+# default (`-ef`) always includes PID.
+#
+# The UID column is located by header name, because ps layout varies by host.
+docker_top_uid() {
+  local output
+  output="$(docker top "$1" 2>/dev/null)" || return 1
+
+  printf '%s\n' "$output" | awk '
+    NR == 1 {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "UID" || $i == "USER") { col = i }
+      }
+      if (col == 0) { exit 1 }
+      next
+    }
+    { print $col; exit }
+  '
+}
+
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true
@@ -188,11 +213,47 @@ fi
 pass "application started and serves without Docker access"
 
 info "Runtime identity"
-runtime_user="$(docker top "$CONTAINER" -o user 2>/dev/null | tail -n +2 | head -n 1 | tr -d '[:space:]')"
-if [ "$runtime_user" = "0" ] || [ "$runtime_user" = "root" ]; then
-  fail "process runs as root (user column: '$runtime_user')"
+
+# Identity is asserted from outside the container. The runtime image is
+# distroless: there is no shell, no `id`, and no `ps` in it to run, which is
+# the point -- a compromised process has nothing on disk to execute.
+#
+# `docker inspect` reports the configured identity, which is intent.
+container_user="$(docker inspect -f '{{.Config.User}}' "$CONTAINER")"
+check "container is configured to run as 65532:65532" "65532:65532" "$container_user"
+
+# An empty User means the image's default applies, which for most bases is
+# root. Treated as a failure rather than a pass-by-omission.
+case "$container_user" in
+"" | 0 | 0:* | root | root:*)
+  fail "container would run as root (configured user: '$container_user')"
+  ;;
+*)
+  pass "configured user is neither root nor unset"
+  ;;
+esac
+
+# ...and this is what the kernel actually granted, which is what matters.
+# /proc/<pid>/status is world-readable, so the host can read the effective UID
+# and GID of the container's process without entering the container. It exists
+# only when the daemon shares the host kernel, so a VM-backed Docker (Docker
+# Desktop) falls through to `docker top`.
+container_pid="$(docker inspect -f '{{.State.Pid}}' "$CONTAINER")"
+case "$container_pid" in
+'' | *[!0-9]*) container_pid=0 ;;
+esac
+
+if [ "$container_pid" -gt 0 ] && [ -r "/proc/${container_pid}/status" ]; then
+  # The Uid: and Gid: lines are "<real> <effective> <saved> <filesystem>".
+  effective_uid="$(awk '/^Uid:/ {print $3; exit}' "/proc/${container_pid}/status")"
+  effective_gid="$(awk '/^Gid:/ {print $3; exit}' "/proc/${container_pid}/status")"
+  check "process runs with effective UID 65532" "65532" "$effective_uid"
+  check "process runs with effective GID 65532" "65532" "$effective_gid"
+elif runtime_uid="$(docker_top_uid "$CONTAINER")" && [ -n "$runtime_uid" ]; then
+  check "process runs as UID 65532 (via docker top)" "65532" "$runtime_uid"
 else
-  pass "process runs as non-root (user column: '$runtime_user')"
+  # Not skipped quietly: an unverifiable security assertion is a failed one.
+  fail "could not determine the running process's UID by any available method"
 fi
 
 info "API endpoints"
