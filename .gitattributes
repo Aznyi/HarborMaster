@@ -1,0 +1,14 @@
+# Normalise line endings. Without this, a Windows checkout with
+# core.autocrlf=true rewrites shell scripts and Dockerfiles with CRLF, and Linux
+# then fails to execute them ("bad interpreter: /usr/bin/env bash^M").
+* text=auto eol=lf
+
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+Makefile    text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.sql       text eol=lf
+
+# Generated; keep it out of diffs and language statistics.
+web/package-lock.json linguist-generated=true -diff

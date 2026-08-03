@@ -1,0 +1,124 @@
+// Package docker adapts the official Docker Engine SDK to HarborMaster's
+// needs.
+//
+// The Docker socket is a privileged interface: anything able to talk to it can
+// control every container on the host, and in most configurations that is
+// equivalent to root. Two constraints follow, and this package exists to
+// enforce them in one place:
+//
+//   - This adapter is strictly read-only. No method here creates, updates, removes,
+//     starts, stops, or pulls anything, and none executes a command in a
+//     container. Extending this package is the only way to gain write access,
+//     which makes that change reviewable.
+//   - Engine errors are never returned verbatim to callers that render them.
+//     They can embed socket paths and daemon internals, so Ping reports a
+//     sanitised error and logs the detail instead.
+package docker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/docker/docker/client"
+)
+
+// ErrUnreachable reports that the Docker Engine did not answer. It is the only
+// Docker failure the API surfaces, deliberately carrying no daemon detail.
+var ErrUnreachable = errors.New("docker engine unreachable")
+
+// Info is the subset of the Engine's ping response HarborMaster reports.
+type Info struct {
+	APIVersion string
+	OSType     string
+}
+
+// Pinger is the read-only capability the application layer depends on.
+//
+// Services accept this interface rather than *Client so they can be tested
+// without a Docker daemon.
+type Pinger interface {
+	Ping(ctx context.Context) (Info, error)
+}
+
+// Client is a Pinger backed by the official Engine SDK.
+type Client struct {
+	api     *client.Client
+	timeout time.Duration
+}
+
+// Options configures a Client.
+type Options struct {
+	// Host is the Engine endpoint, e.g. unix:///var/run/docker.sock.
+	Host string
+	// Timeout bounds a single Engine call.
+	Timeout time.Duration
+}
+
+// New builds a Client for the configured endpoint.
+//
+// Constructing a client does not contact the daemon; an unreachable socket is
+// a runtime condition reported by Ping, not a startup failure. HarborMaster
+// must stay up and report "disconnected" rather than refusing to boot.
+func New(opts Options) (*Client, error) {
+	if opts.Timeout <= 0 {
+		opts.Timeout = 10 * time.Second
+	}
+
+	// WithAPIVersionNegotiation lets HarborMaster talk to older daemons instead
+	// of failing on a version mismatch.
+	api, err := client.NewClientWithOpts(
+		client.WithHost(opts.Host),
+		client.WithAPIVersionNegotiation(),
+		client.WithTimeout(opts.Timeout),
+	)
+	if err != nil {
+		// The endpoint is configuration, so it is kept out of the message.
+		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
+	}
+
+	return &Client{api: api, timeout: opts.Timeout}, nil
+}
+
+// Ping verifies the Engine is reachable.
+//
+// On failure it returns an error wrapping ErrUnreachable with the daemon's
+// detail attached for logging. Callers that render to an API response must use
+// SanitizeError rather than the error's own message.
+func (c *Client) Ping(ctx context.Context) (Info, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	ping, err := c.api.Ping(ctx)
+	if err != nil {
+		return Info{}, fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	return Info{APIVersion: ping.APIVersion, OSType: ping.OSType}, nil
+}
+
+// Close releases the underlying HTTP transport.
+func (c *Client) Close() error {
+	if c.api == nil {
+		return nil
+	}
+	return c.api.Close()
+}
+
+// SanitizeError maps any Docker failure onto a short, operator-safe phrase
+// suitable for an API response. The underlying error stays in the logs.
+func SanitizeError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "docker engine did not respond in time"
+	case errors.Is(err, context.Canceled):
+		return "docker probe cancelled"
+	default:
+		return ErrUnreachable.Error()
+	}
+}
+
+// Compile-time check that Client satisfies the interface services depend on.
+var _ Pinger = (*Client)(nil)

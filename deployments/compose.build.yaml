@@ -1,0 +1,22 @@
+# Build override: run HarborMaster from this checkout instead of the published
+# image.
+#
+#   docker compose -f deployments/compose.yaml -f deployments/compose.build.yaml up --build
+#
+# This is a separate file rather than a `build:` block in compose.yaml on
+# purpose. With both `image:` and `build:` on one service, a local build would
+# be tagged `ghcr.io/aznyi/harbormaster:latest`, silently shadowing the
+# published image for everything else on the host. Overriding the tag here
+# keeps the two apart.
+
+services:
+  harbormaster:
+    image: harbormaster:local
+    pull_policy: build
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}

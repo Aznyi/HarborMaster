@@ -1,0 +1,216 @@
+name: Container image
+
+# Builds, tests, and publishes the HarborMaster container image.
+#
+# Tagging policy, by event:
+#
+#   pull_request      build only, nothing is pushed
+#   push to main      edge, sha-<full commit sha>
+#   release published <major>.<minor>.<patch>, <major>.<minor>, <major>, latest
+#   workflow_dispatch build only, unless `push_image` is set, and then only a
+#                     disposable dispatch-<sha> tag
+#
+# `latest` moves on releases and nowhere else, so a push to main can never
+# replace the tag production is pulling.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: >-
+          Push a disposable dispatch-<sha> tag to GHCR. Stable tags
+          (latest, semver, edge) are never written by a manual run.
+        type: boolean
+        default: false
+
+# Least privilege by default; the publish job widens this for itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # Hard-coded lowercase rather than ${{ github.repository }}: the repository is
+  # `Aznyi/HarborMaster`, and OCI reference names must be lowercase.
+  IMAGE_NAME: aznyi/harbormaster
+
+jobs:
+  build-test:
+    name: Build and smoke test (linux/amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Record build metadata
+        id: vars
+        run: |
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+          echo "version=ci-${GITHUB_SHA::7}" >>"$GITHUB_OUTPUT"
+
+      # Single platform and loaded into the local daemon so the smoke tests can
+      # actually run it. The multi-platform build in `publish` reuses this
+      # layer cache.
+      - name: Build image for testing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: harbormaster:smoke
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Invoked through bash rather than as an executable: this repository is
+      # developed on Windows, where core.filemode is false, so the script's
+      # exec bit cannot be relied on to survive a commit.
+      - name: Container smoke tests
+        run: bash deployments/smoke-test.sh
+        env:
+          IMAGE: harbormaster:smoke
+
+      - name: Validate Compose configuration
+        run: |
+          docker compose -f deployments/compose.yaml config >/dev/null
+          docker compose \
+            -f deployments/compose.yaml \
+            -f deployments/compose.build.yaml config >/dev/null
+          echo "Compose configuration is valid."
+
+  publish:
+    name: Publish to GHCR
+    needs: build-test
+    runs-on: ubuntu-latest
+    # Manual runs publish only when explicitly asked, and even then only to a
+    # disposable tag.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.push_image)
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # arm64 is emulated at build time; the Go build is cross-compiled, so this
+      # only has to be fast enough for `npm ci` and `go build`.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # The workflow's own GITHUB_TOKEN. No personal access token is required.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record build metadata
+        id: vars
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+
+      - name: Derive tags and OCI metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `latest=false` disables the automatic latest tag so the rule below
+          # is the only thing that can move it.
+          flavor: |
+            latest=false
+          tags: |
+            type=edge,branch=main
+            type=sha,prefix=sha-,format=long,enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=dispatch-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=HarborMaster
+            org.opencontainers.image.description=Safety-first container lifecycle manager: read-only Docker inventory, configuration snapshots, and health reporting.
+            org.opencontainers.image.licenses=MIT
+          annotations: |
+            org.opencontainers.image.title=HarborMaster
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # In-toto provenance and an SBOM, both attached to the image index.
+          provenance: mode=max
+          sbom: true
+
+      # A signed, verifiable statement that this digest came from this workflow.
+      # Verify with:
+      #   gh attestation verify oci://ghcr.io/aznyi/harbormaster:latest -R Aznyi/HarborMaster
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Write job summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "## Container image published"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Platforms:** \`linux/amd64\`, \`linux/arm64\`"
+            echo
+            echo "### Tags"
+            echo
+            printf '%s\n' "$TAGS" | while IFS= read -r tag; do
+              [ -n "$tag" ] && echo "- \`${tag}\`"
+            done
+            echo
+            echo "### Pull by digest (immutable)"
+            echo
+            echo '```sh'
+            echo "docker pull ${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+            echo
+            echo "> \`latest\` is a moving tag. Pin the digest above for reproducible deployments."
+          } >>"$GITHUB_STEP_SUMMARY"

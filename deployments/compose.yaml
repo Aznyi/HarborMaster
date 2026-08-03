@@ -1,0 +1,96 @@
+# HarborMaster deployment.
+#
+# Runs the published image by default:
+#
+#   docker compose -f deployments/compose.yaml up -d
+#
+# To build from this checkout instead, layer the build override on top:
+#
+#   docker compose -f deployments/compose.yaml -f deployments/compose.build.yaml up --build
+#
+# Copy .env.example to .env first and set HARBORMASTER_DOCKER_GID to the host's
+# docker group.
+#
+# ---------------------------------------------------------------------------
+# Docker socket access is privileged
+# ---------------------------------------------------------------------------
+# The `:ro` on the socket bind mount makes the *socket file* read-only. It does
+# NOT make the Docker API read-only. Anything that can write to that socket —
+# and a "read-only" bind mount still permits the writes that an API request
+# needs — can create a privileged container and take over the host. The `:ro`
+# flag is defence in depth, not a security boundary.
+#
+# What actually keeps this deployment read-only is the application:
+# HarborMaster only calls the Engine's ping endpoint. Treat access to this
+# service as equivalent to root on the host, and keep it off the public
+# internet until authentication exists.
+
+name: harbormaster
+
+services:
+  harbormaster:
+    image: ${HARBORMASTER_IMAGE:-ghcr.io/aznyi/harbormaster}:${HARBORMASTER_TAG:-latest}
+    container_name: harbormaster
+    restart: unless-stopped
+
+    # Published to the host's loopback interface by default. HarborMaster is
+    # unauthenticated, so change HARBORMASTER_BIND only behind an
+    # authenticating reverse proxy.
+    ports:
+      - "${HARBORMASTER_BIND:-127.0.0.1}:${HARBORMASTER_PORT:-8080}:8080"
+
+    # Redundant with the image's own USER, and deliberately so: it makes the
+    # non-root guarantee visible here and survives a base-image change.
+    user: "65532:65532"
+
+    environment:
+      HARBORMASTER_HTTP_ADDR: 0.0.0.0:8080
+      HARBORMASTER_DB_PATH: /var/lib/harbormaster/harbormaster.db
+      HARBORMASTER_DOCKER_HOST: unix:///var/run/docker.sock
+      HARBORMASTER_LOG_LEVEL: ${HARBORMASTER_LOG_LEVEL:-info}
+      HARBORMASTER_LOG_FORMAT: ${HARBORMASTER_LOG_FORMAT:-json}
+
+    volumes:
+      # See the warning above: `:ro` does not make the Docker API read-only.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The SQLite database. A named volume survives container replacement,
+      # which is how upgrades preserve history.
+      - harbormaster-data:/var/lib/harbormaster
+      # A small writable /tmp, since the root filesystem is read-only.
+      #
+      # The Compose Specification's tmpfs mount has no noexec/nosuid option, so
+      # this is size-capped only. The `docker run` form in the README adds
+      # `noexec,nosuid` on top; use that if you need them enforced.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216 # 16 MiB
+
+    # The container runs as UID 65532, which needs the host's docker group to
+    # read the socket. Find the GID with:
+    #   stat -c '%g' /var/run/docker.sock
+    # and set HARBORMASTER_DOCKER_GID in .env. 999 is a common default but is
+    # not portable — check rather than assume.
+    group_add:
+      - "${HARBORMASTER_DOCKER_GID:-999}"
+
+    # Hardening. Nothing here needs to write outside the volume and /tmp, gain
+    # a capability, or escalate privileges.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # The health check is baked into the image (`harbormaster healthcheck`), so
+    # there is nothing to define here. It exits 0 for both healthy and degraded:
+    # an unreachable Docker socket is a state to report, not a restart loop.
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  harbormaster-data:

@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default; no job here needs to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend (format, vet, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      # The race detector needs cgo, so it is enabled for this step only. The
+      # shipped binary is still built with CGO_ENABLED=0.
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+        env:
+          CGO_ENABLED: "1"
+
+  frontend:
+    name: Frontend (test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    name: Build binary with embedded frontend
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/Aznyi/HarborMaster/internal/version.version=${GITHUB_REF_NAME} \
+              -X github.com/Aznyi/HarborMaster/internal/version.commit=${GITHUB_SHA::7} \
+              -X github.com/Aznyi/HarborMaster/internal/version.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o bin/harbormaster ./cmd/harbormaster
+
+      - name: Smoke-test the binary
+        run: |
+          ./bin/harbormaster &
+          server_pid=$!
+          # Poll rather than sleep a fixed amount, so a slow runner is not a flake.
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "Health:"
+          curl -fsS http://127.0.0.1:8080/api/v1/health
+          echo
+          echo "Version:"
+          curl -fsS http://127.0.0.1:8080/api/v1/version
+          echo
+          # The SPA shell must be served from the embedded bundle.
+          curl -fsS http://127.0.0.1:8080/ | grep -q "HarborMaster"
+
+          # The native health check must succeed against a running server that
+          # has no Docker access, i.e. the degraded state.
+          echo "Healthcheck:"
+          ./bin/harbormaster healthcheck
+
+          # Subcommand routing.
+          ./bin/harbormaster version >/dev/null
+          if ./bin/harbormaster not-a-command >/dev/null 2>&1; then
+            echo "an unknown subcommand must exit nonzero" >&2
+            exit 1
+          fi
+
+          kill "$server_pid"
+
+          # With the server stopped the probe must fail, not hang or pass.
+          if ./bin/harbormaster healthcheck; then
+            echo "healthcheck must exit nonzero when the server is down" >&2
+            exit 1
+          fi
+        env:
+          HARBORMASTER_DB_PATH: ./ci-data/harbormaster.db
+
+  docker:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        # Build only; nothing is pushed from CI.
+        run: docker build -t harbormaster:ci .

@@ -1,0 +1,289 @@
+openapi: 3.1.0
+
+info:
+  title: HarborMaster API
+  version: 0.1.0
+  summary: Safety-first container lifecycle manager.
+  description: |
+    HarborMaster's REST API.
+
+    **This API is read-only.** It observes the Docker Engine's reachability and
+    reports build metadata. It cannot pull images, create, update, restart, or
+    remove containers, and it exposes no command-execution endpoint. Those
+    capabilities are not implemented yet, and will be added to this document at
+    the same time they are added to the server.
+
+    ### Operating the API safely
+
+    HarborMaster talks to the Docker socket, which is a privileged interface:
+    anything able to reach it can control every container on the host. The
+    server therefore binds to `127.0.0.1` by default. Expose it beyond loopback
+    only behind an authenticating reverse proxy.
+
+    ### Authentication
+
+    None yet. The API is unauthenticated and is expected to be reachable only
+    from loopback or a trusted proxy. Authentication is planned and will be
+    documented here when it lands.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development server (default bind address)
+  - url: http://localhost:8080
+    description: Container deployment published to the host
+
+tags:
+  - name: System
+    description: Liveness, readiness, and build metadata.
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [System]
+      summary: Report dependency reachability
+      operationId: getHealth
+      description: |
+        Probes every dependency and returns a report.
+
+        This endpoint always responds `200` when the server is running. The
+        endpoint answering at all is the liveness signal; the body carries the
+        readiness detail. A client must branch on `status`, not on the HTTP
+        code, so it can tell "HarborMaster is down" (no response) apart from
+        "Docker is down" (`status: degraded`).
+      responses:
+        "200":
+          description: The health report. Check `status` for the verdict.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+              examples:
+                healthy:
+                  summary: All dependencies reachable
+                  value:
+                    status: healthy
+                    database: { status: up, latencyMs: 1 }
+                    docker: { status: up, latencyMs: 4, version: "1.51" }
+                    checkedAt: "2026-08-03T09:20:11.482Z"
+                    uptimeSeconds: 3600
+                degraded:
+                  summary: Docker socket unreachable, API still serving
+                  value:
+                    status: degraded
+                    database: { status: up, latencyMs: 1 }
+                    docker:
+                      status: down
+                      detail: docker engine unreachable
+                      latencyMs: 10000
+                    checkedAt: "2026-08-03T09:20:11.482Z"
+                    uptimeSeconds: 3600
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/version:
+    get:
+      tags: [System]
+      summary: Report build metadata
+      operationId: getVersion
+      description: |
+        Returns the running binary's version, commit, build date, Go version,
+        and platform. Unstamped development builds report `dev` and `unknown`
+        rather than omitting the fields.
+      responses:
+        "200":
+          description: Build metadata.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionInfo"
+              examples:
+                release:
+                  summary: A stamped release build
+                  value:
+                    version: v0.1.0
+                    commit: 9f2c1ab
+                    buildDate: "2026-08-03T08:00:00Z"
+                    goVersion: go1.26.5
+                    platform: linux/amd64
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+components:
+  headers:
+    RequestId:
+      description: |
+        Server-generated correlation ID, also present in the access log. A
+        client-supplied `X-Request-ID` is ignored rather than echoed.
+      schema:
+        type: string
+
+  responses:
+    NotFound:
+      description: No such endpoint.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: not_found, message: endpoint not found }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    MethodNotAllowed:
+      description: |
+        The path exists but the method is not permitted. Every endpoint is
+        currently read-only.
+      headers:
+        Allow:
+          description: Permitted methods.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: method_not_allowed, message: method not allowed }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    PayloadTooLarge:
+      description: The request body exceeded the configured limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: payload_too_large, message: request body too large }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    InternalError:
+      description: |
+        An unexpected server-side failure. The message is deliberately generic:
+        the API never returns a stack trace or an internal error chain. Use
+        `requestId` to find the full detail in the server log.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: internal_error, message: internal error }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+  schemas:
+    ComponentStatus:
+      type: string
+      description: Reachability of a single dependency.
+      enum: [up, down]
+
+    Component:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/ComponentStatus"
+        detail:
+          type: string
+          description: |
+            Short, operator-safe explanation when the dependency is down. Never
+            carries a raw error chain, a socket path, or credentials.
+          examples: [docker engine unreachable]
+        latencyMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Round-trip time of the probe.
+        version:
+          type: string
+          description: The dependency's reported version, when available.
+          examples: ["1.51"]
+
+    HealthReport:
+      type: object
+      required: [status, database, docker, checkedAt, uptimeSeconds]
+      properties:
+        status:
+          type: string
+          description: |
+            Overall verdict.
+
+            * `healthy` — every dependency is up.
+            * `degraded` — the Docker Engine is unreachable. HarborMaster still
+              serves; the UI renders a disconnected state.
+            * `unhealthy` — the database is unreachable. Nothing else can work.
+          enum: [healthy, degraded, unhealthy]
+        database:
+          $ref: "#/components/schemas/Component"
+        docker:
+          $ref: "#/components/schemas/Component"
+        checkedAt:
+          type: string
+          format: date-time
+          description: When the probes ran, in UTC.
+        uptimeSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Seconds since the process started.
+
+    VersionInfo:
+      type: object
+      required: [version, commit, buildDate, goVersion, platform]
+      properties:
+        version:
+          type: string
+          description: Release version, or `dev` for an unstamped build.
+          examples: [v0.1.0]
+        commit:
+          type: string
+          description: Source commit, or `unknown`.
+          examples: [9f2c1ab]
+        buildDate:
+          type: string
+          description: Build timestamp, or `unknown`.
+          examples: ["2026-08-03T08:00:00Z"]
+        goVersion:
+          type: string
+          examples: [go1.26.5]
+        platform:
+          type: string
+          description: Target as `os/arch`.
+          examples: [linux/amd64]
+
+    ErrorCode:
+      type: string
+      description: |
+        Stable machine-readable identifier. Client logic must branch on this
+        rather than on `message`, whose prose may change.
+      enum:
+        - not_found
+        - method_not_allowed
+        - payload_too_large
+        - internal_error
+
+    ErrorResponse:
+      type: object
+      description: The envelope returned by every non-2xx JSON response.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              description: |
+                Short human-readable summary, safe to display. Never contains a
+                stack trace, a filesystem path, or an internal error chain.
+        requestId:
+          type: string
+          description: Correlates this response with the server log.

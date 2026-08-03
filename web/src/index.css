@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+/*
+ * HarborMaster theme.
+ *
+ * Semantic tokens rather than raw palette values, defined once for light and
+ * dark so components never branch on theme.
+ */
+@theme {
+  --color-surface: oklch(99% 0.004 250);
+  --color-surface-raised: oklch(100% 0 0);
+  --color-surface-sunken: oklch(96.5% 0.006 250);
+  --color-border-subtle: oklch(91% 0.008 250);
+  --color-content: oklch(24% 0.02 255);
+  --color-content-muted: oklch(52% 0.02 255);
+
+  --color-accent: oklch(55% 0.14 245);
+  --color-accent-soft: oklch(95% 0.03 245);
+
+  --color-ok: oklch(58% 0.14 155);
+  --color-ok-soft: oklch(95% 0.04 155);
+  --color-warn: oklch(70% 0.15 75);
+  --color-warn-soft: oklch(96% 0.05 85);
+  --color-danger: oklch(58% 0.19 22);
+  --color-danger-soft: oklch(96% 0.03 22);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-surface: oklch(19% 0.015 255);
+    --color-surface-raised: oklch(23% 0.017 255);
+    --color-surface-sunken: oklch(16% 0.014 255);
+    --color-border-subtle: oklch(31% 0.018 255);
+    --color-content: oklch(95% 0.006 250);
+    --color-content-muted: oklch(70% 0.014 250);
+
+    --color-accent: oklch(72% 0.13 245);
+    --color-accent-soft: oklch(29% 0.05 245);
+
+    --color-ok: oklch(72% 0.14 155);
+    --color-ok-soft: oklch(28% 0.05 155);
+    --color-warn: oklch(78% 0.14 80);
+    --color-warn-soft: oklch(30% 0.05 80);
+    --color-danger: oklch(68% 0.17 22);
+    --color-danger-soft: oklch(29% 0.07 22);
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+
+  body {
+    background-color: var(--color-surface);
+    color: var(--color-content);
+    -webkit-font-smoothing: antialiased;
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+  }
+
+  /* A visible focus ring is a requirement, not a preference. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

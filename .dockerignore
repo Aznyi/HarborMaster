@@ -1,0 +1,44 @@
+# Keep the build context small and reproducible.
+#
+# Without this file the context would include web/node_modules and the whole
+# .git history, which is slow to transfer and — worse — would let host-built
+# artefacts leak into the image instead of the ones the Dockerfile builds.
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Host build output. The image builds the frontend itself; shipping a locally
+# built web/dist would make the image depend on whoever ran `make build` last.
+bin/
+web/dist/
+web/node_modules/
+node_modules/
+
+# Local runtime data — never belongs in an image layer
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+coverage.out
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Documentation and tooling that does not affect the binary
+*.md
+!README.md
+LICENSE
+Makefile
+deployments/
+api/
+.editorconfig
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
