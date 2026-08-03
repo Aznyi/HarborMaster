@@ -22,7 +22,54 @@ const (
 	CodeMethodNotAllwd  ErrorCode = "method_not_allowed"
 	CodePayloadTooLarge ErrorCode = "payload_too_large"
 	CodeInternal        ErrorCode = "internal_error"
+	// CodeInvalidRequest marks a malformed query parameter.
+	CodeInvalidRequest ErrorCode = "invalid_request"
+	// CodeAmbiguousID marks a short ID prefix matching several resources.
+	CodeAmbiguousID ErrorCode = "ambiguous_id"
+	// CodeConflict marks a request that clashes with in-flight work, such as a
+	// refresh requested while one is already running.
+	CodeConflict ErrorCode = "conflict"
+	// CodeUnavailable marks a dependency being unreachable, such as the Docker
+	// Engine during a manual refresh.
+	CodeUnavailable ErrorCode = "service_unavailable"
+	// CodeDisabled marks a feature switched off by configuration.
+	CodeDisabled ErrorCode = "feature_disabled"
 )
+
+// Pagination describes the page a list response returned.
+type Pagination struct {
+	Page       int  `json:"page"`
+	PageSize   int  `json:"pageSize"`
+	TotalItems int  `json:"totalItems"`
+	TotalPages int  `json:"totalPages"`
+	HasNext    bool `json:"hasNext"`
+	HasPrev    bool `json:"hasPrevious"`
+}
+
+// newPagination computes the metadata for a page of results.
+func newPagination(page, pageSize, totalItems int) Pagination {
+	totalPages := 0
+	if pageSize > 0 {
+		totalPages = (totalItems + pageSize - 1) / pageSize
+	}
+	return Pagination{
+		Page:       page,
+		PageSize:   pageSize,
+		TotalItems: totalItems,
+		TotalPages: totalPages,
+		HasNext:    page < totalPages,
+		HasPrev:    page > 1,
+	}
+}
+
+// listResponse is the envelope for every paginated collection.
+//
+// A named "items" field rather than a bare array: a top-level array leaves no
+// room to add pagination or metadata later without breaking clients.
+type listResponse[T any] struct {
+	Items      []T        `json:"items"`
+	Pagination Pagination `json:"pagination"`
+}
 
 // ErrorBody describes a failure.
 type ErrorBody struct {

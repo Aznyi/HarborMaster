@@ -15,6 +15,7 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Dashboard", path: "/" },
   { label: "Containers", path: "/containers" },
+  { label: "Images", path: "/images" },
   { label: "Snapshots", path: "/snapshots" },
   { label: "Events", path: "/events" },
   { label: "Settings", path: "/settings" },
@@ -64,8 +65,7 @@ export function AppShell({
             </button>
 
             <h1 className="mr-auto text-sm font-semibold tracking-tight sm:text-base">
-              {NAV_ITEMS.find((item) => item.path === location.pathname)?.label ??
-                "HarborMaster"}
+              {pageTitle(location.pathname)}
             </h1>
 
             <ConnectivityIndicator health={health} />
@@ -86,6 +86,21 @@ export function AppShell({
       </div>
     </div>
   );
+}
+
+/**
+ * Titles the header. Nested routes such as /containers/<id> keep their parent's
+ * title rather than falling back to the product name, which would read as
+ * though the operator had navigated away from the section.
+ */
+function pageTitle(pathname: string): string {
+  const exact = NAV_ITEMS.find((item) => item.path === pathname);
+  if (exact) return exact.label;
+
+  const parent = NAV_ITEMS.find(
+    (item) => item.path !== "/" && pathname.startsWith(`${item.path}/`),
+  );
+  return parent?.label ?? "HarborMaster";
 }
 
 function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {

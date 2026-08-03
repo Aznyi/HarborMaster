@@ -2,9 +2,11 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./components/AppShell";
 import { useHealth } from "./hooks/useHealth";
+import { ContainerDetailPage } from "./pages/ContainerDetail";
 import { Containers } from "./pages/Containers";
 import { Dashboard } from "./pages/Dashboard";
 import { Events } from "./pages/Events";
+import { Images } from "./pages/Images";
 import { Settings } from "./pages/Settings";
 import { Snapshots } from "./pages/Snapshots";
 
@@ -21,6 +23,8 @@ export function App() {
       <Routes>
         <Route path="/" element={<Dashboard health={health} />} />
         <Route path="/containers" element={<Containers />} />
+        <Route path="/containers/:id" element={<ContainerDetailPage />} />
+        <Route path="/images" element={<Images />} />
         <Route path="/snapshots" element={<Snapshots />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />

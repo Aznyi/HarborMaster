@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/docker/docker/client"
+
+	"github.com/Aznyi/HarborMaster/internal/domain"
 )
 
 // ErrUnreachable reports that the Docker Engine did not answer. It is the only
@@ -42,10 +44,14 @@ type Pinger interface {
 	Ping(ctx context.Context) (Info, error)
 }
 
-// Client is a Pinger backed by the official Engine SDK.
+// Client is a Runtime backed by the official Engine SDK.
 type Client struct {
 	api     *client.Client
 	timeout time.Duration
+	// masker classifies environment variables and log options during
+	// normalization, so values are masked at the adapter boundary rather than
+	// somewhere further out where one missed call site would leak them.
+	masker *domain.Masker
 }
 
 // Options configures a Client.
@@ -54,6 +60,10 @@ type Options struct {
 	Host string
 	// Timeout bounds a single Engine call.
 	Timeout time.Duration
+	// Masker classifies secret-bearing names. Defaults to the built-in
+	// patterns; a nil masker would mask nothing, which must never be the
+	// accidental outcome of forgetting to set this.
+	Masker *domain.Masker
 }
 
 // New builds a Client for the configured endpoint.
@@ -64,6 +74,9 @@ type Options struct {
 func New(opts Options) (*Client, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 10 * time.Second
+	}
+	if opts.Masker == nil {
+		opts.Masker = domain.NewDefaultMasker()
 	}
 
 	// WithAPIVersionNegotiation lets HarborMaster talk to older daemons instead
@@ -78,7 +91,7 @@ func New(opts Options) (*Client, error) {
 		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
 	}
 
-	return &Client{api: api, timeout: opts.Timeout}, nil
+	return &Client{api: api, timeout: opts.Timeout, masker: opts.Masker}, nil
 }
 
 // Ping verifies the Engine is reachable.

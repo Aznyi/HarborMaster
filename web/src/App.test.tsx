@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { NAV_ITEMS } from "./components/AppShell";
-import type { HealthReport, VersionInfo } from "./api/types";
+import type { HealthReport } from "./api/types";
+import { stubApi as stubAllEndpoints } from "./test/fixtures";
 
 const healthyReport: HealthReport = {
   status: "healthy",
@@ -23,36 +24,20 @@ const degradedReport: HealthReport = {
   uptimeSeconds: 120,
 };
 
-const buildInfo: VersionInfo = {
-  version: "v0.1.0",
-  commit: "9f2c1ab",
-  buildDate: "2026-08-03T08:00:00Z",
-  goVersion: "go1.26.5",
-  platform: "linux/amd64",
-};
 
-/** Routes fetch calls to canned responses per endpoint. */
-function stubApi(health: HealthReport | Error, version: VersionInfo = buildInfo) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/health")) {
-        if (health instanceof Error) return Promise.reject(health);
-        return Promise.resolve(
-          new Response(JSON.stringify(health), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify(version), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }),
+/**
+ * Routes fetch calls to canned responses per endpoint.
+ *
+ * Delegates to the shared fixture so this suite and the inventory suite cannot
+ * drift apart on what the API returns. `health` is the only knob these shell
+ * tests need; when it is an error the inventory is failed too, because a
+ * backend that cannot answer /health cannot answer /inventory either.
+ */
+function stubApi(health: HealthReport | Error) {
+  stubAllEndpoints(
+    health instanceof Error
+      ? { health, inventory: health }
+      : { health },
   );
 }
 
@@ -178,9 +163,10 @@ describe("App shell", () => {
 
   // Placeholder rows in an operations tool are indistinguishable from real
   // data at a glance, so pages without an endpoint must show nothing.
+  // Containers and Images now have endpoints; Snapshots and Events do not.
   it("shows no placeholder data on pages whose endpoints do not exist yet", async () => {
     stubApi(healthyReport);
-    renderApp("/containers");
+    renderApp("/snapshots");
 
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.queryByRole("row")).not.toBeInTheDocument();
@@ -219,7 +205,7 @@ describe("App shell", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /system status/i }),
+        screen.getByRole("heading", { name: /^inventory$/i }),
       ).toBeInTheDocument(),
     );
   });

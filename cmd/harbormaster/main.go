@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -163,6 +164,10 @@ func run() error {
 	dockerClient, err := docker.New(docker.Options{
 		Host:    cfg.Docker.Host,
 		Timeout: cfg.Docker.Timeout,
+		// Built from configuration so an operator can extend the patterns, and
+		// applied inside the adapter so values are masked at the boundary
+		// rather than somewhere further out.
+		Masker: cfg.Masker(),
 	})
 	if err != nil {
 		return err
@@ -187,11 +192,36 @@ func run() error {
 		return fmt.Errorf("load embedded frontend: %w", err)
 	}
 
+	inventory := service.NewInventoryService(service.InventoryOptions{
+		Runtime:    dockerClient,
+		Inventory:  db.Inventory,
+		Containers: db.Containers,
+		Logger:     logger,
+		Config:     cfg.Inventory,
+	})
+
+	// The refresh loop runs in its own goroutine, so a sweep of a large host
+	// never sits in front of an HTTP handler. It stops when ctx is cancelled,
+	// which is the same signal that shuts the server down.
+	var inventoryDone sync.WaitGroup
+	inventoryDone.Add(1)
+	go func() {
+		defer inventoryDone.Done()
+		inventory.Run(ctx)
+	}()
+	defer inventoryDone.Wait()
+
 	server := api.NewServer(api.Options{
-		Health: health,
-		Logger: logger,
-		Config: cfg.Server,
-		Assets: assets,
+		Health:     health,
+		Inventory:  inventory,
+		Containers: db.Containers,
+		Warnings:   db.Inventory,
+		Images:     db.Images,
+		Networks:   db.Networks,
+		Volumes:    db.Volumes,
+		Logger:     logger,
+		Config:     cfg.Server,
+		Assets:     assets,
 	})
 
 	recordEvent(ctx, logger, db, domain.Event{

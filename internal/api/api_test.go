@@ -121,7 +121,7 @@ func TestVersionEndpoint(t *testing.T) {
 func TestUnknownAPIPathReturnsJSONNotHTML(t *testing.T) {
 	srv := newTestServer(t, &fakeHealth{})
 
-	rec := do(t, srv, http.MethodGet, APIPrefix+"/containers", nil)
+	rec := do(t, srv, http.MethodGet, APIPrefix+"/no-such-collection", nil)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

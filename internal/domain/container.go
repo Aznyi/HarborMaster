@@ -2,10 +2,14 @@ package domain
 
 import "time"
 
-// ContainerState is the lifecycle state reported by the Docker Engine.
+// ContainerState is the normalized lifecycle state of a container.
+//
+// The vocabulary is fixed and closed. An unrecognised runtime state maps to
+// StateUnknown rather than passing through, so nothing downstream -- SQL
+// filters, UI badges, API consumers -- ever has to handle an open-ended set.
 type ContainerState string
 
-// Container states as reported by the Engine.
+// Container states.
 const (
 	StateCreated    ContainerState = "created"
 	StateRunning    ContainerState = "running"
@@ -17,11 +21,18 @@ const (
 	StateUnknown    ContainerState = "unknown"
 )
 
-// HealthState is the Docker healthcheck verdict for a container. Containers
-// without a healthcheck report HealthNone.
+// ContainerStates lists every state, in lifecycle order. Used to validate API
+// filters and to render the UI's state selector.
+var ContainerStates = []ContainerState{
+	StateCreated, StateRunning, StatePaused, StateRestarting,
+	StateRemoving, StateExited, StateDead, StateUnknown,
+}
+
+// HealthState is the normalized health verdict for a container.
+// A container with no healthcheck reports HealthNone.
 type HealthState string
 
-// Health states as reported by the Engine.
+// Health states.
 const (
 	HealthNone      HealthState = "none"
 	HealthStarting  HealthState = "starting"
@@ -29,49 +40,11 @@ const (
 	HealthUnhealthy HealthState = "unhealthy"
 )
 
-// Port is a published port mapping.
-type Port struct {
-	// HostIP is the interface the port is published on; empty when unpublished.
-	HostIP string `json:"hostIp,omitempty"`
-	// HostPort is 0 when the port is exposed but not published.
-	HostPort      uint16 `json:"hostPort,omitempty"`
-	ContainerPort uint16 `json:"containerPort"`
-	Protocol      string `json:"protocol"`
-}
+// HealthStates lists every health state, for filter validation.
+var HealthStates = []HealthState{HealthNone, HealthStarting, HealthHealthy, HealthUnhealthy}
 
-// Mount is a bind mount or volume attached to a container.
-type Mount struct {
-	Type        string `json:"type"`
-	Source      string `json:"source,omitempty"`
-	Destination string `json:"destination"`
-	ReadOnly    bool   `json:"readOnly"`
-}
-
-// Container is HarborMaster's view of a Docker container.
-//
-// It is intentionally a subset of the Engine's inspect payload: only fields
-// HarborMaster reasons about are modelled, so the Engine's schema does not leak
-// into the API or the database.
-type Container struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Image       string            `json:"image"`
-	ImageID     string            `json:"imageId"`
-	State       ContainerState    `json:"state"`
-	Health      HealthState       `json:"health"`
-	Status      string            `json:"status"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	StartedAt   *time.Time        `json:"startedAt,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Ports       []Port            `json:"ports,omitempty"`
-	Networks    []string          `json:"networks,omitempty"`
-	Mounts      []Mount           `json:"mounts,omitempty"`
-	Managed     bool              `json:"managed"`
-	ComposeName string            `json:"composeProject,omitempty"`
-}
-
-// ParseContainerState maps an Engine state string onto a known state,
-// falling back to StateUnknown rather than trusting arbitrary input.
+// ParseContainerState maps a runtime state string onto a known state, falling
+// back to StateUnknown rather than trusting arbitrary input.
 func ParseContainerState(s string) ContainerState {
 	switch ContainerState(s) {
 	case StateCreated, StateRunning, StatePaused, StateRestarting,
@@ -82,7 +55,7 @@ func ParseContainerState(s string) ContainerState {
 	}
 }
 
-// ParseHealthState maps an Engine health string onto a known health state.
+// ParseHealthState maps a runtime health string onto a known health state.
 // An empty string means the container declares no healthcheck.
 func ParseHealthState(s string) HealthState {
 	switch HealthState(s) {
@@ -91,4 +64,136 @@ func ParseHealthState(s string) HealthState {
 	default:
 		return HealthNone
 	}
+}
+
+// ValidContainerState reports whether s names a known state.
+func ValidContainerState(s string) bool {
+	for _, state := range ContainerStates {
+		if string(state) == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidHealthState reports whether s names a known health state.
+func ValidHealthState(s string) bool {
+	for _, health := range HealthStates {
+		if string(health) == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ContainerSummary is the list-row projection of a container.
+//
+// It carries what the containers table and the dashboard need, and nothing
+// else: the expensive normalized configuration lives in ContainerDetail and is
+// loaded only when a single container is requested.
+type ContainerSummary struct {
+	HostID  string `json:"hostId"`
+	ID      string `json:"id"`
+	ShortID string `json:"shortId"`
+	Name    string `json:"name"`
+
+	Image   ImageRef `json:"image"`
+	ImageID string   `json:"imageId,omitempty"`
+
+	State  ContainerState `json:"state"`
+	Status string         `json:"status,omitempty"`
+	Health HealthState    `json:"health"`
+
+	CreatedAt  time.Time  `json:"createdAt"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+
+	ExitCode      *int          `json:"exitCode,omitempty"`
+	RestartCount  int           `json:"restartCount"`
+	RestartPolicy RestartPolicy `json:"restartPolicy"`
+
+	Compose      ComposeMetadata      `json:"compose"`
+	HarborMaster HarborMasterMetadata `json:"harbormaster"`
+
+	Ports []Port `json:"ports"`
+
+	// Present is false for a container that earlier refreshes saw but the most
+	// recent one did not. The row is retained rather than deleted so history
+	// and warnings survive a container being removed out from under
+	// HarborMaster.
+	Present bool `json:"present"`
+	// FirstSeenAt and LastSeenAt bound the container's observed lifetime.
+	FirstSeenAt time.Time `json:"firstSeenAt"`
+	LastSeenAt  time.Time `json:"lastSeenAt"`
+	// Generation is the inventory generation that last observed this container.
+	Generation int64 `json:"generation"`
+	// WarningCount is how many non-fatal problems the last refresh recorded.
+	WarningCount int `json:"warningCount"`
+}
+
+// ContainerDetail is the full normalized view of one container.
+//
+// The sections mirror the detail API response and the UI's tabs one-for-one,
+// so adding a field means touching one section rather than reshaping a
+// flattened struct.
+//
+// Identity fields are split across two sections by intent: the stable
+// identifiers and timestamps live in Overview, where the list view also needs
+// them, while Hostname and Domainname live in Process because they are
+// container configuration rather than identity HarborMaster assigns.
+type ContainerDetail struct {
+	Overview     ContainerSummary     `json:"overview"`
+	State        StateDetail          `json:"state"`
+	Image        *Image               `json:"image,omitempty"`
+	Process      Process              `json:"process"`
+	HealthCheck  *HealthCheck         `json:"healthCheck,omitempty"`
+	Environment  []EnvVar             `json:"environment"`
+	Labels       []Label              `json:"labels"`
+	Ports        []Port               `json:"ports"`
+	Mounts       []Mount              `json:"mounts"`
+	Networks     []NetworkAttachment  `json:"networks"`
+	Resources    Resources            `json:"resources"`
+	Security     Security             `json:"security"`
+	Logging      Logging              `json:"logging"`
+	Compose      ComposeMetadata      `json:"compose"`
+	HarborMaster HarborMasterMetadata `json:"harbormaster"`
+	Warnings     []InventoryWarning   `json:"warnings"`
+}
+
+// StateDetail is the expanded runtime state of a container.
+type StateDetail struct {
+	// State is the normalized state; RawState is what the runtime reported,
+	// kept so an unmapped value is still visible to an operator.
+	State    ContainerState `json:"state"`
+	RawState string         `json:"rawState,omitempty"`
+	Status   string         `json:"status,omitempty"`
+
+	Running    bool `json:"running"`
+	Paused     bool `json:"paused"`
+	Restarting bool `json:"restarting"`
+	Dead       bool `json:"dead"`
+	OOMKilled  bool `json:"oomKilled"`
+
+	ExitCode     *int   `json:"exitCode,omitempty"`
+	Error        string `json:"error,omitempty"`
+	RestartCount int    `json:"restartCount"`
+
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+
+	Health              HealthState      `json:"health"`
+	HealthFailingStreak int              `json:"healthFailingStreak,omitempty"`
+	HealthLog           []HealthLogEntry `json:"healthLog,omitempty"`
+}
+
+// HealthLogEntry summarises one healthcheck run.
+//
+// The probe's stdout/stderr is deliberately NOT carried. A healthcheck command
+// is arbitrary and its output routinely contains connection strings, tokens,
+// or query results. Timing and exit code answer "is it failing, and since
+// when" without turning the inventory into an exfiltration channel.
+type HealthLogEntry struct {
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	ExitCode int       `json:"exitCode"`
 }

@@ -24,6 +24,15 @@ export interface ResourceState<T> {
 export interface UseApiResourceOptions {
   /** Poll interval in milliseconds. Omit or pass 0 to fetch once. */
   pollIntervalMs?: number;
+  /**
+   * Refetch key. Changing it refetches immediately.
+   *
+   * Needed because the fetcher is held in a ref, so a new closure alone does
+   * not restart the effect -- that is what keeps polling stable across
+   * renders. A query-dependent resource (a filtered, sorted, paged list) must
+   * therefore state explicitly what it depends on.
+   */
+  key?: string;
 }
 
 /**
@@ -35,7 +44,7 @@ export interface UseApiResourceOptions {
  */
 export function useApiResource<T>(
   fetcher: (options: { signal: AbortSignal }) => Promise<T>,
-  { pollIntervalMs = 0 }: UseApiResourceOptions = {},
+  { pollIntervalMs = 0, key = "" }: UseApiResourceOptions = {},
 ): ResourceState<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -89,7 +98,7 @@ export function useApiResource<T>(
       controller.abort();
       clearInterval(timer);
     };
-  }, [pollIntervalMs, reloadToken]);
+  }, [pollIntervalMs, reloadToken, key]);
 
   return { status, data, error, refreshing, refresh };
 }

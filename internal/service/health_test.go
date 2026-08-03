@@ -51,7 +51,7 @@ func TestCheckHealthyWhenEverythingIsUp(t *testing.T) {
 func TestCheckDegradedWhenDockerIsDown(t *testing.T) {
 	svc := service.NewHealthService(service.HealthOptions{
 		DB:     fakeDB{},
-		Docker: &docker.Fake{Err: docker.ErrUnreachable},
+		Docker: &docker.Fake{PingErr: docker.ErrUnreachable},
 		Logger: discardLogger(),
 	})
 
@@ -87,7 +87,7 @@ func TestCheckUnhealthyWhenDatabaseIsDown(t *testing.T) {
 func TestCheckUnhealthyDominatesDegraded(t *testing.T) {
 	svc := service.NewHealthService(service.HealthOptions{
 		DB:     fakeDB{err: errors.New("disk failure")},
-		Docker: &docker.Fake{Err: docker.ErrUnreachable},
+		Docker: &docker.Fake{PingErr: docker.ErrUnreachable},
 		Logger: discardLogger(),
 	})
 
@@ -103,7 +103,7 @@ func TestCheckDetailDoesNotLeakInternalErrors(t *testing.T) {
 
 	svc := service.NewHealthService(service.HealthOptions{
 		DB:     fakeDB{err: errors.New("attach database /srv/secret/hm.db: locked")},
-		Docker: &docker.Fake{Err: errors.New(internal)},
+		Docker: &docker.Fake{PingErr: errors.New(internal)},
 		Logger: discardLogger(),
 	})
 
@@ -164,7 +164,7 @@ func TestCheckProbesDockerEveryCall(t *testing.T) {
 	svc.Check(context.Background())
 	svc.Check(context.Background())
 
-	if fake.Calls != 2 {
-		t.Errorf("Ping calls = %d, want 2 (the report must not be cached)", fake.Calls)
+	if fake.PingCalls != 2 {
+		t.Errorf("Ping calls = %d, want 2 (the report must not be cached)", fake.PingCalls)
 	}
 }

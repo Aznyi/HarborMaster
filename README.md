@@ -9,19 +9,22 @@ happened. The eventual goal is image updates with validation and rollback. The
 order matters — the observation and recovery machinery is built first, so that
 by the time HarborMaster can change a container it can already undo it.
 
-> **Read-only today.** HarborMaster currently inventories Docker connectivity
-> and provides the snapshot store. It cannot pull images, create, recreate,
-> update, restart, or remove containers, and it has no command-execution path.
-> See [Status](#status) for what is and is not here yet.
+> **Read-only today.** HarborMaster inventories the containers, images,
+> networks, and volumes on a Docker host and reports their normalized
+> configuration. It cannot pull images, create, recreate, update, restart, or
+> remove containers, and it has no command-execution path. See
+> [Status](#status) for what is and is not here yet.
 
 ## Contents
 
 - [Quick start](#quick-start)
 - [Deploying on Linux](#deploying-on-linux)
 - [Container image](#container-image)
+- [Inventory](#inventory)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [API](#api)
+- [Web interface](#web-interface)
 - [Development](#development)
 - [Security](#security)
 - [Status](#status)
@@ -263,11 +266,137 @@ make docker-build   # build harbormaster:dev
 make docker-smoke   # build and run deployments/smoke-test.sh against it
 ```
 
+## Inventory
+
+HarborMaster reads the local Docker host and stores a normalized picture of it.
+
+### The read-only guarantee
+
+`internal/docker` is the only package that talks to the Docker Engine, and it
+exposes exactly five operations: `Ping`, `ListContainers`, `InspectContainer`,
+`InspectImage`, `ListNetworks`, and `ListVolumes`. Every one is an observation.
+There is no method that creates, starts, stops, removes, pulls, or executes
+anything, and no accessor that hands the underlying SDK client to another
+package. Gaining the ability to mutate Docker requires editing that package,
+which makes it visible in a diff.
+
+The API has one endpoint that accepts a write method,
+`POST /api/v1/inventory/refresh`. It re-reads the host and replaces
+HarborMaster's own records. It changes nothing on the Docker host.
+
+### How a refresh works
+
+1. Ping the Engine. A failure here fails the refresh; nothing else is attempted.
+2. List every container, **including stopped ones**.
+3. Inspect each container with bounded concurrency (`INVENTORY_WORKERS`).
+4. Resolve each distinct image exactly once — a host with 200 containers on 5
+   images performs 5 image inspections, not 200.
+5. List networks and volumes for metadata.
+6. Compute the inventory checksum.
+7. Persist everything in a single transaction.
+
+Failures are graded rather than uniform. Only a failure to *list* containers
+fails a refresh. A container that vanishes between being listed and inspected
+is recorded from summary data with a `container_vanished` warning — routine
+churn on a busy host, not a fault. An image removed while a container still
+uses it produces `image_unavailable`. One unreadable container never costs you
+the other nine hundred.
+
+If a refresh fails, the previously persisted inventory stays intact and keeps
+being served. The generation number advances only when a refresh completes
+**and** commits, so a client can always tell whether what it holds is current.
+
+### Refresh triggers
+
+| Trigger | When |
+| --- | --- |
+| `startup` | Once at boot, unless `INVENTORY_REFRESH_ON_STARTUP=false` |
+| `periodic` | Every `INVENTORY_REFRESH_INTERVAL`; set to `0` to disable |
+| `manual` | The Dashboard's **Refresh inventory** button, or `POST /api/v1/inventory/refresh` |
+
+Overlapping refreshes are **refused, not queued**. A manual refresh while one
+is running returns `409` with the active refresh's start time. Queuing would
+mean three clicks became three sequential sweeps of a privileged socket.
+
+Manual refresh is **asynchronous** and returns `202`. A sweep of a thousand
+containers cannot be something an HTTP client waits on. Poll
+`GET /api/v1/inventory` and watch `inProgress` and `generation`.
+
+### Environment masking
+
+Environment variables and log-driver options whose **name** matches a
+configured pattern are masked as `********` before they leave the Docker
+adapter. The defaults are `PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `API_KEY`,
+`APIKEY`, `PRIVATE_KEY`, `CREDENTIAL`, and `AUTH`.
+
+Matching is on the name, never the value. Scanning values for things that look
+like secrets produces false positives on any long random string and false
+negatives on short passwords. The bias is towards over-masking: `AUTHOR`
+matches `AUTH` and gets masked, because a masked non-secret is an annoyance
+while a leaked secret is not recoverable.
+
+**Raw values are never written to disk.** The persisted configuration holds the
+masked form. There is no API parameter, header, or endpoint that reveals a real
+value, and no UI control to unmask one — with no authentication in front of the
+service, such a switch would be an unauthenticated secret-disclosure API.
+
+Raw values do exist in memory during a refresh, where they contribute a
+SHA-256 hash to the inventory checksum. That is what lets a rotated password
+change the checksum without the checksum containing the password.
+
+### Inventory checksum
+
+A deterministic SHA-256 over the whole inventory. Two refreshes of an unchanged
+host produce the same checksum, so a client can tell "nothing changed" from
+"changed" without diffing.
+
+**Included:** container identity, image reference and ID, normalized state,
+health, exit code, restart count and policy, Compose and HarborMaster metadata,
+ports, labels, mounts, network attachments, process configuration, healthcheck
+configuration, resources, security posture, logging configuration, and the
+environment (sensitive values as hashes). Then the sets of image IDs, network
+IDs, and volume names.
+
+**Excluded:** refresh timestamps, duration, generation, and trigger; container
+created/started/finished and first/last-seen timestamps; the volatile status
+text ("Up 3 minutes"); and healthcheck result timings. These describe the
+observation, not the thing observed.
+
+Collections whose order carries no meaning — ports, labels, capabilities,
+network aliases — are sorted before hashing. Environment order is preserved,
+because it is meaningful to some programs.
+
+This is **not** the configuration-snapshot checksum from migration `0001`, and
+the two must not be conflated: a snapshot checksum fingerprints one container's
+captured configuration for rollback; this fingerprints the whole current
+inventory for change detection.
+
+### What is stored
+
+Migration `0002_inventory.sql` adds `hosts`, `inventory_refreshes`, `images`,
+`networks`, `volumes`, `containers`, `container_config`, `container_labels`,
+`container_networks`, `container_mounts`, and `inventory_warnings`.
+
+Containers that disappear are marked absent rather than deleted, so warnings
+and observed lifetimes survive the container being removed. They are purged
+after `INVENTORY_ABSENT_RETENTION`.
+
+The redacted raw inspection payload is stored separately from the normalized
+fields and served only from `/api/v1/containers/{id}/raw`. It is genuinely
+useful for troubleshooting — it carries fields HarborMaster has not normalized
+yet — but it is **not** a faithful copy: redacted values are gone, not
+recoverable, so it cannot recreate a container exactly.
+
 ## Architecture
 
 Layers depend inward. Nothing in `domain` imports an adapter, and services
 depend on interfaces rather than concrete clients, so every layer is testable
 without a Docker daemon or a database file.
+
+Docker SDK types never leave `internal/docker`. Domain models, services,
+repositories, API handlers, OpenAPI schemas, and the frontend all speak
+HarborMaster's own types, which is what would let a second runtime adapter be
+added without touching the service or API layers.
 
 ```
 cmd/harbormaster      Composition root: config, wiring, signals, shutdown
@@ -322,6 +451,12 @@ for the full list with defaults.
 | `HARBORMASTER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Engine endpoint |
 | `HARBORMASTER_DOCKER_TIMEOUT` | `10s` | Per-call Engine timeout |
 | `HARBORMASTER_DB_PATH` | `./data/harbormaster.db` | SQLite database file |
+| `HARBORMASTER_INVENTORY_ENABLED` | `true` | Turn the inventory engine on or off |
+| `HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP` | `true` | Collect once at boot |
+| `HARBORMASTER_INVENTORY_REFRESH_INTERVAL` | `60s` | Periodic refresh; `0` disables it |
+| `HARBORMASTER_INVENTORY_WORKERS` | `8` | Concurrent inspections (1–64) |
+| `HARBORMASTER_INVENTORY_ABSENT_RETENTION` | `168h` | How long absent containers are kept |
+| `HARBORMASTER_INVENTORY_MASK_PATTERNS` | see below | Names treated as secret-bearing |
 | `HARBORMASTER_HEALTHCHECK_TIMEOUT` | `3s` | Bound on `harbormaster healthcheck` |
 | `HARBORMASTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `HARBORMASTER_LOG_FORMAT` | `json` | `json` or `text` |
@@ -333,6 +468,14 @@ named volume mounts.
 The health check derives its URL from `HARBORMASTER_HTTP_ADDR` rather than
 taking one of its own, so it cannot drift out of sync with the port the server
 actually binds. A wildcard bind is probed over loopback.
+
+`HARBORMASTER_INVENTORY_MASK_PATTERNS` defaults to
+`PASSWORD,PASSWD,SECRET,TOKEN,API_KEY,APIKEY,PRIVATE_KEY,CREDENTIAL,AUTH`.
+Setting it **replaces** that list rather than extending it, so to add a pattern
+repeat the defaults and append yours.
+
+Every value is validated at startup and the process refuses to start on a bad
+one.
 
 The default bind address is loopback so that running the bare binary never
 exposes the API to the network by accident. The container image overrides it to
@@ -351,6 +494,63 @@ The contract is [`api/openapi.yaml`](api/openapi.yaml) (OpenAPI 3.1).
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | Database and Docker reachability |
 | `GET` | `/api/v1/version` | Build metadata |
+| `GET` | `/api/v1/inventory` | Inventory and refresh status |
+| `POST` | `/api/v1/inventory/refresh` | Trigger a refresh (async, `202`) |
+| `GET` | `/api/v1/inventory/filters` | Filter vocabularies actually present |
+| `GET` | `/api/v1/containers` | Paged, filtered, sorted container list |
+| `GET` | `/api/v1/containers/{id}` | One container's normalized detail |
+| `GET` | `/api/v1/containers/{id}/raw` | Redacted raw inspection payload |
+| `GET` | `/api/v1/images` | Images with reference counts |
+| `GET` | `/api/v1/images/{id}` | One image |
+| `GET` | `/api/v1/networks` | Networks |
+| `GET` | `/api/v1/volumes` | Volumes |
+
+Every path except the refresh returns `405` for any write method.
+
+### Examples
+
+```sh
+# Inventory status
+curl -s http://127.0.0.1:8080/api/v1/inventory | jq '{state, generation, counts}'
+
+# Trigger a refresh; returns 202 immediately
+curl -s -X POST http://127.0.0.1:8080/api/v1/inventory/refresh
+
+# Unhealthy containers in one Compose project, newest first
+curl -s 'http://127.0.0.1:8080/api/v1/containers?health=unhealthy&project=shop&sort=created&direction=desc'
+
+# Containers carrying a label
+curl -s 'http://127.0.0.1:8080/api/v1/containers?labelKey=tier&labelValue=frontend'
+
+# One container by short ID
+curl -s http://127.0.0.1:8080/api/v1/containers/abcdef012345 | jq '.security'
+
+# Environment, showing that secrets are masked
+curl -s http://127.0.0.1:8080/api/v1/containers/abcdef012345 | jq '.environment'
+```
+
+List responses carry an `items` array and a `pagination` object:
+
+```json
+{
+  "items": [ ... ],
+  "pagination": {
+    "page": 2, "pageSize": 25, "totalItems": 57,
+    "totalPages": 3, "hasNext": true, "hasPrevious": true
+  }
+}
+```
+
+Page size is capped at 200 and out-of-range values are **rejected with `400`**
+rather than clamped: silently serving page 1 to a client that asked for page −3
+hides a bug in the caller.
+
+Sort fields are validated against a fixed allowlist. Nothing from a query string
+is ever interpolated into SQL.
+
+Status codes worth knowing: `400` invalid query parameter, `404` container not
+found, `409` ambiguous ID prefix **or** refresh already running, `503` Docker
+unreachable or inventory disabled.
 
 `GET /api/v1/health` always returns `200` while the server is running. The
 endpoint answering at all is the liveness signal; the body carries readiness:
@@ -383,6 +583,39 @@ Errors use a stable envelope. Branch on `error.code`, not on the prose:
 `requestId` correlates the response with the server log, which holds the
 detail the API deliberately withholds.
 
+## Web interface
+
+Five sections, served from the binary.
+
+**Dashboard** — Docker and database connectivity, refresh state, generation,
+last successful refresh and its duration, container counts (total, running,
+stopped, paused, unhealthy), catalog counts (images, networks, volumes), and
+the warnings from the last refresh. The **Refresh inventory** button disables
+itself while a refresh runs, reports whether the refresh started, conflicted,
+or was refused because Docker is unreachable, and reloads the metrics when the
+generation advances.
+
+**Containers** — a sortable table with server-side pagination, search, and
+filters for state, health, Compose project, and image. Filters and sorting are
+sent to the API; the browser never holds more than one page, which is why no
+virtualisation is needed. Rows link to the detail view.
+
+**Container detail** — tabs for Overview, Configuration, Environment, Mounts,
+Networks, Ports, Resources, Security, Labels, Compose, and Raw inspection.
+Sensitive environment values render as `********` with a "masked" marker and
+there is no control to reveal them. The raw payload is fetched only when its
+tab is opened, and is redacted server-side.
+
+**Images** — repository tags, digests, creation time, size, platform, and how
+many containers reference each image.
+
+**Snapshots** and **Events** remain explicit empty states: their endpoints do
+not exist yet, and placeholder rows in an operations tool are indistinguishable
+from real data at a glance.
+
+Every view has explicit loading, empty, disconnected, and error states, and
+none of them displays invented data.
+
 ## Development
 
 ```sh
@@ -400,11 +633,22 @@ make compose-config # validate both Compose files
 
 Go tests use a real SQLite file in `t.TempDir()` rather than a mock, so
 migrations, constraints, and the text time encoding are all exercised. The
-Docker adapter is faked through the `docker.Pinger` interface, so no test
-requires a running daemon.
+Docker adapter is faked through the `docker.Runtime` interface, so no test
+requires a running daemon — which matters because Docker is frequently absent
+from CI and developer machines.
+
+Normalization is tested in-package against real Docker SDK structs, since that
+is the boundary being converted. Everything above the adapter is tested against
+`docker.Fake`, which models the awkward cases deliberately: a container that
+vanishes mid-refresh, an image that cannot be resolved, a daemon that is down.
+
+A synthetic 1,000-container inventory test exercises persistence and paged
+queries at the stated design target.
 
 Frontend tests run under Vitest with Testing Library, asserting on roles and
-accessible names rather than class names.
+accessible names rather than class names. Filter, sort, and pagination tests
+assert on the **request URL the UI produced**, which is how they verify the
+work happens on the server rather than in the browser.
 
 ## Security
 
@@ -412,9 +656,16 @@ The Docker socket is a privileged interface: anything able to reach it can
 control every container on the host, which in most configurations is equivalent
 to root. HarborMaster is built accordingly.
 
-- **Read-only by construction.** `internal/docker` exposes only `Ping`. There
-  is no code path in this build that mutates a container, and no shell or
-  command execution anywhere in the codebase.
+- **Read-only by construction.** `internal/docker` exposes only observations:
+  `Ping`, `ListContainers`, `InspectContainer`, `InspectImage`, `ListNetworks`,
+  `ListVolumes`. No code path in this build mutates a container, and there is no
+  shell or command execution anywhere in the codebase. Docker SDK types never
+  leave that package.
+- **Secrets are masked at the adapter boundary.** Environment values and
+  log-driver options matching the configured name patterns are replaced before
+  they leave `internal/docker`, so no downstream call site can leak one by
+  forgetting to mask. Raw values are never persisted, never logged, never in an
+  API response, and there is no parameter or UI control that reveals them.
 - **Loopback by default.** The bare binary binds to `127.0.0.1`, and Compose
   publishes to `127.0.0.1` on the host. The server logs a warning if you bind
   it wider.
@@ -439,10 +690,29 @@ to root. HarborMaster is built accordingly.
   server timeouts are bounded, so a slow or hostile client cannot hold
   connections open indefinitely.
 
-### Not yet present
+### Read this before deploying
 
-HarborMaster has **no authentication or authorization**. Do not expose it
-beyond loopback without putting an authenticating reverse proxy in front of it.
+Four statements, all of them true today:
+
+1. **HarborMaster does not update containers.** It observes them. There is no
+   image pull, no recreation, no restart, no rollback, and no exec.
+2. **Docker socket access remains highly privileged despite HarborMaster's
+   read-only behaviour.** The application only reads, but the socket it holds
+   could do anything. Mounting it `:ro` restricts the socket *file*, not the
+   Docker *API*. Treat access to this service as equivalent to root on the host.
+3. **Authentication is not implemented.** Anyone who can reach the port can read
+   your entire container inventory — image references, mounts, network layout,
+   labels, and the *names* of every environment variable.
+4. **Keep it on loopback**, or behind a trusted reverse proxy with access
+   controls. Every deployment example in this README binds to `127.0.0.1` for
+   this reason.
+
+On masking specifically: environment values are masked in the API and the UI,
+and raw values are not persisted. That is a meaningful reduction in exposure,
+not a complete one — variable *names* are still disclosed, and names alone often
+reveal which services and providers a host talks to. Configuration persistence
+warrants continued security review as HarborMaster grows, particularly when a
+future phase needs real values to recreate a container.
 
 If you find a security problem, please open a private security advisory rather
 than a public issue.
@@ -451,29 +721,40 @@ than a public issue.
 
 ### What works today
 
+- **Read-only Docker inventory**: every container in every state, normalized
+  image metadata, runtime configuration, ports, mounts, networks, resources,
+  security posture, logging, and Compose provenance
+- **Refresh lifecycle**: at startup, on an interval, or on demand; bounded
+  concurrency, per-refresh image caching, resilient per-container failure
+  handling, and atomic persistence
+- **Inventory checksum and generation** for change detection
+- **Environment masking** by configurable name pattern, applied at the adapter
+  boundary and never reversible through the API or UI
+- **REST API**: inventory status and refresh, containers with server-side
+  filtering, sorting and pagination, container detail, redacted raw inspection,
+  images, networks, volumes
+- **Web interface**: populated Dashboard, Containers table, container detail
+  with eleven sections, and Images
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
-- Docker Engine reachability reporting, degrading rather than failing when the
-  socket is absent
-- SQLite storage with embedded migrations, and append-only snapshot and event
-  repositories
-- Responsive web interface, embedded in the binary
-- Hardened container image on distroless, with a native `harbormaster
-  healthcheck` command
-- Multi-platform publishing to GHCR with build provenance and an SBOM
-- Hardened Compose and `docker run` deployments, with container smoke tests
+- SQLite storage with embedded migrations
+- Hardened distroless container image with a native `harbormaster healthcheck`
+  command, multi-platform GHCR publishing with provenance and an SBOM, and
+  hardened Compose and `docker run` deployments
 
 ### What is not built yet
 
-- Container inventory endpoints — the domain model exists, but nothing
-  populates it
-- Snapshot capture and comparison — storage and repositories are in place, but
-  no service writes a snapshot
-- Endpoints for listing snapshots and events
+- Configuration snapshots and drift detection — the snapshot store exists from
+  the earlier phase, but no service captures one. Snapshots and the current
+  inventory are separate concepts and remain separate.
+- Docker event streaming; the inventory is polled, not subscribed
 - Image update checks, image pulls, and container recreation
+- Container start, stop, restart, and removal
 - Health validation with automatic rollback, and deployment history
 - Notifications
 - Authentication and authorization
+- Multi-host management — the schema is keyed by host, but exactly one host row
+  exists
 
 The order is deliberate. The observation and recovery machinery comes first, so
 that by the time HarborMaster can change a container it can already undo it.

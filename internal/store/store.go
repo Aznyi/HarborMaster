@@ -23,6 +23,15 @@ type DB struct {
 	sql       *sql.DB
 	Snapshots *SnapshotRepository
 	Events    *EventRepository
+
+	// Inventory repositories. Snapshots above and Inventory here are different
+	// concepts: a snapshot is an immutable point-in-time capture, while the
+	// inventory is the current observed state, replaced by each refresh.
+	Inventory  *InventoryRepository
+	Containers *ContainerRepository
+	Images     *ImageRepository
+	Networks   *NetworkRepository
+	Volumes    *VolumeRepository
 }
 
 // Open opens (creating if necessary) the SQLite database at path, applies the
@@ -58,9 +67,14 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 
 	return &DB{
-		sql:       sqlDB,
-		Snapshots: &SnapshotRepository{db: sqlDB},
-		Events:    &EventRepository{db: sqlDB},
+		sql:        sqlDB,
+		Snapshots:  &SnapshotRepository{db: sqlDB},
+		Events:     &EventRepository{db: sqlDB},
+		Inventory:  &InventoryRepository{db: sqlDB},
+		Containers: &ContainerRepository{db: sqlDB},
+		Images:     &ImageRepository{db: sqlDB},
+		Networks:   &NetworkRepository{db: sqlDB},
+		Volumes:    &VolumeRepository{db: sqlDB},
 	}, nil
 }
 

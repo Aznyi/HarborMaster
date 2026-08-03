@@ -2,16 +2,22 @@ openapi: 3.1.0
 
 info:
   title: HarborMaster API
-  version: 0.1.0
+  version: 0.2.0
   summary: Safety-first container lifecycle manager.
   description: |
     HarborMaster's REST API.
 
-    **This API is read-only.** It observes the Docker Engine's reachability and
-    reports build metadata. It cannot pull images, create, update, restart, or
-    remove containers, and it exposes no command-execution endpoint. Those
-    capabilities are not implemented yet, and will be added to this document at
-    the same time they are added to the server.
+    **This API is read-only with respect to Docker.** It inventories containers,
+    images, networks, and volumes, and reports build metadata and health. It
+    cannot pull images, create, update, restart, or remove containers, and it
+    exposes no command-execution endpoint. Those capabilities are not
+    implemented yet, and will be added to this document at the same time they
+    are added to the server.
+
+    The one endpoint that accepts a write method is
+    `POST /api/v1/inventory/refresh`. It mutates HarborMaster's own records --
+    re-reading the host and replacing what HarborMaster has stored -- and
+    changes nothing on the Docker host.
 
     ### Operating the API safely
 
@@ -25,6 +31,14 @@ info:
     None yet. The API is unauthenticated and is expected to be reachable only
     from loopback or a trusted proxy. Authentication is planned and will be
     documented here when it lands.
+
+    ### Sensitive values
+
+    Environment variables and log-driver options whose NAME matches a
+    configured pattern (`PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, ...) are
+    returned masked as `********`. There is deliberately no query parameter,
+    header, or endpoint that reveals the real values: with no authentication in
+    place, such a switch would be an unauthenticated secret-disclosure API.
   license:
     name: MIT
     identifier: MIT
@@ -38,6 +52,14 @@ servers:
 tags:
   - name: System
     description: Liveness, readiness, and build metadata.
+  - name: Inventory
+    description: Inventory status and refresh control.
+  - name: Containers
+    description: Read-only container inventory.
+  - name: Images
+    description: Read-only image metadata.
+  - name: Networks and volumes
+    description: Read-only network and volume metadata.
 
 paths:
   /api/v1/health:
@@ -91,10 +113,6 @@ paths:
       tags: [System]
       summary: Report build metadata
       operationId: getVersion
-      description: |
-        Returns the running binary's version, commit, build date, Go version,
-        and platform. Unstamped development builds report `dev` and `unknown`
-        rather than omitting the fields.
       responses:
         "200":
           description: Build metadata.
@@ -105,17 +123,374 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionInfo"
-              examples:
-                release:
-                  summary: A stamped release build
-                  value:
-                    version: v0.1.0
-                    commit: 9f2c1ab
-                    buildDate: "2026-08-03T08:00:00Z"
-                    goVersion: go1.26.5
-                    platform: linux/amd64
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/inventory:
+    get:
+      tags: [Inventory]
+      summary: Report inventory and refresh status
+      operationId: getInventory
+      description: |
+        Returns Docker connectivity, refresh state, the current generation and
+        checksum, headline counts, and recent warnings.
+
+        `generation` advances only when a refresh completes AND is persisted,
+        so a client can tell whether the inventory it holds is current.
+        `checksum` fingerprints the inventory's content: an unchanged host
+        produces an unchanged checksum, which is a cheap way to skip a refetch.
+
+        Docker connectivity is probed live on every call rather than read from
+        the last refresh.
+      responses:
+        "200":
+          description: Inventory status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryStatus"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/inventory/refresh:
+    post:
+      tags: [Inventory]
+      summary: Trigger an inventory refresh
+      operationId: refreshInventory
+      description: |
+        Starts a refresh in the background and returns immediately with `202`.
+
+        The refresh is asynchronous because a sweep of a thousand containers
+        cannot be something an HTTP client waits on: it would exceed the
+        server's write timeout. Poll `GET /api/v1/inventory` and watch
+        `inProgress` and `generation` for completion.
+
+        Overlapping refreshes are refused rather than queued. A refresh
+        requested while one is running returns `409` together with the active
+        refresh's start time, so the caller learns what is happening rather
+        than just that it failed.
+
+        Docker reachability is checked before the refresh is accepted, so an
+        unreachable daemon is an immediate `503` rather than an accepted
+        refresh that fails out of sight moments later.
+
+        This endpoint changes HarborMaster's own records only. It performs no
+        Docker mutation of any kind.
+      responses:
+        "202":
+          description: Refresh accepted and started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshAccepted"
+        "405":
+          description: |
+            Read methods are rejected. Only POST triggers a refresh, so a GET
+            cannot cause work as a side effect.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A refresh is already in progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshConflict"
+        "503":
+          description: |
+            The inventory is disabled by configuration, or the Docker Engine is
+            unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/inventory/filters:
+    get:
+      tags: [Inventory]
+      summary: List the filter vocabularies in use
+      operationId: getInventoryFilters
+      description: |
+        Returns the valid states and health values, the Compose projects and
+        image repositories actually present, and the sortable field names. A
+        client can populate its selectors from this rather than hard-coding
+        them.
+      responses:
+        "200":
+          description: Filter vocabularies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilterOptions"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/containers:
+    get:
+      tags: [Containers]
+      summary: List containers
+      operationId: listContainers
+      description: |
+        Returns a page of containers from the persisted inventory, with
+        filtering and sorting applied by the database.
+
+        Ordering is always deterministic: the requested sort field is followed
+        by name and then ID as tiebreaks, so paging cannot repeat or skip a
+        container.
+
+        Sort fields are validated against a fixed allowlist. Nothing from the
+        query string is ever interpolated into SQL.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: search
+          in: query
+          description: Matches container name, image reference, or ID prefix.
+          schema: { type: string }
+        - name: state
+          in: query
+          description: |
+            Filter by state. Repeat the parameter or supply a comma-separated
+            list; values are OR-ed.
+          schema:
+            type: string
+            examples: ["running", "running,paused"]
+        - name: health
+          in: query
+          description: Filter by health, OR-ed like `state`.
+          schema:
+            type: string
+            examples: ["unhealthy"]
+        - name: project
+          in: query
+          description: Exact Compose project name.
+          schema: { type: string }
+        - name: service
+          in: query
+          description: Exact Compose service name.
+          schema: { type: string }
+        - name: image
+          in: query
+          description: Exact image repository or full reference.
+          schema: { type: string }
+        - name: restartPolicy
+          in: query
+          schema:
+            type: string
+            enum: ["no", always, on-failure, unless-stopped]
+        - name: harbormasterEnabled
+          in: query
+          description: |
+            Filter on the `io.harbormaster.enabled` label. Omitting the
+            parameter does not filter; `false` matches containers where the
+            label is present and false, which is not the same as absent.
+          schema: { type: boolean }
+        - name: labelKey
+          in: query
+          description: Match containers carrying this label key.
+          schema: { type: string }
+        - name: labelValue
+          in: query
+          description: Narrow `labelKey` to an exact value. Requires `labelKey`.
+          schema: { type: string }
+        - name: includeAbsent
+          in: query
+          description: |
+            Include containers that earlier refreshes saw but the most recent
+            one did not. Absent containers are retained rather than deleted, so
+            their history survives.
+          schema: { type: boolean, default: false }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            default: name
+            enum: [name, state, health, created, started, image, project, service, restartCount, lastSeen]
+        - name: direction
+          in: query
+          schema:
+            type: string
+            default: asc
+            enum: [asc, desc]
+      responses:
+        "200":
+          description: A page of containers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContainerList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/containers/{id}:
+    get:
+      tags: [Containers]
+      summary: Get one container's normalized detail
+      operationId: getContainer
+      description: |
+        Accepts a full container ID, an unambiguous ID prefix, or an exact
+        container name. An exact match always wins over a prefix.
+
+        A prefix matching several containers returns `409`, never an arbitrary
+        one of them.
+
+        The response carries the normalized sections only. The redacted raw
+        inspection payload is served from `/raw`, so a client that wants the
+        normalized view never receives it by accident.
+      parameters:
+        - $ref: "#/components/parameters/ContainerId"
+      responses:
+        "200":
+          description: The container's normalized detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContainerDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/AmbiguousId"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/containers/{id}/raw:
+    get:
+      tags: [Containers]
+      summary: Get the redacted raw inspection payload
+      operationId: getContainerRaw
+      description: |
+        Returns the runtime's own inspection output with sensitive values
+        removed, for troubleshooting and for fields HarborMaster has not
+        normalized yet.
+
+        **This is not a faithful copy.** Redacted values are gone, not
+        recoverable, so the payload cannot be used to recreate a container
+        exactly. The response says so in its `notice` field.
+      parameters:
+        - $ref: "#/components/parameters/ContainerId"
+      responses:
+        "200":
+          description: The redacted inspection payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawInspection"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/AmbiguousId"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/images:
+    get:
+      tags: [Images]
+      summary: List images
+      operationId: listImages
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of images with reference counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/images/{id}:
+    get:
+      tags: [Images]
+      summary: Get one image
+      operationId: getImage
+      description: Accepts a full image ID, a short ID, or an unambiguous prefix.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The image and how many containers reference it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageUsage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/AmbiguousId"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/networks:
+    get:
+      tags: [Networks and volumes]
+      summary: List networks
+      operationId: listNetworks
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of networks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
+
+  /api/v1/volumes:
+    get:
+      tags: [Networks and volumes]
+      summary: List volumes
+      operationId: listVolumes
+      description: |
+        Volume metadata only. HarborMaster never reads volume contents.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of volumes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VolumeList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/InventoryUnavailable"
 
 components:
   headers:
@@ -126,33 +501,85 @@ components:
       schema:
         type: string
 
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 1-based page number.
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      description: Items per page. Values above the maximum are rejected, not clamped.
+      schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
+    ContainerId:
+      name: id
+      in: path
+      required: true
+      description: Full container ID, unambiguous ID prefix, or exact container name.
+      schema: { type: string }
+
   responses:
     NotFound:
-      description: No such endpoint.
+      description: No such resource.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: { code: not_found, message: endpoint not found }
+            error: { code: not_found, message: container not found }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    InvalidRequest:
+      description: |
+        A query parameter was malformed or out of range. The message names the
+        parameter and what was expected; it never echoes the value supplied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: invalid_request, message: pageSize must be at most 200 }
+            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    AmbiguousId:
+      description: |
+        The supplied ID prefix matches more than one resource. HarborMaster
+        refuses rather than picking one.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: ambiguous_id
+              message: the id prefix matches more than one container; supply more characters
             requestId: 3f8a1c9e7b2d4a6f0c1e5b93
 
     MethodNotAllowed:
       description: |
-        The path exists but the method is not permitted. Every endpoint is
-        currently read-only.
+        The path exists but the method is not permitted. Every endpoint except
+        the inventory refresh is read-only.
       headers:
         Allow:
           description: Permitted methods.
-          schema:
-            type: string
+          schema: { type: string }
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: { code: method_not_allowed, message: method not allowed }
-            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    InventoryUnavailable:
+      description: |
+        The inventory is not configured or is disabled by configuration.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: feature_disabled, message: inventory is disabled by configuration }
 
     PayloadTooLarge:
       description: The request body exceeded the configured limit.
@@ -160,9 +587,6 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
-          example:
-            error: { code: payload_too_large, message: request body too large }
-            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
 
     InternalError:
       description: |
@@ -173,89 +597,20 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
-          example:
-            error: { code: internal_error, message: internal error }
-            requestId: 3f8a1c9e7b2d4a6f0c1e5b93
 
   schemas:
-    ComponentStatus:
-      type: string
-      description: Reachability of a single dependency.
-      enum: [up, down]
+    # ------------------------------------------------------------- shared --
 
-    Component:
+    Pagination:
       type: object
-      required: [status]
+      required: [page, pageSize, totalItems, totalPages, hasNext, hasPrevious]
       properties:
-        status:
-          $ref: "#/components/schemas/ComponentStatus"
-        detail:
-          type: string
-          description: |
-            Short, operator-safe explanation when the dependency is down. Never
-            carries a raw error chain, a socket path, or credentials.
-          examples: [docker engine unreachable]
-        latencyMs:
-          type: integer
-          format: int64
-          minimum: 0
-          description: Round-trip time of the probe.
-        version:
-          type: string
-          description: The dependency's reported version, when available.
-          examples: ["1.51"]
-
-    HealthReport:
-      type: object
-      required: [status, database, docker, checkedAt, uptimeSeconds]
-      properties:
-        status:
-          type: string
-          description: |
-            Overall verdict.
-
-            * `healthy` — every dependency is up.
-            * `degraded` — the Docker Engine is unreachable. HarborMaster still
-              serves; the UI renders a disconnected state.
-            * `unhealthy` — the database is unreachable. Nothing else can work.
-          enum: [healthy, degraded, unhealthy]
-        database:
-          $ref: "#/components/schemas/Component"
-        docker:
-          $ref: "#/components/schemas/Component"
-        checkedAt:
-          type: string
-          format: date-time
-          description: When the probes ran, in UTC.
-        uptimeSeconds:
-          type: integer
-          format: int64
-          minimum: 0
-          description: Seconds since the process started.
-
-    VersionInfo:
-      type: object
-      required: [version, commit, buildDate, goVersion, platform]
-      properties:
-        version:
-          type: string
-          description: Release version, or `dev` for an unstamped build.
-          examples: [v0.1.0]
-        commit:
-          type: string
-          description: Source commit, or `unknown`.
-          examples: [9f2c1ab]
-        buildDate:
-          type: string
-          description: Build timestamp, or `unknown`.
-          examples: ["2026-08-03T08:00:00Z"]
-        goVersion:
-          type: string
-          examples: [go1.26.5]
-        platform:
-          type: string
-          description: Target as `os/arch`.
-          examples: [linux/amd64]
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1 }
+        totalItems: { type: integer, minimum: 0 }
+        totalPages: { type: integer, minimum: 0 }
+        hasNext: { type: boolean }
+        hasPrevious: { type: boolean }
 
     ErrorCode:
       type: string
@@ -267,6 +622,11 @@ components:
         - method_not_allowed
         - payload_too_large
         - internal_error
+        - invalid_request
+        - ambiguous_id
+        - conflict
+        - service_unavailable
+        - feature_disabled
 
     ErrorResponse:
       type: object
@@ -283,7 +643,789 @@ components:
               type: string
               description: |
                 Short human-readable summary, safe to display. Never contains a
-                stack trace, a filesystem path, or an internal error chain.
+                stack trace, a filesystem path, an internal error chain, or a
+                value the caller supplied.
         requestId:
           type: string
           description: Correlates this response with the server log.
+
+    # ------------------------------------------------------------- system --
+
+    ComponentStatus:
+      type: string
+      description: Reachability of a single dependency.
+      enum: [up, down]
+
+    Component:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/ComponentStatus"
+        detail:
+          type: string
+          description: |
+            Short, operator-safe explanation when the dependency is down. Never
+            carries a raw error chain, a socket path, or credentials.
+        latencyMs: { type: integer, format: int64, minimum: 0 }
+        version: { type: string }
+
+    HealthReport:
+      type: object
+      required: [status, database, docker, checkedAt, uptimeSeconds]
+      properties:
+        status:
+          type: string
+          description: |
+            * `healthy` — every dependency is up.
+            * `degraded` — the Docker Engine is unreachable. HarborMaster still
+              serves; the UI renders a disconnected state.
+            * `unhealthy` — the database is unreachable.
+          enum: [healthy, degraded, unhealthy]
+        database:
+          $ref: "#/components/schemas/Component"
+        docker:
+          $ref: "#/components/schemas/Component"
+        checkedAt: { type: string, format: date-time }
+        uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+
+    VersionInfo:
+      type: object
+      required: [version, commit, buildDate, goVersion, platform]
+      properties:
+        version: { type: string, examples: [v0.2.0] }
+        commit: { type: string, examples: [9f2c1ab] }
+        buildDate: { type: string, examples: ["2026-08-03T08:00:00Z"] }
+        goVersion: { type: string, examples: [go1.26.5] }
+        platform: { type: string, examples: [linux/amd64] }
+
+    # ---------------------------------------------------------- inventory --
+
+    RefreshState:
+      type: string
+      enum: [idle, running, succeeded, failed]
+
+    RefreshTrigger:
+      type: string
+      enum: [startup, periodic, manual]
+
+    WarningCode:
+      type: string
+      description: |
+        * `container_vanished` — the container was removed between being listed
+          and being inspected. Expected churn on a busy host, not a fault.
+        * `inspect_failed` — inspection failed for another reason; the
+          container is recorded from summary data alone.
+        * `image_unavailable` — the image could not be inspected, usually
+          because it was removed while still in use.
+        * `incomplete_data` — the runtime returned a record missing fields
+          HarborMaster expected.
+      enum: [container_vanished, inspect_failed, image_unavailable, incomplete_data]
+
+    InventoryWarning:
+      type: object
+      required: [generation, code, message, occurredAt]
+      properties:
+        id: { type: integer, format: int64 }
+        generation: { type: integer, format: int64 }
+        containerId: { type: string }
+        containerName: { type: string }
+        code:
+          $ref: "#/components/schemas/WarningCode"
+        message:
+          type: string
+          description: |
+            Operator-facing prose. Never a raw runtime error, a socket path, or
+            an environment value.
+        occurredAt: { type: string, format: date-time }
+
+    RefreshRecord:
+      type: object
+      required: [generation, trigger, state, startedAt, durationMs]
+      properties:
+        id: { type: integer, format: int64 }
+        generation: { type: integer, format: int64 }
+        trigger:
+          $ref: "#/components/schemas/RefreshTrigger"
+        state:
+          $ref: "#/components/schemas/RefreshState"
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        durationMs: { type: integer, format: int64, minimum: 0 }
+        containersListed: { type: integer, minimum: 0 }
+        containersInspected: { type: integer, minimum: 0 }
+        containersFailed: { type: integer, minimum: 0 }
+        imagesInspected: { type: integer, minimum: 0 }
+        networksListed: { type: integer, minimum: 0 }
+        volumesListed: { type: integer, minimum: 0 }
+        warningCount: { type: integer, minimum: 0 }
+        checksum:
+          type: string
+          description: Empty for a failed refresh, which produces no inventory.
+        error:
+          type: string
+          description: Sanitised failure reason. Never a raw runtime error.
+
+    InventoryCounts:
+      type: object
+      required: [containers, absent, running, stopped, paused, restarting, healthy, unhealthy, images, networks, volumes, warnings, byState]
+      properties:
+        containers: { type: integer, minimum: 0 }
+        absent:
+          type: integer
+          minimum: 0
+          description: Containers retained from an earlier refresh but no longer present.
+        running: { type: integer, minimum: 0 }
+        stopped:
+          type: integer
+          minimum: 0
+          description: Exited plus dead, which is what an operator means by "stopped".
+        paused: { type: integer, minimum: 0 }
+        restarting: { type: integer, minimum: 0 }
+        healthy: { type: integer, minimum: 0 }
+        unhealthy: { type: integer, minimum: 0 }
+        images: { type: integer, minimum: 0 }
+        networks: { type: integer, minimum: 0 }
+        volumes: { type: integer, minimum: 0 }
+        warnings: { type: integer, minimum: 0 }
+        byState:
+          type: object
+          description: Exact per-state breakdown.
+          additionalProperties: { type: integer, minimum: 0 }
+
+    InventoryStatus:
+      type: object
+      required: [enabled, runtime, docker, state, inProgress, generation, counts, warnings]
+      properties:
+        enabled: { type: boolean }
+        runtime: { type: string, examples: [docker] }
+        docker:
+          $ref: "#/components/schemas/Component"
+        state:
+          $ref: "#/components/schemas/RefreshState"
+        inProgress: { type: boolean }
+        generation:
+          type: integer
+          format: int64
+          description: |
+            Advances only when a refresh completes and is persisted. `0` means
+            no inventory has ever been stored.
+        checksum:
+          type: string
+          description: |
+            Deterministic fingerprint of the inventory's content. Excludes
+            timestamps, duration, and generation, so an unchanged host yields
+            an unchanged checksum.
+        lastAttempt:
+          $ref: "#/components/schemas/RefreshRecord"
+        lastSuccess:
+          $ref: "#/components/schemas/RefreshRecord"
+        counts:
+          $ref: "#/components/schemas/InventoryCounts"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/InventoryWarning"
+
+    RefreshAccepted:
+      type: object
+      required: [accepted, trigger, startedAt, message]
+      properties:
+        accepted: { type: boolean, const: true }
+        trigger:
+          $ref: "#/components/schemas/RefreshTrigger"
+        startedAt: { type: string, format: date-time }
+        message: { type: string }
+
+    RefreshConflict:
+      type: object
+      description: |
+        A 409 body. Extends the standard error envelope with the active
+        refresh, so a client can report what is happening rather than only that
+        its request failed.
+      required: [error, active]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message: { type: string }
+        requestId: { type: string }
+        active:
+          type: object
+          required: [inProgress, startedAt]
+          properties:
+            inProgress: { type: boolean }
+            startedAt: { type: string, format: date-time }
+
+    FilterOptions:
+      type: object
+      required: [states, health, projects, images, sortFields]
+      properties:
+        states:
+          type: array
+          items: { $ref: "#/components/schemas/ContainerState" }
+        health:
+          type: array
+          items: { $ref: "#/components/schemas/HealthState" }
+        projects:
+          type: array
+          description: Compose projects actually present in the inventory.
+          items: { type: string }
+        images:
+          type: array
+          description: Image repositories actually present in the inventory.
+          items: { type: string }
+        sortFields:
+          type: array
+          items: { type: string }
+
+    # --------------------------------------------------------- containers --
+
+    ContainerState:
+      type: string
+      description: |
+        Normalized lifecycle state. The vocabulary is closed; an unrecognised
+        runtime state maps to `unknown` rather than passing through.
+      enum: [created, running, paused, restarting, removing, exited, dead, unknown]
+
+    HealthState:
+      type: string
+      description: A container with no healthcheck reports `none`.
+      enum: [none, starting, healthy, unhealthy]
+
+    ImageRef:
+      type: object
+      description: |
+        A parsed image reference. `raw` is always the reference exactly as the
+        container declared it; parsing is best-effort and never fails.
+      required: [raw]
+      properties:
+        raw: { type: string, examples: ["nginx:1.27"] }
+        repository: { type: string, examples: [nginx] }
+        tag: { type: string, examples: ["1.27"] }
+        digest: { type: string, examples: ["sha256:abc..."] }
+
+    RestartPolicy:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          enum: ["no", always, on-failure, unless-stopped]
+        maximumRetryCount:
+          type: integer
+          description: Applies to the on-failure policy only.
+
+    Port:
+      type: object
+      required: [containerPort, protocol, published]
+      properties:
+        containerPort: { type: integer, minimum: 0, maximum: 65535 }
+        protocol: { type: string, examples: [tcp, udp] }
+        hostIp: { type: string }
+        hostPort: { type: integer, minimum: 0, maximum: 65535 }
+        published:
+          type: boolean
+          description: |
+            Distinguishes a port merely exposed by the image from one actually
+            bound on the host. Only published ports are reachable.
+
+    ComposeMetadata:
+      type: object
+      required: [managed, oneOff]
+      properties:
+        managed:
+          type: boolean
+          description: True when the container carries a Compose project label.
+        project: { type: string }
+        service: { type: string }
+        containerNumber: { type: integer }
+        workingDir: { type: string }
+        configFiles: { type: string }
+        version: { type: string }
+        oneOff:
+          type: boolean
+          description: Started by `compose run` rather than `compose up`.
+
+    HarborMasterMetadata:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            Absent when the container carries no `io.harbormaster.enabled`
+            label. Absent, true, and false are three distinct answers.
+        labels:
+          type: object
+          description: Every `io.harbormaster.*` label, prefix stripped.
+          additionalProperties: { type: string }
+
+    ContainerSummary:
+      type: object
+      description: The list-row projection of a container.
+      required: [hostId, id, shortId, name, image, state, health, createdAt, restartCount, restartPolicy, compose, harbormaster, ports, present, firstSeenAt, lastSeenAt, generation, warningCount]
+      properties:
+        hostId: { type: string }
+        id: { type: string }
+        shortId: { type: string }
+        name: { type: string }
+        image:
+          $ref: "#/components/schemas/ImageRef"
+        imageId: { type: string }
+        state:
+          $ref: "#/components/schemas/ContainerState"
+        status:
+          type: string
+          description: Runtime status text such as "Up 3 minutes". Volatile.
+        health:
+          $ref: "#/components/schemas/HealthState"
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        exitCode:
+          type: integer
+          description: Present only once the container has exited.
+        restartCount: { type: integer, minimum: 0 }
+        restartPolicy:
+          $ref: "#/components/schemas/RestartPolicy"
+        compose:
+          $ref: "#/components/schemas/ComposeMetadata"
+        harbormaster:
+          $ref: "#/components/schemas/HarborMasterMetadata"
+        ports:
+          type: array
+          items: { $ref: "#/components/schemas/Port" }
+        present:
+          type: boolean
+          description: |
+            False for a container earlier refreshes saw but the most recent one
+            did not. Such rows are retained rather than deleted.
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        generation: { type: integer, format: int64 }
+        warningCount: { type: integer, minimum: 0 }
+
+    ContainerList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ContainerSummary" }
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    StateDetail:
+      type: object
+      required: [state, running, paused, restarting, dead, oomKilled, restartCount, health]
+      properties:
+        state: { $ref: "#/components/schemas/ContainerState" }
+        rawState:
+          type: string
+          description: What the runtime reported, kept so an unmapped value stays visible.
+        status: { type: string }
+        running: { type: boolean }
+        paused: { type: boolean }
+        restarting: { type: boolean }
+        dead: { type: boolean }
+        oomKilled: { type: boolean }
+        exitCode: { type: integer }
+        error: { type: string }
+        restartCount: { type: integer, minimum: 0 }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        health: { $ref: "#/components/schemas/HealthState" }
+        healthFailingStreak: { type: integer, minimum: 0 }
+        healthLog:
+          type: array
+          description: |
+            Healthcheck timings and exit codes. The probe's stdout/stderr is
+            deliberately NOT carried: a healthcheck command is arbitrary and
+            its output routinely contains credentials.
+          items:
+            type: object
+            required: [start, end, exitCode]
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+              exitCode: { type: integer }
+
+    Process:
+      type: object
+      required: [tty, stdinOpen]
+      properties:
+        hostname: { type: string }
+        domainname: { type: string }
+        entrypoint: { type: array, items: { type: string } }
+        command: { type: array, items: { type: string } }
+        user:
+          type: string
+          description: Empty means the image's default, which is frequently root.
+        workingDir: { type: string }
+        stopSignal: { type: string }
+        stopTimeoutSeconds:
+          type: integer
+          description: Absent when the container inherits the daemon default.
+        tty: { type: boolean }
+        stdinOpen: { type: boolean }
+
+    EnvVar:
+      type: object
+      description: |
+        One environment variable or log-driver option. The real value of a
+        sensitive entry is never present in any API response.
+      required: [name, value, sensitivity]
+      properties:
+        name: { type: string }
+        value:
+          type: string
+          description: |
+            The display-safe value: the real value when not sensitive,
+            `********` when it is.
+        sensitivity:
+          type: string
+          enum: [normal, sensitive]
+
+    Label:
+      type: object
+      required: [key, value, source]
+      properties:
+        key: { type: string }
+        value: { type: string }
+        source:
+          type: string
+          description: Which convention the key belongs to.
+          enum: [user, compose, harbormaster]
+
+    Mount:
+      type: object
+      required: [type, destination, readOnly]
+      properties:
+        type:
+          type: string
+          enum: [bind, volume, tmpfs, npipe, cluster, unknown]
+        source: { type: string }
+        destination: { type: string }
+        readOnly: { type: boolean }
+        propagation: { type: string }
+        consistency: { type: string }
+        volumeName: { type: string }
+        driver: { type: string }
+        driverOptions:
+          type: object
+          additionalProperties: { type: string }
+        tmpfsOptions: { type: string }
+
+    NetworkAttachment:
+      type: object
+      required: [networkName]
+      properties:
+        networkId: { type: string }
+        networkName: { type: string }
+        driver: { type: string }
+        aliases: { type: array, items: { type: string } }
+        ipv4Address: { type: string }
+        ipv6Address: { type: string }
+        gateway: { type: string }
+        macAddress: { type: string }
+        endpointId: { type: string }
+        links: { type: array, items: { type: string } }
+
+    HealthCheck:
+      type: object
+      description: Configured healthcheck, as distinct from its current verdict.
+      required: [disabled]
+      properties:
+        test: { type: array, items: { type: string } }
+        intervalMs: { type: integer, format: int64 }
+        timeoutMs: { type: integer, format: int64 }
+        startPeriodMs: { type: integer, format: int64 }
+        startIntervalMs: { type: integer, format: int64 }
+        retries: { type: integer }
+        disabled:
+          type: boolean
+          description: |
+            True when the container explicitly turns the image's healthcheck
+            off, which is different from having none configured.
+
+    Ulimit:
+      type: object
+      required: [name, soft, hard]
+      properties:
+        name: { type: string }
+        soft: { type: integer, format: int64 }
+        hard: { type: integer, format: int64 }
+
+    Resources:
+      type: object
+      description: |
+        Absent optional fields mean "not set", which is different from being
+        set to zero. A `pidsLimit` of 0 means unlimited; an absent one means
+        the daemon default applies.
+      properties:
+        cpuShares: { type: integer, format: int64 }
+        cpuQuota: { type: integer, format: int64 }
+        cpuPeriod: { type: integer, format: int64 }
+        nanoCpus: { type: integer, format: int64 }
+        cpusetCpus: { type: string }
+        cpusetMems: { type: string }
+        memoryBytes: { type: integer, format: int64 }
+        memoryReservationBytes: { type: integer, format: int64 }
+        memorySwapBytes: { type: integer, format: int64 }
+        memorySwappiness: { type: integer, format: int64 }
+        kernelMemoryBytes:
+          type: integer
+          format: int64
+          description: Deprecated in the Engine API; reported only if a daemon still sets it.
+        pidsLimit: { type: integer, format: int64 }
+        blkioWeight: { type: integer }
+        shmSizeBytes: { type: integer, format: int64 }
+        oomScoreAdj: { type: integer }
+        oomKillDisable: { type: boolean }
+        ulimits:
+          type: array
+          items: { $ref: "#/components/schemas/Ulimit" }
+
+    Device:
+      type: object
+      required: [pathOnHost, pathInContainer]
+      properties:
+        pathOnHost: { type: string }
+        pathInContainer: { type: string }
+        cgroupPermissions: { type: string }
+
+    DeviceRequest:
+      type: object
+      properties:
+        driver: { type: string }
+        count: { type: integer }
+        deviceIds: { type: array, items: { type: string } }
+        capabilities:
+          type: array
+          items: { type: array, items: { type: string } }
+        options:
+          type: object
+          additionalProperties: { type: string }
+
+    Security:
+      type: object
+      required: [privileged, readonlyRootfs, noNewPrivileges]
+      properties:
+        privileged: { type: boolean }
+        readonlyRootfs: { type: boolean }
+        capAdd: { type: array, items: { type: string } }
+        capDrop: { type: array, items: { type: string } }
+        securityOpt: { type: array, items: { type: string } }
+        apparmorProfile: { type: string }
+        selinuxLabel: { type: string }
+        seccompProfile: { type: string }
+        noNewPrivileges: { type: boolean }
+        devices:
+          type: array
+          items: { $ref: "#/components/schemas/Device" }
+        deviceCgroupRules: { type: array, items: { type: string } }
+        deviceRequests:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceRequest" }
+        ipcMode: { type: string }
+        pidMode: { type: string }
+        utsMode: { type: string }
+        usernsMode: { type: string }
+        cgroupnsMode: { type: string }
+        sysctls:
+          type: object
+          additionalProperties: { type: string }
+        groupAdd:
+          type: array
+          description: |
+            Supplementary groups. Notable because adding the docker group is
+            how a container gains control of the host.
+          items: { type: string }
+
+    Logging:
+      type: object
+      properties:
+        driver: { type: string }
+        options:
+          type: array
+          description: |
+            Masked with the same rules as the environment: log driver
+            configuration routinely carries endpoint credentials.
+          items: { $ref: "#/components/schemas/EnvVar" }
+
+    ContainerDetail:
+      type: object
+      description: |
+        The full normalized view of one container. Sections mirror the UI's
+        tabs one-for-one.
+
+        Identity is split across two sections by intent: stable identifiers and
+        timestamps live in `overview`, where the list view also needs them,
+        while `hostname` and `domainname` live in `process` because they are
+        container configuration.
+      required: [overview, state, process, environment, labels, ports, mounts, networks, resources, security, logging, compose, harbormaster, warnings]
+      properties:
+        overview:
+          $ref: "#/components/schemas/ContainerSummary"
+        state:
+          $ref: "#/components/schemas/StateDetail"
+        image:
+          $ref: "#/components/schemas/Image"
+        process:
+          $ref: "#/components/schemas/Process"
+        healthCheck:
+          $ref: "#/components/schemas/HealthCheck"
+        environment:
+          type: array
+          items: { $ref: "#/components/schemas/EnvVar" }
+        labels:
+          type: array
+          items: { $ref: "#/components/schemas/Label" }
+        ports:
+          type: array
+          items: { $ref: "#/components/schemas/Port" }
+        mounts:
+          type: array
+          items: { $ref: "#/components/schemas/Mount" }
+        networks:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkAttachment" }
+        resources:
+          $ref: "#/components/schemas/Resources"
+        security:
+          $ref: "#/components/schemas/Security"
+        logging:
+          $ref: "#/components/schemas/Logging"
+        compose:
+          $ref: "#/components/schemas/ComposeMetadata"
+        harbormaster:
+          $ref: "#/components/schemas/HarborMasterMetadata"
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryWarning" }
+
+    RawInspection:
+      type: object
+      required: [containerId, redacted, notice, inspection]
+      properties:
+        containerId: { type: string }
+        redacted:
+          type: boolean
+          const: true
+        notice:
+          type: string
+          description: |
+            States that sensitive values have been removed and that the payload
+            cannot be used to recreate the container exactly.
+        inspection:
+          description: The runtime's inspection output, with sensitive values removed.
+          type: object
+          additionalProperties: true
+
+    # -------------------------------------------- images, networks, volumes --
+
+    Image:
+      type: object
+      required: [id, shortId, repoTags, repoDigests, size]
+      properties:
+        id: { type: string }
+        shortId: { type: string }
+        repoTags:
+          type: array
+          description: Empty for an untagged ("dangling") image.
+          items: { type: string }
+        repoDigests:
+          type: array
+          description: Usually present only for images pulled from or pushed to a registry.
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+        architecture: { type: string }
+        os: { type: string }
+        osVersion: { type: string }
+        variant: { type: string }
+        size: { type: integer, format: int64 }
+        author: { type: string }
+        comment: { type: string }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    ImageUsage:
+      type: object
+      required: [image, containerCount]
+      properties:
+        image:
+          $ref: "#/components/schemas/Image"
+        containerCount:
+          type: integer
+          minimum: 0
+          description: Present containers referencing this image.
+
+    ImageList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ImageUsage" }
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Network:
+      type: object
+      required: [id, name, internal, attachable, ipv6]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        driver: { type: string }
+        scope: { type: string }
+        internal: { type: boolean }
+        attachable: { type: boolean }
+        ipv6: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        subnets:
+          type: array
+          items: { type: string }
+
+    NetworkList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Network" }
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Volume:
+      type: object
+      description: Metadata only. HarborMaster never reads volume contents.
+      required: [name]
+      properties:
+        name: { type: string }
+        driver: { type: string }
+        scope: { type: string }
+        mountpoint: { type: string }
+        createdAt: { type: string, format: date-time }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        options:
+          type: object
+          additionalProperties: { type: string }
+
+    VolumeList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Volume" }
+        pagination:
+          $ref: "#/components/schemas/Pagination"

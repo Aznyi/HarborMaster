@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Aznyi/HarborMaster/internal/domain"
 )
 
 const envPrefix = "HARBORMASTER_"
@@ -38,6 +40,20 @@ const (
 	DefaultDBPath            = "./data/harbormaster.db"
 	DefaultLogLevel          = "info"
 	DefaultLogFormat         = "json"
+
+	// Inventory defaults.
+	//
+	// DefaultRefreshInterval is a compromise: often enough that the UI is not
+	// stale, rare enough that HarborMaster is not a load source on a host with
+	// a thousand containers. Set the interval to 0 to disable periodic refresh
+	// and drive it manually.
+	DefaultInventoryEnabled = true
+	DefaultRefreshOnStartup = true
+	DefaultRefreshInterval  = 60 * time.Second
+	DefaultInventoryWorkers = 8
+	DefaultAbsentRetention  = 7 * 24 * time.Hour
+	MinRefreshInterval      = 5 * time.Second
+	MaxInventoryWorkers     = 64
 
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
@@ -74,6 +90,28 @@ type Store struct {
 	Path string
 }
 
+// Inventory holds settings for the read-only inventory engine.
+type Inventory struct {
+	// Enabled turns the whole inventory engine on or off. When false no
+	// refresh runs and the API serves whatever was last persisted.
+	Enabled bool
+	// RefreshOnStartup runs one refresh as soon as the server is up.
+	RefreshOnStartup bool
+	// RefreshInterval is the periodic refresh period. Zero disables periodic
+	// refresh; manual refresh still works.
+	RefreshInterval time.Duration
+	// Workers bounds concurrent container inspections. The Docker socket is a
+	// single daemon, so more is not automatically faster, and unbounded
+	// concurrency against 1,000 containers would be hostile to the host.
+	Workers int
+	// MaskPatterns are the environment-variable name fragments treated as
+	// secret-bearing.
+	MaskPatterns []string
+	// AbsentRetention is how long a container that has disappeared is kept in
+	// the inventory before being purged. Zero keeps absent containers forever.
+	AbsentRetention time.Duration
+}
+
 // Healthcheck holds settings for the `harbormaster healthcheck` command.
 type Healthcheck struct {
 	// Timeout bounds the whole probe, connection included.
@@ -95,6 +133,7 @@ type Config struct {
 	Store       Store
 	Log         Log
 	Healthcheck Healthcheck
+	Inventory   Inventory
 }
 
 var (
@@ -134,6 +173,9 @@ func load(lookup lookupFunc) (Config, error) {
 			Level:  strings.ToLower(stringVar(lookup, "LOG_LEVEL", DefaultLogLevel)),
 			Format: strings.ToLower(stringVar(lookup, "LOG_FORMAT", DefaultLogFormat)),
 		},
+		Inventory: Inventory{
+			MaskPatterns: listVar(lookup, "INVENTORY_MASK_PATTERNS", domain.DefaultMaskPatterns),
+		},
 	}
 
 	var err error
@@ -154,6 +196,19 @@ func load(lookup lookupFunc) (Config, error) {
 	collect(err)
 	cfg.Healthcheck.Timeout, err = durationVar(lookup, "HEALTHCHECK_TIMEOUT", DefaultHealthcheckTimeout)
 	collect(err)
+
+	cfg.Inventory.Enabled, err = boolVar(lookup, "INVENTORY_ENABLED", DefaultInventoryEnabled)
+	collect(err)
+	cfg.Inventory.RefreshOnStartup, err = boolVar(lookup, "INVENTORY_REFRESH_ON_STARTUP", DefaultRefreshOnStartup)
+	collect(err)
+	cfg.Inventory.RefreshInterval, err = durationVar(lookup, "INVENTORY_REFRESH_INTERVAL", DefaultRefreshInterval)
+	collect(err)
+	cfg.Inventory.AbsentRetention, err = durationVar(lookup, "INVENTORY_ABSENT_RETENTION", DefaultAbsentRetention)
+	collect(err)
+
+	workers, err := int64Var(lookup, "INVENTORY_WORKERS", int64(DefaultInventoryWorkers))
+	collect(err)
+	cfg.Inventory.Workers = int(workers)
 
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
@@ -203,6 +258,21 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("%sLOG_FORMAT must be one of %s", envPrefix, strings.Join(validLogFormats, ", ")))
 	}
 
+	// A zero interval is a valid, documented way to disable periodic refresh.
+	// A tiny non-zero one is almost always a mistake, and it would hammer a
+	// privileged socket, so it is rejected rather than silently clamped.
+	if c.Inventory.RefreshInterval != 0 && c.Inventory.RefreshInterval < MinRefreshInterval {
+		errs = append(errs, fmt.Errorf("%sINVENTORY_REFRESH_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinRefreshInterval))
+	}
+	if c.Inventory.Workers < 1 || c.Inventory.Workers > MaxInventoryWorkers {
+		errs = append(errs, fmt.Errorf("%sINVENTORY_WORKERS must be between 1 and %d",
+			envPrefix, MaxInventoryWorkers))
+	}
+	if c.Inventory.AbsentRetention < 0 {
+		errs = append(errs, fmt.Errorf("%sINVENTORY_ABSENT_RETENTION must not be negative", envPrefix))
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -212,7 +282,12 @@ func (c Config) Validate() error {
 //
 // Do not add value interpolation here.
 func (c Config) String() string {
-	return "config{redacted: server, docker, store, log}"
+	return "config{redacted: server, docker, store, log, healthcheck, inventory}"
+}
+
+// Masker builds the environment masker from the configured patterns.
+func (c Config) Masker() *domain.Masker {
+	return domain.NewMasker(c.Inventory.MaskPatterns)
 }
 
 // IsLoopback reports whether the HTTP listener is bound to a loopback address.
@@ -281,6 +356,36 @@ func int64Var(lookup lookupFunc, name string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s%s must be an integer", envPrefix, name)
 	}
 	return v, nil
+}
+
+func boolVar(lookup lookupFunc, name string, fallback bool) (bool, error) {
+	raw, ok := lookup(envPrefix + name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s%s must be a boolean such as true or false", envPrefix, name)
+	}
+	return v, nil
+}
+
+// listVar reads a comma-separated list, falling back to a default. Entries are
+// trimmed and empties dropped, so "A,,B," yields [A B].
+func listVar(lookup lookupFunc, name string, fallback []string) []string {
+	raw, ok := lookup(envPrefix + name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return append([]string(nil), fallback...)
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func durationVar(lookup lookupFunc, name string, fallback time.Duration) (time.Duration, error) {

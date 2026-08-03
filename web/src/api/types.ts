@@ -47,6 +47,11 @@ export type ApiErrorCode =
   | "method_not_allowed"
   | "payload_too_large"
   | "internal_error"
+  | "invalid_request"
+  | "ambiguous_id"
+  | "conflict"
+  | "service_unavailable"
+  | "feature_disabled"
   /** Client-side only: the request never reached the server. */
   | "network_error"
   /** Client-side only: the response was not the JSON shape we expect. */

@@ -103,7 +103,7 @@ func TestFakeRecordsCalls(t *testing.T) {
 	if info.APIVersion != "1.45" {
 		t.Errorf("APIVersion = %q", info.APIVersion)
 	}
-	if fake.Calls != 1 {
-		t.Errorf("Calls = %d, want 1", fake.Calls)
+	if fake.PingCalls != 1 {
+		t.Errorf("PingCalls = %d, want 1", fake.PingCalls)
 	}
 }

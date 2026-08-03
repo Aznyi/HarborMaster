@@ -1,0 +1,440 @@
+/**
+ * Types mirroring HarborMaster's inventory API.
+ *
+ * Hand-maintained against `api/openapi.yaml`, which is the contract. These are
+ * HarborMaster's own shapes -- no Docker SDK type is exposed by the API, so
+ * none appears here either.
+ */
+
+import type { HealthComponent } from "./types";
+
+// ---------------------------------------------------------------- shared --
+
+export interface Pagination {
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+}
+
+export interface ListResponse<T> {
+  items: T[];
+  pagination: Pagination;
+}
+
+// ------------------------------------------------------------- inventory --
+
+export type RefreshState = "idle" | "running" | "succeeded" | "failed";
+export type RefreshTrigger = "startup" | "periodic" | "manual";
+
+export type WarningCode =
+  | "container_vanished"
+  | "inspect_failed"
+  | "image_unavailable"
+  | "incomplete_data";
+
+export interface InventoryWarning {
+  id?: number;
+  generation: number;
+  containerId?: string;
+  containerName?: string;
+  code: WarningCode;
+  message: string;
+  occurredAt: string;
+}
+
+export interface RefreshRecord {
+  id?: number;
+  generation: number;
+  trigger: RefreshTrigger;
+  state: RefreshState;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs: number;
+  containersListed: number;
+  containersInspected: number;
+  containersFailed: number;
+  imagesInspected: number;
+  networksListed: number;
+  volumesListed: number;
+  warningCount: number;
+  checksum?: string;
+  error?: string;
+}
+
+export interface InventoryCounts {
+  containers: number;
+  absent: number;
+  running: number;
+  stopped: number;
+  paused: number;
+  restarting: number;
+  healthy: number;
+  unhealthy: number;
+  images: number;
+  networks: number;
+  volumes: number;
+  warnings: number;
+  byState: Record<string, number>;
+}
+
+export interface InventoryStatus {
+  enabled: boolean;
+  runtime: string;
+  docker: HealthComponent;
+  state: RefreshState;
+  inProgress: boolean;
+  /** Advances only when a refresh completes AND persists. 0 means none yet. */
+  generation: number;
+  checksum?: string;
+  lastAttempt?: RefreshRecord;
+  lastSuccess?: RefreshRecord;
+  counts: InventoryCounts;
+  warnings: InventoryWarning[];
+}
+
+export interface RefreshAccepted {
+  accepted: boolean;
+  trigger: RefreshTrigger;
+  startedAt: string;
+  message: string;
+}
+
+export interface FilterOptions {
+  states: string[];
+  health: string[];
+  projects: string[];
+  images: string[];
+  sortFields: string[];
+}
+
+// ------------------------------------------------------------ containers --
+
+export type ContainerState =
+  | "created"
+  | "running"
+  | "paused"
+  | "restarting"
+  | "removing"
+  | "exited"
+  | "dead"
+  | "unknown";
+
+export type HealthState = "none" | "starting" | "healthy" | "unhealthy";
+
+export interface ImageRef {
+  raw: string;
+  repository?: string;
+  tag?: string;
+  digest?: string;
+}
+
+export interface RestartPolicy {
+  name: string;
+  maximumRetryCount?: number;
+}
+
+export interface Port {
+  containerPort: number;
+  protocol: string;
+  hostIp?: string;
+  hostPort?: number;
+  /** Only published ports are reachable from the host. */
+  published: boolean;
+}
+
+export interface ComposeMetadata {
+  managed: boolean;
+  project?: string;
+  service?: string;
+  containerNumber?: number;
+  workingDir?: string;
+  configFiles?: string;
+  version?: string;
+  oneOff: boolean;
+}
+
+export interface HarborMasterMetadata {
+  /** Absent, true, and false are three distinct answers. */
+  enabled?: boolean;
+  labels?: Record<string, string>;
+}
+
+export interface ContainerSummary {
+  hostId: string;
+  id: string;
+  shortId: string;
+  name: string;
+  image: ImageRef;
+  imageId?: string;
+  state: ContainerState;
+  status?: string;
+  health: HealthState;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number;
+  restartCount: number;
+  restartPolicy: RestartPolicy;
+  compose: ComposeMetadata;
+  harbormaster: HarborMasterMetadata;
+  ports: Port[];
+  /** False for a container an earlier refresh saw but the latest did not. */
+  present: boolean;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  generation: number;
+  warningCount: number;
+}
+
+export interface HealthLogEntry {
+  start: string;
+  end: string;
+  exitCode: number;
+}
+
+export interface StateDetail {
+  state: ContainerState;
+  rawState?: string;
+  status?: string;
+  running: boolean;
+  paused: boolean;
+  restarting: boolean;
+  dead: boolean;
+  oomKilled: boolean;
+  exitCode?: number;
+  error?: string;
+  restartCount: number;
+  startedAt?: string;
+  finishedAt?: string;
+  health: HealthState;
+  healthFailingStreak?: number;
+  /** Timings and exit codes only; probe output is never carried. */
+  healthLog?: HealthLogEntry[];
+}
+
+export interface Process {
+  hostname?: string;
+  domainname?: string;
+  entrypoint?: string[];
+  command?: string[];
+  user?: string;
+  workingDir?: string;
+  stopSignal?: string;
+  stopTimeoutSeconds?: number;
+  tty: boolean;
+  stdinOpen: boolean;
+}
+
+/**
+ * One environment variable or log-driver option.
+ *
+ * There is no field carrying the real value of a sensitive entry, by design:
+ * the API never sends one, so the UI has nothing to reveal even accidentally.
+ */
+export interface EnvVar {
+  name: string;
+  /** The real value when not sensitive; "********" when it is. */
+  value: string;
+  sensitivity: "normal" | "sensitive";
+}
+
+export interface Label {
+  key: string;
+  value: string;
+  source: "user" | "compose" | "harbormaster";
+}
+
+export interface Mount {
+  type: "bind" | "volume" | "tmpfs" | "npipe" | "cluster" | "unknown";
+  source?: string;
+  destination: string;
+  readOnly: boolean;
+  propagation?: string;
+  consistency?: string;
+  volumeName?: string;
+  driver?: string;
+  driverOptions?: Record<string, string>;
+  tmpfsOptions?: string;
+}
+
+export interface NetworkAttachment {
+  networkId?: string;
+  networkName: string;
+  driver?: string;
+  aliases?: string[];
+  ipv4Address?: string;
+  ipv6Address?: string;
+  gateway?: string;
+  macAddress?: string;
+  endpointId?: string;
+  links?: string[];
+}
+
+export interface HealthCheck {
+  test?: string[];
+  intervalMs?: number;
+  timeoutMs?: number;
+  startPeriodMs?: number;
+  startIntervalMs?: number;
+  retries?: number;
+  disabled: boolean;
+}
+
+export interface Ulimit {
+  name: string;
+  soft: number;
+  hard: number;
+}
+
+export interface Resources {
+  cpuShares?: number;
+  cpuQuota?: number;
+  cpuPeriod?: number;
+  nanoCpus?: number;
+  cpusetCpus?: string;
+  cpusetMems?: string;
+  memoryBytes?: number;
+  memoryReservationBytes?: number;
+  memorySwapBytes?: number;
+  memorySwappiness?: number;
+  kernelMemoryBytes?: number;
+  pidsLimit?: number;
+  blkioWeight?: number;
+  shmSizeBytes?: number;
+  oomScoreAdj?: number;
+  oomKillDisable?: boolean;
+  ulimits?: Ulimit[];
+}
+
+export interface Device {
+  pathOnHost: string;
+  pathInContainer: string;
+  cgroupPermissions?: string;
+}
+
+export interface DeviceRequest {
+  driver?: string;
+  count?: number;
+  deviceIds?: string[];
+  capabilities?: string[][];
+  options?: Record<string, string>;
+}
+
+export interface Security {
+  privileged: boolean;
+  readonlyRootfs: boolean;
+  capAdd?: string[];
+  capDrop?: string[];
+  securityOpt?: string[];
+  apparmorProfile?: string;
+  selinuxLabel?: string;
+  seccompProfile?: string;
+  noNewPrivileges: boolean;
+  devices?: Device[];
+  deviceCgroupRules?: string[];
+  deviceRequests?: DeviceRequest[];
+  ipcMode?: string;
+  pidMode?: string;
+  utsMode?: string;
+  usernsMode?: string;
+  cgroupnsMode?: string;
+  sysctls?: Record<string, string>;
+  groupAdd?: string[];
+}
+
+export interface Logging {
+  driver?: string;
+  options?: EnvVar[];
+}
+
+export interface Image {
+  id: string;
+  shortId: string;
+  repoTags: string[];
+  repoDigests: string[];
+  createdAt?: string;
+  architecture?: string;
+  os?: string;
+  osVersion?: string;
+  variant?: string;
+  size: number;
+  author?: string;
+  comment?: string;
+  labels?: Record<string, string>;
+}
+
+export interface ContainerDetail {
+  overview: ContainerSummary;
+  state: StateDetail;
+  image?: Image;
+  process: Process;
+  healthCheck?: HealthCheck;
+  environment: EnvVar[];
+  labels: Label[];
+  ports: Port[];
+  mounts: Mount[];
+  networks: NetworkAttachment[];
+  resources: Resources;
+  security: Security;
+  logging: Logging;
+  compose: ComposeMetadata;
+  harbormaster: HarborMasterMetadata;
+  warnings: InventoryWarning[];
+}
+
+export interface RawInspection {
+  containerId: string;
+  redacted: true;
+  notice: string;
+  inspection: unknown;
+}
+
+export interface ImageUsage {
+  image: Image;
+  containerCount: number;
+}
+
+export interface NetworkSummary {
+  id: string;
+  name: string;
+  driver?: string;
+  scope?: string;
+  internal: boolean;
+  attachable: boolean;
+  ipv6: boolean;
+  createdAt?: string;
+  labels?: Record<string, string>;
+  subnets?: string[];
+}
+
+export interface VolumeSummary {
+  name: string;
+  driver?: string;
+  scope?: string;
+  mountpoint?: string;
+  createdAt?: string;
+  labels?: Record<string, string>;
+  options?: Record<string, string>;
+}
+
+/** Query parameters accepted by the container list endpoint. */
+export interface ContainerQuery {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  state?: string[];
+  health?: string[];
+  project?: string;
+  service?: string;
+  image?: string;
+  restartPolicy?: string;
+  labelKey?: string;
+  labelValue?: string;
+  harbormasterEnabled?: boolean;
+  includeAbsent?: boolean;
+  sort?: string;
+  direction?: "asc" | "desc";
+}
