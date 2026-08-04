@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/Aznyi/HarborMaster/internal/config"
+	"github.com/Aznyi/HarborMaster/internal/domain"
 )
 
 // APIPrefix is the versioned base path for every JSON endpoint.
@@ -24,8 +25,23 @@ type Server struct {
 	dockerEvents DockerEventReader
 	eventEngine  EventEngineReader
 
-	logger  *slog.Logger
-	cfg     config.Server
+	snapshots SnapshotReader
+	capture   SnapshotCapturer
+	diffs     SnapshotDiffer
+	readiness SnapshotReadinessEvaluator
+	// snapshotSpecBuilder renders a container's CURRENT configuration as a
+	// canonical document, in memory, for a diff against the present. It never
+	// persists anything: a GET must not create a durable record.
+	snapshotSpecBuilder func(domain.ContainerDetail) domain.SnapshotSpec
+
+	logger *slog.Logger
+	cfg    config.Server
+	// snapshotCfg carries the write-endpoint and diff limits.
+	snapshotCfg config.Snapshots
+	// writeLimiter bounds the two POST endpoints. Per process, not per client:
+	// there is no authentication and therefore no trustworthy client identity.
+	writeLimiter *rateLimiter
+
 	assets  fs.FS
 	handler http.Handler
 }
@@ -56,10 +72,27 @@ type Options struct {
 	DockerEvents DockerEventReader
 	EventEngine  EventEngineReader
 
+	// Snapshots answers the snapshot list and detail endpoints, Capture the
+	// POST endpoint, Diffs the comparison endpoint, and Readiness the
+	// restore-readiness endpoint. All nil in a deployment with snapshots
+	// disabled, which yields a 503 rather than a broken route.
+	//
+	// There is deliberately no restore capability here, and none anywhere else:
+	// Phase 3 records configuration, it does not apply it.
+	Snapshots SnapshotReader
+	Capture   SnapshotCapturer
+	Diffs     SnapshotDiffer
+	Readiness SnapshotReadinessEvaluator
+	// SnapshotSpecBuilder renders a container's current configuration for a
+	// diff against the present, in memory only.
+	SnapshotSpecBuilder func(domain.ContainerDetail) domain.SnapshotSpec
+
 	// Logger receives access and error records. Defaults to slog.Default.
 	Logger *slog.Logger
 	// Config supplies request-size and timeout limits.
 	Config config.Server
+	// SnapshotConfig supplies the write-endpoint and diff limits.
+	SnapshotConfig config.Snapshots
 	// Assets is the compiled frontend. A nil FS yields an API-only server.
 	Assets fs.FS
 }
@@ -83,10 +116,24 @@ func NewServer(opts Options) *Server {
 		dockerEvents: opts.DockerEvents,
 		eventEngine:  opts.EventEngine,
 
-		logger: logger,
-		cfg:    opts.Config,
-		assets: opts.Assets,
+		snapshots:           opts.Snapshots,
+		capture:             opts.Capture,
+		diffs:               opts.Diffs,
+		readiness:           opts.Readiness,
+		snapshotSpecBuilder: opts.SnapshotSpecBuilder,
+
+		logger:      logger,
+		cfg:         opts.Config,
+		snapshotCfg: opts.SnapshotConfig,
+		assets:      opts.Assets,
 	}
+
+	s.writeLimiter = newRateLimiter(
+		opts.SnapshotConfig.WriteRateLimit,
+		opts.SnapshotConfig.WriteRateBurst,
+		nil,
+	)
+
 	s.handler = s.routes()
 	return s
 }
@@ -128,6 +175,15 @@ func (s *Server) routes() http.Handler {
 		APIPrefix + "/events/{id}":   s.handleEventDetail,
 		APIPrefix + "/event-engine":  s.handleEventEngine,
 		APIPrefix + "/event-filters": s.handleEventFilters,
+		// Configuration snapshots. Read-only, like everything above: the
+		// capture endpoint is registered separately below because it is a POST.
+		//
+		// There is deliberately NO restore, rollback, or apply route. Phase 3
+		// records configuration and validates whether it could be restored; it
+		// does not restore, and nothing in this router could.
+		APIPrefix + "/snapshots/{id}":                   s.handleSnapshotDetail,
+		APIPrefix + "/snapshots/{id}/diff":              s.handleSnapshotDiff,
+		APIPrefix + "/snapshots/{id}/restore-readiness": s.handleSnapshotReadiness,
 	} {
 		mux.HandleFunc("GET "+path, handler)
 		mux.HandleFunc(path, s.handleMethodNotAllowed("GET, HEAD"))
@@ -143,11 +199,21 @@ func (s *Server) routes() http.Handler {
 	// "/events/{id}" handler rather than a 404.
 	mux.HandleFunc("GET "+APIPrefix+"/events/stream", s.handleEventStream)
 
-	// The one non-GET endpoint in the whole router. It mutates HarborMaster's
-	// own inventory, never Docker: it re-reads the host and replaces what
-	// HarborMaster has recorded. Nothing here can change a container.
+	// The only two non-GET endpoints in the whole router. Neither changes a
+	// container: refresh re-reads the host and replaces what HarborMaster has
+	// recorded, and capture writes a snapshot to HarborMaster's own database.
+	//
+	// Both go through guardWrite: strict validation, rate limiting, and the
+	// Fetch Metadata checks. See write_guard.go for why the last of those is
+	// defence in depth rather than the primary control.
 	mux.HandleFunc("POST "+APIPrefix+"/inventory/refresh", s.handleInventoryRefresh)
 	mux.HandleFunc(APIPrefix+"/inventory/refresh", s.handleMethodNotAllowed("POST"))
+
+	// /snapshots serves GET for the list and POST for capture, so the bare
+	// pattern registers a 405 for everything else.
+	mux.HandleFunc("GET "+APIPrefix+"/snapshots", s.handleSnapshots)
+	mux.HandleFunc("POST "+APIPrefix+"/snapshots", s.handleSnapshotCreate)
+	mux.HandleFunc(APIPrefix+"/snapshots", s.handleMethodNotAllowed("GET, HEAD, POST"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

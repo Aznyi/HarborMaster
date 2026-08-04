@@ -155,22 +155,29 @@ describe("App shell", () => {
     const nav = screen.getByRole("navigation", { name: /primary/i });
     await user.click(within(nav).getByRole("link", { name: "Snapshots" }));
 
-    expect(
-      screen.getByRole("heading", { name: "Snapshots", level: 2 }),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Snapshots", level: 2 }),
+      ).toBeInTheDocument(),
+    );
     await settle();
   });
 
-  // Placeholder rows in an operations tool are indistinguishable from real
-  // data at a glance, so pages without an endpoint must show nothing.
-  // Containers and Images now have endpoints; Snapshots and Events do not.
-  it("shows no placeholder data on pages whose endpoints do not exist yet", async () => {
+  // Placeholder rows in an operations tool are indistinguishable from real data
+  // at a glance, so a page with no data must show an empty state rather than
+  // invent one.
+  //
+  // Snapshots gained a real endpoint in Phase 3; what it must NOT do is render
+  // a table when the backend returned nothing.
+  it("shows no placeholder data when the snapshot list is empty", async () => {
     stubApi(healthyReport);
     renderApp("/snapshots");
 
+    await waitFor(() =>
+      expect(screen.getByText(/No snapshots yet/i)).toBeInTheDocument(),
+    );
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.queryByRole("row")).not.toBeInTheDocument();
-    expect(screen.getByText(/not available yet/i)).toBeInTheDocument();
     await settle();
   });
 

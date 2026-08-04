@@ -115,6 +115,15 @@ func (s *Server) handleInventoryRefresh(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The same write-endpoint protections as snapshot capture. This endpoint
+	// shipped without them; leaving a weaker sibling next to a hardened one
+	// would just move the abuse here. A refresh drives a full sweep of a
+	// privileged socket, so an unbounded request rate is a real amplifier.
+	if err := s.guardWrite(r); err != nil {
+		s.writeGuardFailure(w, r, err)
+		return
+	}
+
 	// Checked up front so an unreachable daemon is an immediate, honest 503
 	// rather than an accepted refresh that fails seconds later out of sight.
 	if err := s.inventory.CheckRuntime(r.Context()); err != nil {

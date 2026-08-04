@@ -14,6 +14,7 @@ import {
   ErrorState,
   LoadingState,
 } from "../components/States";
+import { SnapshotSummary } from "../components/SnapshotSummary";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
 /** Outcome of a manual refresh, shown until the next attempt. */
@@ -50,6 +51,7 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
       <InventoryHeader inventory={inventory} />
       <ConnectionCards status={inventory.data} health={health} />
       <EventEnginePanel />
+      <SnapshotSummary />
       <ContainerMetrics status={inventory.data} />
       <CatalogMetrics status={inventory.data} />
       <WarningsPanel status={inventory.data} />

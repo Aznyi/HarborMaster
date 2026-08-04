@@ -78,15 +78,26 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 
 func newSnapshot(containerID, checksum string) domain.Snapshot {
 	return domain.Snapshot{
-		ContainerID:   containerID,
-		ContainerName: "web",
-		Source:        domain.SnapshotSourceManual,
-		Image:         "nginx:1.27",
-		ImageID:       "sha256:abc",
-		Spec:          []byte(`{"image":"nginx:1.27"}`),
-		Checksum:      checksum,
-		CreatedAt:     time.Now().UTC(),
+		ContainerID:    containerID,
+		ContainerName:  "web",
+		Trigger:        domain.SnapshotTriggerManual,
+		ImageReference: "nginx:1.27",
+		ImageID:        "sha256:abc",
+		SpecVersion:    domain.SnapshotSpecVersion,
+		SpecJSON:       []byte(`{"image":"nginx:1.27"}`),
+		Checksum:       checksum,
+		CreatedAt:      time.Now().UTC(),
 	}
+}
+
+// createSnapshot stores a snapshot with no child rows.
+func createSnapshot(t *testing.T, db *store.DB, s domain.Snapshot) domain.Snapshot {
+	t.Helper()
+	created, err := db.Snapshots.Create(context.Background(), s, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	return created
 }
 
 const (
@@ -98,10 +109,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	created, err := db.Snapshots.Create(ctx, newSnapshot("container-a", checksumA))
-	if err != nil {
-		t.Fatalf("create snapshot: %v", err)
-	}
+	created := createSnapshot(t, db, newSnapshot("container-a", checksumA))
 	if created.ID == 0 {
 		t.Fatal("expected an assigned ID")
 	}
@@ -113,8 +121,15 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.ContainerID != "container-a" || got.Checksum != checksumA {
 		t.Errorf("round trip mismatch: %+v", got)
 	}
-	if string(got.Spec) != `{"image":"nginx:1.27"}` {
-		t.Errorf("spec mismatch: %s", got.Spec)
+	if string(got.SpecJSON) != `{"image":"nginx:1.27"}` {
+		t.Errorf("spec mismatch: %s", got.SpecJSON)
+	}
+	if got.Trigger != domain.SnapshotTriggerManual {
+		t.Errorf("Trigger = %q, want manual", got.Trigger)
+	}
+	// A fresh snapshot has had no readiness evaluation.
+	if got.ReadinessStatus != domain.ReadinessUnknown {
+		t.Errorf("ReadinessStatus = %q, want unknown", got.ReadinessStatus)
 	}
 	// Timestamps must survive the text encoding used by SQLite.
 	if got.CreatedAt.IsZero() || got.CreatedAt.Location() != time.UTC {
@@ -127,17 +142,14 @@ func TestSnapshotCreateIsIdempotentPerChecksum(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	first, err := db.Snapshots.Create(ctx, newSnapshot("container-a", checksumA))
-	if err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	second, err := db.Snapshots.Create(ctx, newSnapshot("container-a", checksumA))
-	if err != nil {
-		t.Fatalf("second create: %v", err)
-	}
+	first := createSnapshot(t, db, newSnapshot("container-a", checksumA))
+	second := createSnapshot(t, db, newSnapshot("container-a", checksumA))
 
 	if first.ID != second.ID {
 		t.Errorf("duplicate checksum created a new row: %d then %d", first.ID, second.ID)
+	}
+	if !second.Deduplicated {
+		t.Error("Deduplicated not reported; the caller cannot tell a no-op from a capture")
 	}
 	count, err := db.Snapshots.Count(ctx)
 	if err != nil {
@@ -154,19 +166,11 @@ func TestSnapshotListByContainerIsNewestFirst(t *testing.T) {
 
 	older := newSnapshot("container-a", checksumA)
 	older.CreatedAt = time.Now().UTC().Add(-time.Hour)
-	newer := newSnapshot("container-a", checksumB)
+	createSnapshot(t, db, older)
+	createSnapshot(t, db, newSnapshot("container-a", checksumB))
+	createSnapshot(t, db, newSnapshot("container-b", checksumA))
 
-	if _, err := db.Snapshots.Create(ctx, older); err != nil {
-		t.Fatalf("create older: %v", err)
-	}
-	if _, err := db.Snapshots.Create(ctx, newer); err != nil {
-		t.Fatalf("create newer: %v", err)
-	}
-	if _, err := db.Snapshots.Create(ctx, newSnapshot("container-b", checksumA)); err != nil {
-		t.Fatalf("create other container: %v", err)
-	}
-
-	got, err := db.Snapshots.ListByContainer(ctx, "container-a", store.Page{})
+	got, _, err := db.Snapshots.List(ctx, store.SnapshotFilter{ContainerID: "container-a"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -191,15 +195,15 @@ func TestSnapshotGetMissingReturnsErrNotFound(t *testing.T) {
 func TestSnapshotListReturnsEmptySliceNotNil(t *testing.T) {
 	db := openTestDB(t)
 
-	got, err := db.Snapshots.List(context.Background(), store.Page{})
+	got, total, err := db.Snapshots.List(context.Background(), store.SnapshotFilter{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected a non-nil empty slice")
 	}
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
+	if len(got) != 0 || total != 0 {
+		t.Errorf("len = %d, total = %d, want 0 and 0", len(got), total)
 	}
 }
 
@@ -208,19 +212,35 @@ func TestSnapshotPageLimitIsBounded(t *testing.T) {
 	ctx := context.Background()
 
 	for i := range 5 {
-		s := newSnapshot("container-a", checksumA[:63]+string(rune('0'+i)))
-		if _, err := db.Snapshots.Create(ctx, s); err != nil {
-			t.Fatalf("create %d: %v", i, err)
-		}
+		createSnapshot(t, db, newSnapshot("container-a", checksumA[:63]+string(rune('0'+i))))
 	}
 
-	got, err := db.Snapshots.List(ctx, store.Page{Limit: 2})
+	got, total, err := db.Snapshots.List(ctx, store.SnapshotFilter{Page: store.Page{Limit: 2}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(got) != 2 {
 		t.Errorf("len = %d, want 2", len(got))
 	}
+	// The total reports the whole match, not the page, or pagination controls
+	// would render wrongly.
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+}
+
+// A caller must not be able to ask the process to materialise the whole table.
+func TestSnapshotPageLimitIsCapped(t *testing.T) {
+	db := openTestDB(t)
+
+	_, _, err := db.Snapshots.List(context.Background(), store.SnapshotFilter{
+		Page: store.Page{Limit: 100000},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// normalise() replaces an out-of-range limit rather than honouring it; the
+	// query above would otherwise be unbounded.
 }
 
 func TestEventAppendAndList(t *testing.T) {

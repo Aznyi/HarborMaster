@@ -30,6 +30,15 @@ import type {
   EventEngineStatus,
   EventFilterOptions,
 } from "./eventTypes";
+import type {
+  CreateSnapshotRequest,
+  DiffGroupName,
+  ReadinessReport,
+  Snapshot,
+  SnapshotDetail,
+  SnapshotDiff,
+  SnapshotQuery,
+} from "./snapshotTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -82,6 +91,7 @@ async function request<T>(
   path: string,
   options: RequestOptions = {},
   method: "GET" | "POST" = "GET",
+  body?: unknown,
 ): Promise<T> {
   const { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
   const timeoutController = new AbortController();
@@ -90,11 +100,18 @@ async function request<T>(
   const signals = [timeoutController.signal];
   if (signal) signals.push(signal);
 
+  const headers: Record<string, string> = { Accept: "application/json" };
+  // Set only when there is a body. The server requires it on writes, which also
+  // forces a CORS preflight for any cross-origin caller -- a plain form POST
+  // cannot set this header, so it cannot reach the write endpoints.
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
       method,
-      headers: { Accept: "application/json" },
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
       // No credentials: the API is unauthenticated and must not attach cookies
       // to a cross-origin dev proxy by accident.
       credentials: "omit",
@@ -358,4 +375,107 @@ export function eventStreamUrl(lastEventId?: number): string {
     return `${API_BASE}/events/stream`;
   }
   return `${API_BASE}/events/stream?lastEventId=${lastEventId}`;
+}
+
+// ------------------------------------------------------------- snapshots --
+
+/**
+ * Builds the snapshot list query string.
+ *
+ * Empty values are omitted rather than sent blank, so the request URL reflects
+ * exactly which filters are active -- which is also what makes it assertable.
+ */
+export function buildSnapshotQuery(query: SnapshotQuery): string {
+  const params = new URLSearchParams();
+
+  const setIf = (key: string, value: string | number | undefined) => {
+    if (value === undefined || value === "") return;
+    params.set(key, String(value));
+  };
+
+  setIf("page", query.page);
+  setIf("pageSize", query.pageSize);
+  setIf("containerId", query.containerId);
+  setIf("checksum", query.checksum);
+  setIf("since", query.since);
+  setIf("until", query.until);
+  setIf("sort", query.sort);
+  setIf("direction", query.direction);
+
+  // Repeated rather than comma-joined: both are accepted, and repetition
+  // survives a value that itself contains a comma.
+  for (const trigger of query.trigger ?? []) params.append("trigger", trigger);
+  for (const readiness of query.readiness ?? []) params.append("readiness", readiness);
+
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+/** GET /api/v1/snapshots */
+export function listSnapshots(
+  query: SnapshotQuery = {},
+  options?: RequestOptions,
+): Promise<ListResponse<Snapshot>> {
+  return request<ListResponse<Snapshot>>(
+    `/snapshots${buildSnapshotQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/snapshots/{id} */
+export function getSnapshot(
+  id: number,
+  options?: RequestOptions,
+): Promise<SnapshotDetail> {
+  return request<SnapshotDetail>(`/snapshots/${id}`, options);
+}
+
+/**
+ * POST /api/v1/snapshots
+ *
+ * Captures a container's configuration. This does NOT change the container:
+ * capture reads HarborMaster's inventory and writes HarborMaster's database.
+ *
+ * A 200 with `deduplicated: true` means the configuration was unchanged and the
+ * existing snapshot was returned; nothing was created. A 409 means a capture is
+ * already running for that container.
+ */
+export function createSnapshot(
+  body: CreateSnapshotRequest,
+  options?: RequestOptions,
+): Promise<Snapshot> {
+  return request<Snapshot>("/snapshots", options, "POST", body);
+}
+
+/**
+ * GET /api/v1/snapshots/{id}/diff
+ *
+ * `against` is a snapshot id, or "current" to compare with live configuration.
+ * Comparing against current writes nothing.
+ */
+export function getSnapshotDiff(
+  id: number,
+  against: number | "current" = "current",
+  opts: { groups?: DiffGroupName[]; includeUnchanged?: boolean } = {},
+  options?: RequestOptions,
+): Promise<SnapshotDiff> {
+  const params = new URLSearchParams();
+  params.set("against", String(against));
+  if (opts.includeUnchanged) params.set("includeUnchanged", "true");
+  for (const group of opts.groups ?? []) params.append("group", group);
+
+  return request<SnapshotDiff>(`/snapshots/${id}/diff?${params.toString()}`, options);
+}
+
+/**
+ * GET /api/v1/snapshots/{id}/restore-readiness
+ *
+ * Informational. HarborMaster cannot restore a container; this reports whether
+ * restoration WOULD succeed, so the gap is visible before it matters.
+ */
+export function getSnapshotReadiness(
+  id: number,
+  options?: RequestOptions,
+): Promise<ReadinessReport> {
+  return request<ReadinessReport>(`/snapshots/${id}/restore-readiness`, options);
 }

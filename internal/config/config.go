@@ -93,6 +93,48 @@ const (
 	MaxEventStreamSubscribers = 256
 	MaxEventStreamReplay      = 1000
 
+	// Snapshot defaults.
+	//
+	// Snapshots are HarborMaster's own records: capture reads the inventory and
+	// writes to the local database. Nothing here can change a container.
+	DefaultSnapshotsEnabled = true
+
+	// DefaultSnapshotMaxInventoryAge is how stale the inventory may be before a
+	// readiness verdict degrades to at most "warning". Most readiness checks
+	// answer from the inventory rather than the daemon, so a "ready" derived
+	// from a six-hour-old reading states history as though it were fact.
+	DefaultSnapshotMaxInventoryAge = 15 * time.Minute
+
+	// Retention. The newest snapshot of a container is never pruned under any
+	// policy: it is the restore baseline. Zero on either dimension disables it.
+	DefaultSnapshotRetentionCount = 50
+	DefaultSnapshotRetentionAge   = 90 * 24 * time.Hour
+	DefaultSnapshotPruneInterval  = 1 * time.Hour
+	DefaultSnapshotPruneBatch     = 200
+
+	// Diff limits. A diff decodes two documents and cross-products two
+	// configuration sets, and an unauthenticated caller can ask for one
+	// repeatedly, so every dimension is bounded.
+	DefaultSnapshotMaxConcurrentDiffs = 4
+	DefaultSnapshotDiffTimeout        = 5 * time.Second
+	DefaultSnapshotMaxDiffEntries     = 1000
+	DefaultSnapshotMaxGroupEntries    = 5000
+
+	// Write-endpoint limits. Per-process rather than per-client: there is no
+	// authentication and therefore no trustworthy client identity to key on,
+	// and a per-IP bucket would be trivially evaded while implying a precision
+	// HarborMaster does not have.
+	DefaultWriteRateLimit = 6.0 // requests per minute
+	DefaultWriteRateBurst = 3
+
+	// DefaultSnapshotMaxReasonBytes bounds the operator-supplied capture reason.
+	DefaultSnapshotMaxReasonBytes = 500
+
+	// Snapshot bounds.
+	MaxSnapshotConcurrentDiffs = 64
+	MaxSnapshotPruneBatch      = 10000
+	MaxSnapshotReasonBytes     = 4096
+
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
 	// orchestrator's own timeout is worse than useless, because the runtime
@@ -217,6 +259,71 @@ type Events struct {
 	StreamHeartbeat time.Duration
 }
 
+// Snapshots holds settings for configuration capture, restore readiness,
+// retention, and the diff engine.
+//
+// A snapshot is a read of the current configuration written to HarborMaster's
+// own database. Nothing in this section grants any ability to change Docker.
+type Snapshots struct {
+	// Enabled turns capture and the snapshot endpoints on or off.
+	Enabled bool
+
+	// HMACKeyFile and HMACKey supply the key that derives secret digests.
+	//
+	// HMACKeyFile is preferred and is listed first because it is how Docker
+	// Secrets and Kubernetes secret volumes present material, and it keeps the
+	// key out of the process environment -- an environment variable is readable
+	// through /proc/<pid>/environ and is routinely captured by process
+	// inspectors and crash reporters. Empty on both means the key is generated
+	// once under the data directory, which is a standalone convenience rather
+	// than the recommended production path.
+	HMACKeyFile string
+	HMACKey     string
+
+	// MaskMode is "default" or "all-sensitive".
+	MaskMode string
+	// MaskPatternsExtra is merged with the defaults. Additive, so it cannot
+	// reduce protection.
+	MaskPatternsExtra []string
+	// MaskPatternsOverride REPLACES the defaults. The one masking setting that
+	// can reduce protection, so it warns at startup.
+	MaskPatternsOverride []string
+
+	// MaxInventoryAge is how stale the inventory may be before readiness
+	// degrades to at most "warning". Readiness never triggers a refresh: a read
+	// endpoint that can drive privileged socket traffic is a DoS amplifier.
+	MaxInventoryAge time.Duration
+
+	// RetentionCount is the maximum snapshots kept PER CONTAINER and
+	// RetentionAge the maximum age. Zero on either disables that dimension;
+	// both zero keeps everything, which is valid but unbounded.
+	RetentionCount int
+	RetentionAge   time.Duration
+	// PruneInterval is how often retention runs, PruneBatch how many rows one
+	// transaction deletes. Bounded batches keep a large backlog from holding
+	// the single SQLite writer for an unbounded time.
+	PruneInterval time.Duration
+	PruneBatch    int
+
+	// MaxConcurrentDiffs bounds simultaneous diff computations process-wide.
+	// Excess requests are refused with 429 rather than queued: a queue converts
+	// a load spike into unbounded memory and latency.
+	MaxConcurrentDiffs int
+	// DiffTimeout bounds one diff; MaxDiffEntries caps returned changes across
+	// all groups; MaxGroupEntries caps how much one group compares.
+	DiffTimeout     time.Duration
+	MaxDiffEntries  int
+	MaxGroupEntries int
+
+	// WriteRateLimit (requests per minute) and WriteRateBurst bound the POST
+	// endpoints. Per-process, not per-client.
+	WriteRateLimit float64
+	WriteRateBurst int
+
+	// MaxReasonBytes bounds the operator-supplied capture reason.
+	MaxReasonBytes int
+}
+
 // Healthcheck holds settings for the `harbormaster healthcheck` command.
 type Healthcheck struct {
 	// Timeout bounds the whole probe, connection included.
@@ -240,12 +347,16 @@ type Config struct {
 	Healthcheck Healthcheck
 	Inventory   Inventory
 	Events      Events
+	Snapshots   Snapshots
 }
 
 var (
 	validLogLevels  = []string{"debug", "info", "warn", "error"}
 	validLogFormats = []string{"json", "text"}
 )
+
+// defaultMaskMode is the classification policy when none is configured.
+const defaultMaskMode = domain.MaskModeDefault
 
 // Load reads configuration from the process environment, applying defaults for
 // anything unset and validating the result.
@@ -281,6 +392,16 @@ func load(lookup lookupFunc) (Config, error) {
 		},
 		Inventory: Inventory{
 			MaskPatterns: listVar(lookup, "INVENTORY_MASK_PATTERNS", domain.DefaultMaskPatterns),
+		},
+		Snapshots: Snapshots{
+			HMACKeyFile: stringVar(lookup, "SNAPSHOT_HMAC_KEY_FILE", ""),
+			HMACKey:     stringVar(lookup, "SNAPSHOT_HMAC_KEY", ""),
+			MaskMode:    strings.ToLower(stringVar(lookup, "MASK_MODE", string(defaultMaskMode))),
+			// nil rather than the defaults: "unset" and "set to the defaults"
+			// must stay distinguishable so Masker can tell an additive merge
+			// from an override.
+			MaskPatternsExtra:    listVar(lookup, "MASK_PATTERNS_EXTRA", nil),
+			MaskPatternsOverride: listVar(lookup, "MASK_PATTERNS_OVERRIDE", nil),
 		},
 	}
 
@@ -357,6 +478,38 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Snapshots.Enabled, err = boolVar(lookup, "SNAPSHOTS_ENABLED", DefaultSnapshotsEnabled)
+	collect(err)
+	cfg.Snapshots.MaxInventoryAge, err = durationVar(lookup,
+		"SNAPSHOT_READINESS_MAX_INVENTORY_AGE", DefaultSnapshotMaxInventoryAge)
+	collect(err)
+	cfg.Snapshots.RetentionAge, err = durationVar(lookup, "SNAPSHOT_RETENTION_AGE", DefaultSnapshotRetentionAge)
+	collect(err)
+	cfg.Snapshots.PruneInterval, err = durationVar(lookup, "SNAPSHOT_PRUNE_INTERVAL", DefaultSnapshotPruneInterval)
+	collect(err)
+	cfg.Snapshots.DiffTimeout, err = durationVar(lookup, "SNAPSHOT_DIFF_TIMEOUT", DefaultSnapshotDiffTimeout)
+	collect(err)
+	cfg.Snapshots.WriteRateLimit, err = floatVar(lookup, "WRITE_RATE_LIMIT", DefaultWriteRateLimit)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"SNAPSHOT_RETENTION_COUNT", DefaultSnapshotRetentionCount, &cfg.Snapshots.RetentionCount},
+		{"SNAPSHOT_PRUNE_BATCH", DefaultSnapshotPruneBatch, &cfg.Snapshots.PruneBatch},
+		{"SNAPSHOT_MAX_CONCURRENT_DIFFS", DefaultSnapshotMaxConcurrentDiffs, &cfg.Snapshots.MaxConcurrentDiffs},
+		{"SNAPSHOT_MAX_DIFF_ENTRIES", DefaultSnapshotMaxDiffEntries, &cfg.Snapshots.MaxDiffEntries},
+		{"SNAPSHOT_MAX_GROUP_ENTRIES", DefaultSnapshotMaxGroupEntries, &cfg.Snapshots.MaxGroupEntries},
+		{"SNAPSHOT_MAX_REASON_BYTES", DefaultSnapshotMaxReasonBytes, &cfg.Snapshots.MaxReasonBytes},
+		{"WRITE_RATE_BURST", DefaultWriteRateBurst, &cfg.Snapshots.WriteRateBurst},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -421,8 +574,87 @@ func (c Config) Validate() error {
 	}
 
 	errs = append(errs, c.Events.validate()...)
+	errs = append(errs, c.Snapshots.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the snapshot settings.
+//
+// Validated even when snapshots are disabled, for the same reason the event
+// settings are: a configuration error that only surfaces the day someone flips
+// the feature on is a worse failure than one caught at startup.
+func (s Snapshots) validate() []error {
+	var errs []error
+
+	if !domain.ValidMaskMode(s.MaskMode) {
+		errs = append(errs, fmt.Errorf("%sMASK_MODE must be one of default, all-sensitive", envPrefix))
+	}
+
+	// Zero is a documented "disabled" on both retention dimensions; negative is
+	// never meaningful and is far more likely a typo than an intention.
+	for _, v := range []struct {
+		name  string
+		value int
+	}{
+		{"SNAPSHOT_RETENTION_COUNT", s.RetentionCount},
+	} {
+		if v.value < 0 {
+			errs = append(errs, fmt.Errorf("%s%s must not be negative", envPrefix, v.name))
+		}
+	}
+	if s.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_RETENTION_AGE must not be negative", envPrefix))
+	}
+
+	// These bound real work and must be positive: a zero batch would never make
+	// progress, and a zero concurrency ceiling would refuse every diff.
+	if s.PruneBatch < 1 || s.PruneBatch > MaxSnapshotPruneBatch {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_PRUNE_BATCH must be between 1 and %d",
+			envPrefix, MaxSnapshotPruneBatch))
+	}
+	if s.PruneInterval <= 0 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_PRUNE_INTERVAL must be positive", envPrefix))
+	}
+	if s.MaxConcurrentDiffs < 1 || s.MaxConcurrentDiffs > MaxSnapshotConcurrentDiffs {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_MAX_CONCURRENT_DIFFS must be between 1 and %d",
+			envPrefix, MaxSnapshotConcurrentDiffs))
+	}
+	// An unbounded diff is a denial-of-service surface on an unauthenticated
+	// endpoint, so there is no "0 means unlimited" here.
+	if s.DiffTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_DIFF_TIMEOUT must be positive", envPrefix))
+	}
+	if s.MaxDiffEntries < 1 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_MAX_DIFF_ENTRIES must be positive", envPrefix))
+	}
+	if s.MaxGroupEntries < 1 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_MAX_GROUP_ENTRIES must be positive", envPrefix))
+	}
+	if s.MaxReasonBytes < 1 || s.MaxReasonBytes > MaxSnapshotReasonBytes {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_MAX_REASON_BYTES must be between 1 and %d",
+			envPrefix, MaxSnapshotReasonBytes))
+	}
+	if s.MaxInventoryAge <= 0 {
+		errs = append(errs, fmt.Errorf("%sSNAPSHOT_READINESS_MAX_INVENTORY_AGE must be positive", envPrefix))
+	}
+	if s.WriteRateLimit <= 0 {
+		errs = append(errs, fmt.Errorf("%sWRITE_RATE_LIMIT must be positive", envPrefix))
+	}
+	if s.WriteRateBurst < 1 {
+		errs = append(errs, fmt.Errorf("%sWRITE_RATE_BURST must be at least 1", envPrefix))
+	}
+
+	// Both forms set at once is ambiguous: it is not obvious whether the
+	// operator wanted the union or the replacement, and guessing either way
+	// could silently reduce protection.
+	if len(s.MaskPatternsExtra) > 0 && len(s.MaskPatternsOverride) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"%sMASK_PATTERNS_EXTRA and %sMASK_PATTERNS_OVERRIDE are mutually exclusive",
+			envPrefix, envPrefix))
+	}
+
+	return errs
 }
 
 // validate checks the event-engine settings.
@@ -529,12 +761,40 @@ func (c Config) ReconcileInterval() (interval time.Duration, ownedByEventEngine 
 //
 // Do not add value interpolation here.
 func (c Config) String() string {
-	return "config{redacted: server, docker, store, log, healthcheck, inventory, events}"
+	return "config{redacted: server, docker, store, log, healthcheck, inventory, events, snapshots}"
 }
 
 // Masker builds the environment masker from the configured patterns.
+//
+// Precedence: an explicit override replaces the defaults, extras merge with
+// them, and the legacy INVENTORY_MASK_PATTERNS setting is honoured when it was
+// customised. The mode applies in every case.
+//
+// MaskPatternsOverride is the only path that can reduce protection, which is
+// why it is the only one the loader warns about.
 func (c Config) Masker() *domain.Masker {
-	return domain.NewMasker(c.Inventory.MaskPatterns)
+	mode := domain.MaskMode(c.Snapshots.MaskMode)
+
+	switch {
+	case len(c.Snapshots.MaskPatternsOverride) > 0:
+		return domain.NewMaskerWithMode(c.Snapshots.MaskPatternsOverride, mode)
+
+	case len(c.Snapshots.MaskPatternsExtra) > 0:
+		merged := make([]string, 0,
+			len(c.Inventory.MaskPatterns)+len(c.Snapshots.MaskPatternsExtra))
+		merged = append(merged, c.Inventory.MaskPatterns...)
+		merged = append(merged, c.Snapshots.MaskPatternsExtra...)
+		return domain.NewMaskerWithMode(merged, mode)
+
+	default:
+		return domain.NewMaskerWithMode(c.Inventory.MaskPatterns, mode)
+	}
+}
+
+// MaskPatternsWereOverridden reports whether the operator replaced the default
+// pattern list, so startup can warn. Reporting the fact, not the patterns.
+func (c Config) MaskPatternsWereOverridden() bool {
+	return len(c.Snapshots.MaskPatternsOverride) > 0
 }
 
 // IsLoopback reports whether the HTTP listener is bound to a loopback address.
