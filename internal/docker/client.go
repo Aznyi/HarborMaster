@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -124,7 +124,10 @@ func (c *Client) Ping(ctx context.Context) (Info, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	ping, err := c.api.Ping(ctx)
+	// PingOptions is left zero: version negotiation is already requested once,
+	// at construction, via client.WithAPIVersionNegotiation. Asking for it again
+	// per Ping would re-negotiate on a liveness probe that runs on a timer.
+	ping, err := c.api.Ping(ctx, client.PingOptions{})
 	if err != nil {
 		return Info{}, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}

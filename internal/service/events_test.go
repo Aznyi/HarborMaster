@@ -593,7 +593,9 @@ func TestContainerEventTriggersATargetedRefresh(t *testing.T) {
 	harness.seedInventory(t)
 	harness.waitConnected(t)
 
-	before := harness.fake.InspectCalls
+	// Through the accessor, not the field: the engine inspects from its worker
+	// goroutines while this test reads, which is a data race on the bare field.
+	before := harness.fake.InspectCallCount()
 
 	harness.emit(t, containerEvent("fp-targeted", "container-000", domain.ActionStart))
 
@@ -601,7 +603,7 @@ func TestContainerEventTriggersATargetedRefresh(t *testing.T) {
 		return harness.engine.Status(context.Background()).Counters.TargetedRefreshes >= 1
 	})
 
-	if harness.fake.InspectCalls <= before {
+	if harness.fake.InspectCallCount() <= before {
 		t.Error("a targeted refresh must re-inspect the container rather than trust the event")
 	}
 	// A targeted refresh must not sweep the whole host.

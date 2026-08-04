@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/client"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/client"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -83,13 +81,13 @@ func (c *Client) ListContainers(ctx context.Context) ([]domain.ContainerSummary,
 
 	// All: true is the whole point -- an inventory that showed only running
 	// containers would miss exactly the ones an operator is looking for.
-	summaries, err := c.api.ContainerList(ctx, container.ListOptions{All: true})
+	listed, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 
-	out := make([]domain.ContainerSummary, 0, len(summaries))
-	for _, summary := range summaries {
+	out := make([]domain.ContainerSummary, 0, len(listed.Items))
+	for _, summary := range listed.Items {
 		out = append(out, normalizeSummary(summary))
 	}
 	sortContainerSummaries(out)
@@ -101,17 +99,23 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (*Inspection, 
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	// WithRaw so the raw payload comes from the same round trip; inspecting
-	// twice would risk the two views disagreeing.
-	inspected, raw, err := c.api.ContainerInspectWithRaw(ctx, id, false)
+	// ContainerInspect returns the decoded record and the raw payload from the
+	// SAME round trip. The v28 SDK spelled this ContainerInspectWithRaw; the
+	// guarantee is unchanged, and it still matters -- inspecting twice would
+	// risk the two views disagreeing.
+	//
+	// Size is left false deliberately: computing a container's filesystem size
+	// walks the layer tree on the daemon, which is expensive and is not
+	// something the inventory reports.
+	inspected, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
-		if client.IsErrNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrContainerVanished, domain.ShortenID(id))
 		}
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 
-	return c.normalizeInspection(inspected, raw), nil
+	return c.normalizeInspection(inspected.Container, inspected.Raw), nil
 }
 
 // InspectImage returns normalized metadata for one image.
@@ -121,13 +125,13 @@ func (c *Client) InspectImage(ctx context.Context, id string) (*domain.Image, er
 
 	inspected, err := c.api.ImageInspect(ctx, id)
 	if err != nil {
-		if client.IsErrNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrImageUnavailable, domain.ShortenID(id))
 		}
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 
-	image := normalizeImage(inspected)
+	image := normalizeImage(inspected.InspectResponse)
 	return &image, nil
 }
 
@@ -136,13 +140,13 @@ func (c *Client) ListNetworks(ctx context.Context) ([]domain.Network, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	summaries, err := c.api.NetworkList(ctx, network.ListOptions{})
+	listed, err := c.api.NetworkList(ctx, client.NetworkListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 
-	out := make([]domain.Network, 0, len(summaries))
-	for _, summary := range summaries {
+	out := make([]domain.Network, 0, len(listed.Items))
+	for _, summary := range listed.Items {
 		out = append(out, normalizeNetwork(summary))
 	}
 	sortNetworks(out)
@@ -156,17 +160,16 @@ func (c *Client) ListVolumes(ctx context.Context) ([]domain.Volume, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	listed, err := c.api.VolumeList(ctx, volume.ListOptions{})
+	listed, err := c.api.VolumeList(ctx, client.VolumeListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 
-	out := make([]domain.Volume, 0, len(listed.Volumes))
-	for _, vol := range listed.Volumes {
-		if vol == nil {
-			continue
-		}
-		out = append(out, normalizeVolume(*vol))
+	// Items are values in the moby client; the v28 SDK returned pointers, and
+	// the nil entry this loop used to skip can no longer occur.
+	out := make([]domain.Volume, 0, len(listed.Items))
+	for _, vol := range listed.Items {
+		out = append(out, normalizeVolume(vol))
 	}
 	sortVolumes(out)
 	return out, nil

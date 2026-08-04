@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
+	"github.com/moby/moby/api/types/events"
+	"github.com/moby/moby/client"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -79,12 +79,12 @@ var subscribedTypes = []string{
 // surfaces on the Errors channel, so a Docker that is down at startup is a
 // runtime condition rather than a startup failure.
 func (c *Client) StreamEvents(ctx context.Context, since time.Time) (*EventSubscription, error) {
-	args := filters.NewArgs()
-	for _, eventType := range subscribedTypes {
-		args.Add("type", eventType)
-	}
+	// client.Filters replaces filters.Args. Its zero value is documented as
+	// read-only, so the map is made before Add is called; Add returns the map
+	// it mutated, which is why the result is reassigned.
+	args := make(client.Filters).Add("type", subscribedTypes...)
 
-	options := events.ListOptions{Filters: args}
+	options := client.EventsListOptions{Filters: args}
 	if !since.IsZero() {
 		// Nanosecond precision so a resume cannot replay the event it resumed
 		// from, and cannot skip one that shared its second.
@@ -96,7 +96,10 @@ func (c *Client) StreamEvents(ctx context.Context, since time.Time) (*EventSubsc
 	// an HTTP client timeout applies to the whole exchange including the body.
 	// Using it here would tear the event stream down every DOCKER_TIMEOUT
 	// seconds, which would look exactly like a flapping daemon.
-	messages, errs := c.streamAPI.Events(ctx, options)
+	// Events now returns a single result struct rather than two bare channels.
+	// The channels inside it carry the same semantics as before.
+	stream := c.streamAPI.Events(ctx, options)
+	messages, errs := stream.Messages, stream.Err
 
 	converted := make(chan domain.DockerEvent)
 
@@ -165,15 +168,17 @@ func (c *Client) convertEvent(message events.Message) domain.DockerEvent {
 	return event
 }
 
-// actorID resolves the actor ID, falling back to the deprecated top-level ID.
+// actorID resolves the actor ID.
 //
-// Older daemons populate Message.ID and leave Actor.ID empty. Reading both is
-// what keeps the identity stable across daemon versions.
+// The v28 SDK also carried a deprecated top-level Message.ID, which this
+// function used as a fallback for daemons old enough to leave Actor.ID empty.
+// The moby API module removed that field, so the fallback is gone and cannot be
+// reinstated from the typed message. Actor.ID has been populated by every
+// daemon since API 1.22, which is far below the versions this client can
+// negotiate, so the practical effect is nil -- but an empty actor is still
+// tolerated here rather than treated as an error.
 func actorID(message events.Message) string {
-	if message.Actor.ID != "" {
-		return message.Actor.ID
-	}
-	return message.ID
+	return message.Actor.ID
 }
 
 // eventTimestamp resolves the event time and its nanosecond form.

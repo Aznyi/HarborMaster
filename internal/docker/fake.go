@@ -206,6 +206,33 @@ func (f *Fake) Subscriptions() int {
 	return f.StreamCalls
 }
 
+// InspectCallCount reports how many times InspectContainer was called.
+//
+// Read the counters through these accessors, never through the fields, whenever
+// the fake is shared with a running engine. The engine inspects from its own
+// worker goroutines, so reading the field directly from the test goroutine is a
+// data race -- one the race detector reports against whichever test happens to
+// observe it.
+func (f *Fake) InspectCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.InspectCalls
+}
+
+// ListCallCount reports how many times ListContainers was called.
+func (f *Fake) ListCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ListCalls
+}
+
+// ImageCallCount reports how many times InspectImage was called.
+func (f *Fake) ImageCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ImageCalls
+}
+
 // SetStreamErr sets or clears the subscription failure, so a test can model
 // Docker going away and coming back.
 func (f *Fake) SetStreamErr(err error) {

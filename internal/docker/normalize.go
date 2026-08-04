@@ -2,20 +2,21 @@ package docker
 
 // This file is the boundary. Every Docker SDK type that HarborMaster reads is
 // converted to a HarborMaster domain type here, and nowhere else. Nothing
-// outside package docker imports github.com/docker/docker.
+// outside package docker imports the Moby SDK, and internal/arch has a test
+// that fails the build if that ever stops being true.
 
 import (
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/volume"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -23,6 +24,19 @@ import (
 // maxHealthLogEntries bounds the healthcheck history carried per container.
 // The daemon keeps a handful; this caps it regardless of what it returns.
 const maxHealthLogEntries = 5
+
+// addrString renders a netip.Addr as text, mapping the invalid zero value to
+// the empty string.
+//
+// The moby API replaced several string address fields with netip.Addr. The zero
+// Addr means "unset", but its String method renders the literal "invalid IP",
+// which must never reach the inventory as though it were an address.
+func addrString(addr netip.Addr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	return addr.String()
+}
 
 // normalizeSummary converts a list entry.
 //
@@ -61,15 +75,16 @@ func normalizeSummary(summary container.Summary) domain.ContainerSummary {
 func (c *Client) normalizeInspection(inspected container.InspectResponse, raw []byte) *Inspection {
 	result := &Inspection{}
 
-	// Identity is read defensively BEFORE anything else. ID and Name are
-	// promoted through the embedded *ContainerJSONBase, so touching them when
-	// that pointer is nil panics -- and the whole point of this function is to
-	// survive a partial record.
-	var containerID, containerName string
-	if inspected.ContainerJSONBase != nil {
-		containerID = inspected.ID
-		containerName = strings.TrimPrefix(inspected.Name, "/")
-	}
+	// Identity is read defensively BEFORE anything else, because the whole
+	// point of this function is to survive a partial record.
+	//
+	// In the v28 SDK these fields were promoted through an embedded
+	// *ContainerJSONBase, and reading them on a nil pointer panicked. The moby
+	// API flattened that struct, so there is no pointer left to dereference --
+	// but a record with no ID is still a record HarborMaster cannot use, and it
+	// is treated exactly as the nil base was.
+	containerID := inspected.ID
+	containerName := strings.TrimPrefix(inspected.Name, "/")
 
 	warn := func(code domain.WarningCode, message string) {
 		result.Warnings = append(result.Warnings, domain.InventoryWarning{
@@ -83,7 +98,7 @@ func (c *Client) normalizeInspection(inspected container.InspectResponse, raw []
 
 	// The SDK models these as pointers, and a daemon that returns a partial
 	// record must degrade to a warning rather than panic mid-refresh.
-	if inspected.ContainerJSONBase == nil {
+	if containerID == "" {
 		warn(domain.WarningIncompleteData, "runtime returned a container record without base fields")
 		result.Detail = domain.ContainerDetail{}
 		result.RawJSON = redactRawInspection(raw, c.masker)
@@ -142,7 +157,7 @@ func (c *Client) normalizeInspection(inspected container.InspectResponse, raw []
 		Mounts:       normalizeMounts(inspected.Mounts, hostConfig),
 		Networks:     normalizeNetworkAttachments(inspected.NetworkSettings),
 		Resources:    normalizeResources(hostConfig),
-		Security:     normalizeSecurity(inspected.ContainerJSONBase, hostConfig),
+		Security:     normalizeSecurity(inspected, hostConfig),
 		Logging:      c.normalizeLogging(hostConfig.LogConfig),
 		Compose:      overview.Compose,
 		HarborMaster: overview.HarborMaster,
@@ -309,13 +324,18 @@ func normalizeLabels(labels map[string]string) []domain.Label {
 }
 
 // normalizeSummaryPorts converts the list view's flat port list.
-func normalizeSummaryPorts(ports []container.Port) []domain.Port {
+//
+// The moby API renamed container.Port to container.PortSummary and changed its
+// IP from a string to a netip.Addr. An invalid Addr is the zero value meaning
+// "not bound", and its String method renders "invalid IP", so it is mapped back
+// to an empty string rather than allowed to reach the API as text.
+func normalizeSummaryPorts(ports []container.PortSummary) []domain.Port {
 	out := make([]domain.Port, 0, len(ports))
 	for _, port := range ports {
 		out = append(out, domain.Port{
 			ContainerPort: port.PrivatePort,
 			Protocol:      defaultProtocol(port.Type),
-			HostIP:        port.IP,
+			HostIP:        addrString(port.IP),
 			HostPort:      port.PublicPort,
 			Published:     port.PublicPort != 0,
 		})
@@ -327,24 +347,24 @@ func normalizeSummaryPorts(ports []container.Port) []domain.Port {
 // normalizeInspectedPorts merges exposed-but-unpublished ports with published
 // bindings, so the inventory shows both what the image offers and what is
 // actually reachable.
-func normalizeInspectedPorts(exposed nat.PortSet, settings *container.NetworkSettings) []domain.Port {
+func normalizeInspectedPorts(exposed network.PortSet, settings *container.NetworkSettings) []domain.Port {
 	out := make([]domain.Port, 0, len(exposed))
 	bound := make(map[string]struct{})
 
 	if settings != nil {
 		for port, bindings := range settings.Ports {
-			containerPort, protocol := splitNatPort(port)
+			containerPort, protocol := splitPort(port)
 			if len(bindings) == 0 {
 				// Exposed via the port map but not bound to the host.
 				continue
 			}
-			bound[string(port)] = struct{}{}
+			bound[port.String()] = struct{}{}
 			for _, binding := range bindings {
 				hostPort, _ := strconv.ParseUint(binding.HostPort, 10, 16)
 				out = append(out, domain.Port{
 					ContainerPort: containerPort,
 					Protocol:      protocol,
-					HostIP:        binding.HostIP,
+					HostIP:        addrString(binding.HostIP),
 					HostPort:      uint16(hostPort),
 					Published:     true,
 				})
@@ -353,10 +373,10 @@ func normalizeInspectedPorts(exposed nat.PortSet, settings *container.NetworkSet
 	}
 
 	for port := range exposed {
-		if _, published := bound[string(port)]; published {
+		if _, published := bound[port.String()]; published {
 			continue
 		}
-		containerPort, protocol := splitNatPort(port)
+		containerPort, protocol := splitPort(port)
 		out = append(out, domain.Port{
 			ContainerPort: containerPort,
 			Protocol:      protocol,
@@ -368,13 +388,13 @@ func normalizeInspectedPorts(exposed nat.PortSet, settings *container.NetworkSet
 	return out
 }
 
-// splitNatPort turns "8080/tcp" into (8080, "tcp").
-func splitNatPort(port nat.Port) (uint16, string) {
-	number, err := strconv.ParseUint(port.Port(), 10, 16)
-	if err != nil {
-		return 0, defaultProtocol(port.Proto())
-	}
-	return uint16(number), defaultProtocol(port.Proto())
+// splitPort turns a "8080/tcp" port into (8080, "tcp").
+//
+// network.Port replaces go-connections' nat.Port. It parses the port number
+// itself and exposes it as a uint16, so the string parse the nat version needed
+// -- and its overflow case -- is gone.
+func splitPort(port network.Port) (uint16, string) {
+	return port.Num(), defaultProtocol(string(port.Proto()))
 }
 
 func defaultProtocol(protocol string) string {
@@ -485,12 +505,13 @@ func normalizeNetworkAttachments(settings *container.NetworkSettings) []domain.N
 			NetworkID:   endpoint.NetworkID,
 			NetworkName: name,
 			Aliases:     append([]string(nil), endpoint.Aliases...),
-			IPv4Address: endpoint.IPAddress,
-			IPv6Address: endpoint.GlobalIPv6Address,
-			Gateway:     endpoint.Gateway,
+			IPv4Address: addrString(endpoint.IPAddress),
+			IPv6Address: addrString(endpoint.GlobalIPv6Address),
+			Gateway:     addrString(endpoint.Gateway),
 			// MacAddress moved to the endpoint in API 1.44; Config.MacAddress
-			// is deprecated and not read.
-			MACAddress: endpoint.MacAddress,
+			// is deprecated and not read. The moby API types it as a
+			// network.HardwareAddr rather than a string.
+			MACAddress: endpoint.MacAddress.String(),
 			EndpointID: endpoint.EndpointID,
 			Links:      append([]string(nil), endpoint.Links...),
 		})
@@ -519,10 +540,13 @@ func normalizeResources(hostConfig *container.HostConfig) domain.Resources {
 		MemoryBytes:            hostConfig.Memory,
 		MemoryReservationBytes: hostConfig.MemoryReservation,
 		MemorySwapBytes:        hostConfig.MemorySwap,
-		KernelMemoryBytes:      hostConfig.KernelMemory, //nolint:staticcheck // reported only if a daemon still sets it
-		BlkioWeight:            hostConfig.BlkioWeight,
-		ShmSizeBytes:           hostConfig.ShmSize,
-		OomScoreAdj:            hostConfig.OomScoreAdj,
+		// KernelMemoryBytes is left unset: the moby API removed HostConfig's
+		// KernelMemory field, which the kernel itself deprecated in cgroup v2
+		// and the daemon stopped honouring. The domain field is retained so the
+		// REST response shape does not change; it now always reports 0.
+		BlkioWeight:  hostConfig.BlkioWeight,
+		ShmSizeBytes: hostConfig.ShmSize,
+		OomScoreAdj:  hostConfig.OomScoreAdj,
 	}
 
 	// Pointers preserved: "unset" and "zero" mean different things.
@@ -555,7 +579,9 @@ func normalizeResources(hostConfig *container.HostConfig) domain.Resources {
 	return resources
 }
 
-func normalizeSecurity(base *container.ContainerJSONBase, hostConfig *container.HostConfig) domain.Security {
+// normalizeSecurity reads from the inspect response itself rather than the
+// v28 SDK's embedded *ContainerJSONBase, which the moby API flattened away.
+func normalizeSecurity(base container.InspectResponse, hostConfig *container.HostConfig) domain.Security {
 	security := domain.Security{
 		Privileged:        hostConfig.Privileged,
 		ReadonlyRootfs:    hostConfig.ReadonlyRootfs,
@@ -676,9 +702,12 @@ func normalizeNetwork(summary network.Summary) domain.Network {
 		CreatedAt:  summary.Created.UTC(),
 		Labels:     copyStringMap(summary.Labels),
 	}
+	// IPAM subnets are netip.Prefix in the moby API rather than strings. An
+	// invalid prefix is the "unset" case and is skipped, exactly as an empty
+	// string was.
 	for _, config := range summary.IPAM.Config {
-		if config.Subnet != "" {
-			normalized.Subnets = append(normalized.Subnets, config.Subnet)
+		if config.Subnet.IsValid() {
+			normalized.Subnets = append(normalized.Subnets, config.Subnet.String())
 		}
 	}
 	sort.Strings(normalized.Subnets)
