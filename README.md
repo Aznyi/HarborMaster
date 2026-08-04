@@ -599,6 +599,17 @@ repositories, API handlers, OpenAPI schemas, and the frontend all speak
 HarborMaster's own types, which is what would let a second runtime adapter be
 added without touching the service or API layers.
 
+That rule is enforced, not just documented. `internal/arch` parses every Go
+file's imports and fails the build if the SDK appears outside the adapter, and
+it reflects over the runtime interface to fail if a mutation method is added.
+
+The SDK is the Moby client split out of the engine at Docker v29:
+`github.com/moby/moby/client` and `github.com/moby/moby/api`. The retired root
+module `github.com/docker/docker` is not used, and neither is the engine
+monolith `github.com/moby/moby/v2`, which is not meant to be consumed as an
+application library. See [docs/security-triage.md](docs/security-triage.md) for
+why the old module could not simply be upgraded.
+
 ```
 cmd/harbormaster      Composition root: config, wiring, signals, shutdown
   └── internal/api        REST handlers, middleware, SSE, SPA static serving

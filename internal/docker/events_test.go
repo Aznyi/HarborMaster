@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/events"
+	"github.com/moby/moby/api/types/events"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -177,16 +177,29 @@ func TestConvertEventHandlesSecondsOnlyTimestamps(t *testing.T) {
 	}
 }
 
-func TestConvertEventFallsBackToDeprecatedActorFields(t *testing.T) {
-	// Older daemons populate the top-level ID and leave Actor.ID empty.
+// The v28 SDK carried a deprecated top-level Message.ID that convertEvent used
+// when Actor.ID was empty. The moby API module removed that field, so the
+// fallback is gone -- but a message with no actor at all must still convert
+// into a usable record rather than panicking or being dropped.
+func TestConvertEventToleratesAnEmptyActor(t *testing.T) {
 	event := testClient().convertEvent(events.Message{
 		Type:   events.ContainerEventType,
 		Action: events.ActionStart,
-		ID:     "legacy-container-id",
 	})
 
-	if event.ActorID != "legacy-container-id" {
-		t.Errorf("actorId = %q, want the deprecated top-level id", event.ActorID)
+	if event.ActorID != "" {
+		t.Errorf("actorId = %q, want empty for a message with no actor", event.ActorID)
+	}
+	if event.Type != domain.EventTypeContainer {
+		t.Errorf("type = %q, want the event to still be classified", event.Type)
+	}
+	if event.Action != domain.DockerEventAction("start") {
+		t.Errorf("action = %q, want start", event.Action)
+	}
+	// A record with no actor must still be identifiable, or deduplication and
+	// persistence would both have nothing to key on.
+	if event.Fingerprint == "" {
+		t.Error("fingerprint is empty; an actorless event must still be identifiable")
 	}
 }
 

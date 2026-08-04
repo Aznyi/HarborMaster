@@ -312,9 +312,8 @@ func load(lookup lookupFunc) (Config, error) {
 	cfg.Inventory.AbsentRetention, err = durationVar(lookup, "INVENTORY_ABSENT_RETENTION", DefaultAbsentRetention)
 	collect(err)
 
-	workers, err := int64Var(lookup, "INVENTORY_WORKERS", int64(DefaultInventoryWorkers))
+	cfg.Inventory.Workers, err = intVar(lookup, "INVENTORY_WORKERS", DefaultInventoryWorkers)
 	collect(err)
-	cfg.Inventory.Workers = int(workers)
 
 	cfg.Events.Enabled, err = boolVar(lookup, "EVENTS_ENABLED", DefaultEventsEnabled)
 	collect(err)
@@ -353,9 +352,9 @@ func load(lookup lookupFunc) (Config, error) {
 		{"EVENTS_STREAM_BUFFER_SIZE", DefaultEventStreamBuffer, &cfg.Events.StreamBuffer},
 		{"EVENTS_STREAM_REPLAY_LIMIT", DefaultEventStreamReplay, &cfg.Events.StreamReplay},
 	} {
-		value, convErr := int64Var(lookup, target.name, int64(target.fallback))
+		value, convErr := intVar(lookup, target.name, target.fallback)
 		collect(convErr)
-		*target.into = int(value)
+		*target.into = value
 	}
 
 	if len(errs) > 0 {
@@ -601,6 +600,28 @@ func int64Var(lookup lookupFunc, name string, fallback int64) (int64, error) {
 	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
 		// The offending value is deliberately omitted from the error.
+		return 0, fmt.Errorf("%s%s must be an integer", envPrefix, name)
+	}
+	return v, nil
+}
+
+// intVar reads a value into a platform-width int.
+//
+// It parses straight to int instead of parsing an int64 and narrowing. On a
+// 32-bit build the narrowing conversion would silently wrap an oversized value
+// into a small, plausible one — 4294967304 becoming 8 workers — which then
+// passes Validate and is never reported. Out of range is an error here.
+func intVar(lookup lookupFunc, name string, fallback int) (int, error) {
+	raw, ok := lookup(envPrefix + name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		// The offending value is deliberately omitted from the error.
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, fmt.Errorf("%s%s is out of range for an integer", envPrefix, name)
+		}
 		return 0, fmt.Errorf("%s%s must be an integer", envPrefix, name)
 	}
 	return v, nil

@@ -5,20 +5,32 @@ package docker
 // directly. This is the one place in the codebase that does.
 
 import (
+	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/go-connections/nat"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/volume"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
+
+// mustMAC parses a hardware address for a fixture, panicking on a bad literal
+// in the same spirit as network.MustParsePort. The moby API types MacAddress as
+// network.HardwareAddr rather than as a string.
+func mustMAC(s string) network.HardwareAddr {
+	addr, err := net.ParseMAC(s)
+	if err != nil {
+		panic("fixture has an invalid mac address: " + s)
+	}
+	return network.HardwareAddr(addr)
+}
 
 func testClient() *Client {
 	return &Client{timeout: time.Second, masker: domain.NewDefaultMasker()}
@@ -31,77 +43,75 @@ func runningContainer() container.InspectResponse {
 	pidsLimit := int64(100)
 
 	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{
-			ID:              "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-			Name:            "/web",
-			Created:         "2026-08-01T10:00:00.000000000Z",
-			Image:           "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-			RestartCount:    2,
-			AppArmorProfile: "docker-default",
-			ProcessLabel:    "system_u:system_r:container_t:s0",
-			State: &container.State{
-				Status:     container.StateRunning,
-				Running:    true,
-				StartedAt:  "2026-08-02T09:00:00.000000000Z",
-				FinishedAt: "0001-01-01T00:00:00Z",
-				Health: &container.Health{
-					Status:        container.Healthy,
-					FailingStreak: 0,
-					Log: []*container.HealthcheckResult{
-						{
-							Start:    time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC),
-							End:      time.Date(2026, 8, 2, 9, 0, 1, 0, time.UTC),
-							ExitCode: 0,
-							Output:   "SECRET DATABASE PASSWORD hunter2 in probe output",
-						},
-					},
-				},
-			},
-			HostConfig: &container.HostConfig{
-				RestartPolicy:  container.RestartPolicy{Name: "unless-stopped"},
-				Privileged:     false,
-				ReadonlyRootfs: true,
-				CapAdd:         []string{"NET_BIND_SERVICE"},
-				CapDrop:        []string{"ALL"},
-				SecurityOpt:    []string{"no-new-privileges:true", "seccomp=unconfined"},
-				IpcMode:        "private",
-				PidMode:        "",
-				UTSMode:        "",
-				CgroupnsMode:   "private",
-				Sysctls:        map[string]string{"net.ipv4.ip_forward": "1"},
-				GroupAdd:       []string{"999"},
-				LogConfig: container.LogConfig{
-					Type: "json-file",
-					Config: map[string]string{
-						"max-size":     "10m",
-						"splunk-token": "super-secret-token",
-					},
-				},
-				Resources: container.Resources{
-					CPUShares:         512,
-					NanoCPUs:          1500000000,
-					Memory:            536870912,
-					MemoryReservation: 268435456,
-					CpusetCpus:        "0-3",
-					PidsLimit:         &pidsLimit,
-					Ulimits: []*container.Ulimit{
-						{Name: "nofile", Soft: 1024, Hard: 2048},
-					},
-				},
-				Mounts: []mount.Mount{
+		ID:              "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		Name:            "/web",
+		Created:         "2026-08-01T10:00:00.000000000Z",
+		Image:           "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		RestartCount:    2,
+		AppArmorProfile: "docker-default",
+		ProcessLabel:    "system_u:system_r:container_t:s0",
+		State: &container.State{
+			Status:     container.StateRunning,
+			Running:    true,
+			StartedAt:  "2026-08-02T09:00:00.000000000Z",
+			FinishedAt: "0001-01-01T00:00:00Z",
+			Health: &container.Health{
+				Status:        container.Healthy,
+				FailingStreak: 0,
+				Log: []*container.HealthcheckResult{
 					{
-						Target: "/data",
-						Type:   mount.TypeVolume,
-						VolumeOptions: &mount.VolumeOptions{
-							DriverConfig: &mount.Driver{
-								Name:    "local",
-								Options: map[string]string{"type": "nfs"},
-							},
+						Start:    time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC),
+						End:      time.Date(2026, 8, 2, 9, 0, 1, 0, time.UTC),
+						ExitCode: 0,
+						Output:   "SECRET DATABASE PASSWORD hunter2 in probe output",
+					},
+				},
+			},
+		},
+		HostConfig: &container.HostConfig{
+			RestartPolicy:  container.RestartPolicy{Name: "unless-stopped"},
+			Privileged:     false,
+			ReadonlyRootfs: true,
+			CapAdd:         []string{"NET_BIND_SERVICE"},
+			CapDrop:        []string{"ALL"},
+			SecurityOpt:    []string{"no-new-privileges:true", "seccomp=unconfined"},
+			IpcMode:        "private",
+			PidMode:        "",
+			UTSMode:        "",
+			CgroupnsMode:   "private",
+			Sysctls:        map[string]string{"net.ipv4.ip_forward": "1"},
+			GroupAdd:       []string{"999"},
+			LogConfig: container.LogConfig{
+				Type: "json-file",
+				Config: map[string]string{
+					"max-size":     "10m",
+					"splunk-token": "super-secret-token",
+				},
+			},
+			Resources: container.Resources{
+				CPUShares:         512,
+				NanoCPUs:          1500000000,
+				Memory:            536870912,
+				MemoryReservation: 268435456,
+				CpusetCpus:        "0-3",
+				PidsLimit:         &pidsLimit,
+				Ulimits: []*container.Ulimit{
+					{Name: "nofile", Soft: 1024, Hard: 2048},
+				},
+			},
+			Mounts: []mount.Mount{
+				{
+					Target: "/data",
+					Type:   mount.TypeVolume,
+					VolumeOptions: &mount.VolumeOptions{
+						DriverConfig: &mount.Driver{
+							Name:    "local",
+							Options: map[string]string{"type": "nfs"},
 						},
 					},
 				},
-				Tmpfs: map[string]string{"/tmp": "size=16m"},
 			},
+			Tmpfs: map[string]string{"/tmp": "size=16m"},
 		},
 		Config: &container.Config{
 			Hostname:    "web",
@@ -122,7 +132,11 @@ func runningContainer() container.InspectResponse {
 				"NORMAL_SETTING=visible",
 				"MALFORMED_ENTRY",
 			},
-			ExposedPorts: nat.PortSet{"80/tcp": {}, "443/tcp": {}, "9000/tcp": {}},
+			ExposedPorts: network.PortSet{
+				network.MustParsePort("80/tcp"):   {},
+				network.MustParsePort("443/tcp"):  {},
+				network.MustParsePort("9000/tcp"): {},
+			},
 			Healthcheck: &dockerspec.HealthcheckConfig{
 				Test:          []string{"CMD", "curl", "-f", "http://localhost/"},
 				Interval:      30 * time.Second,
@@ -162,26 +176,28 @@ func runningContainer() container.InspectResponse {
 			},
 		},
 		NetworkSettings: &container.NetworkSettings{
-			NetworkSettingsBase: container.NetworkSettingsBase{
-				Ports: nat.PortMap{
-					"80/tcp":  []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "8080"}},
-					"443/tcp": []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "8443"}},
+			Ports: network.PortMap{
+				network.MustParsePort("80/tcp"): []network.PortBinding{
+					{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "8080"},
+				},
+				network.MustParsePort("443/tcp"): []network.PortBinding{
+					{HostIP: netip.MustParseAddr("0.0.0.0"), HostPort: "8443"},
 				},
 			},
 			Networks: map[string]*network.EndpointSettings{
 				"shop_default": {
 					NetworkID:         "netid1",
 					EndpointID:        "epid1",
-					IPAddress:         "172.20.0.3",
-					GlobalIPv6Address: "fd00::3",
-					Gateway:           "172.20.0.1",
-					MacAddress:        "02:42:ac:14:00:03",
+					IPAddress:         netip.MustParseAddr("172.20.0.3"),
+					GlobalIPv6Address: netip.MustParseAddr("fd00::3"),
+					Gateway:           netip.MustParseAddr("172.20.0.1"),
+					MacAddress:        mustMAC("02:42:ac:14:00:03"),
 					Aliases:           []string{"web", "frontend"},
 				},
 				"shop_backend": {
 					NetworkID:  "netid2",
 					EndpointID: "epid2",
-					IPAddress:  "172.21.0.3",
+					IPAddress:  netip.MustParseAddr("172.21.0.3"),
 				},
 			},
 		},
@@ -638,10 +654,20 @@ func TestNormalizeZeroTimestampsBecomeAbsent(t *testing.T) {
 // A daemon returning a partial record must degrade to warnings, not panic
 // mid-refresh.
 func TestNormalizeIncompleteRecords(t *testing.T) {
+	// The moby API flattened ContainerJSONBase into InspectResponse, so "no
+	// base fields" is now expressed as a record carrying no identity at all.
+	noConfig := runningContainer()
+	noConfig.Config = nil
+
 	tests := map[string]container.InspectResponse{
-		"no base":        {},
-		"no config":      {ContainerJSONBase: runningContainer().ContainerJSONBase},
-		"no host config": {ContainerJSONBase: &container.ContainerJSONBase{ID: "x", Name: "/x", State: &container.State{Status: container.StateRunning}}, Config: &container.Config{}},
+		"no base":   {},
+		"no config": noConfig,
+		"no host config": {
+			ID:     "x",
+			Name:   "/x",
+			State:  &container.State{Status: container.StateRunning},
+			Config: &container.Config{},
+		},
 	}
 
 	for name, inspected := range tests {
@@ -683,7 +709,9 @@ func TestNormalizeSummary(t *testing.T) {
 		Status:  "Up 3 minutes (healthy)",
 		Created: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC).Unix(),
 		Labels:  map[string]string{"com.docker.compose.project": "team"},
-		Ports:   []container.Port{{PrivatePort: 80, PublicPort: 8080, Type: "tcp", IP: "0.0.0.0"}},
+		Ports: []container.PortSummary{
+			{PrivatePort: 80, PublicPort: 8080, Type: "tcp", IP: netip.MustParseAddr("0.0.0.0")},
+		},
 	})
 
 	if summary.Name != "api" {
@@ -731,19 +759,26 @@ func TestNormalizeImage(t *testing.T) {
 }
 
 func TestNormalizeNetworkAndVolume(t *testing.T) {
-	net := normalizeNetwork(network.Summary{
-		ID:         "netid",
-		Name:       "bridge",
-		Driver:     "bridge",
-		Scope:      "local",
-		EnableIPv6: false,
-		Created:    time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-		IPAM: network.IPAM{
-			Config: []network.IPAMConfig{{Subnet: "172.17.0.0/16"}},
+	// network.Summary now embeds network.Network rather than declaring the
+	// fields itself, and IPAMConfig.Subnet is a netip.Prefix.
+	summary := normalizeNetwork(network.Summary{
+		Network: network.Network{
+			ID:         "netid",
+			Name:       "bridge",
+			Driver:     "bridge",
+			Scope:      "local",
+			EnableIPv6: false,
+			Created:    time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			IPAM: network.IPAM{
+				Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.17.0.0/16")}},
+			},
 		},
 	})
-	if net.Name != "bridge" || len(net.Subnets) != 1 {
-		t.Errorf("network = %+v", net)
+	if summary.Name != "bridge" || len(summary.Subnets) != 1 {
+		t.Errorf("network = %+v", summary)
+	}
+	if summary.Subnets[0] != "172.17.0.0/16" {
+		t.Errorf("subnet = %q, want the prefix rendered back to text", summary.Subnets[0])
 	}
 
 	vol := normalizeVolume(volume.Volume{

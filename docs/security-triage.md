@@ -1,0 +1,228 @@
+# Security triage
+
+Dependency advisories that have been assessed but not remediated by a version
+bump, and why. Each entry records the advisory, the feature that carries the
+vulnerability, and the evidence that the feature is or is not reachable from
+HarborMaster.
+
+An entry here is not a dismissal. It is the reasoning that justifies the
+scheduling decision, written down so the next person does not have to redo it.
+
+Assessed 2026-08-04. The Docker entry was updated the same day, when the
+migration described in it was carried out.
+
+---
+
+## GHSA-qwww-vcr4-c8h2 — React Router RSC Mode CSRF bypass
+
+| | |
+|---|---|
+| Package | `react-router` (npm) |
+| Installed | 7.18.2, transitively via `react-router-dom` 7.18.2 |
+| Affected | `>= 7.12.0, < 8.3.0` |
+| Patched | 8.3.0 |
+| Severity | High (7.1) |
+| Status | **Not reachable.** Migration tracked separately, see [tasks/react-router-8-migration.md](tasks/react-router-8-migration.md). |
+
+### The vulnerable feature
+
+A CSRF bypass in React Router's **RSC (React Server Components) mode**: a
+server action could execute before the request was rejected with 400. The
+advisory states it "only affects your application if you are using the unstable
+RSC APIs".
+
+Exploiting it requires a server that runs router-dispatched actions. HarborMaster
+has no such server.
+
+### Why it is not reachable
+
+The frontend is a client-only Vite SPA in Declarative Mode. Every capability the
+advisory depends on is absent:
+
+- **No server runtime for the router.** `npm run build` is `tsc --noEmit && vite
+  build`, producing static assets in `web/dist`. Those are compiled into the Go
+  binary by `//go:embed all:dist` ([web/embed.go:13](../web/embed.go#L13)) and
+  served as files. No Node process ever renders or dispatches a route.
+- **Declarative Mode, not Data Mode.** [main.tsx:15](../web/src/main.tsx#L15)
+  renders `<BrowserRouter>`, and [App.tsx](../web/src/App.tsx) uses
+  `<Routes>`/`<Route>`. There is no `createBrowserRouter` or `RouterProvider`
+  anywhere, so the data router that owns loaders and actions is never
+  instantiated.
+- **No loaders or actions.** No route declares a `loader` or `action` property.
+  Data is fetched through the app's own `api/client.ts`, not through the router.
+- **No RSC APIs.** Searching `web/src` for `rsc`, `RSC`, and `unstable_` returns
+  no matches.
+- **No Framework Mode.** None of `react-router.config.*`, `entry.server.*`,
+  `entry.client.*`, `root.tsx`, or `routes.ts` exists.
+- **No server rendering.** No `renderToString`, `renderToPipeableStream`,
+  `hydrateRoot`, or `StaticRouter`. Entry is `createRoot(...).render(...)`.
+- **No untrusted redirect targets.** The only redirect is the catch-all
+  `<Route path="*" element={<Navigate to="/" replace />} />`
+  ([App.tsx:31](../web/src/App.tsx#L31)), whose destination is the constant
+  `"/"`. No navigation target is derived from user input, query parameters, or
+  API responses, and `redirect()` is never imported.
+
+### Reproducing the evidence
+
+```sh
+cd web
+rg -n "createBrowserRouter|RouterProvider|loader:|action:|redirect\(" src   # no router data-API usage
+rg -n "rsc|RSC|unstable_" src                                              # no matches
+rg -n "renderToString|hydrateRoot|StaticRouter" src                        # no matches
+ls react-router.config.* entry.server.* root.tsx routes.ts 2>/dev/null     # absent
+npm audit
+```
+
+### Rest of the dependency graph
+
+`npm audit` reports 2 high-severity entries, and both are this same advisory —
+once against `react-router` and once against `react-router-dom`, which is only
+flagged for depending on it. Total: `0 critical, 2 high, 0 moderate, 0 low, 0
+info`.
+
+No advisory in the graph applies to Data Mode, SPA navigation, redirect
+handling, or `react-router-dom` itself. `npm audit fix` cannot resolve this
+without a major-version change, which is why the migration is tracked as its own
+task rather than folded into a patch sweep.
+
+---
+
+## GHSA-x744-4wpc-v9h2 and four related Docker advisories
+
+| | |
+|---|---|
+| Package | `github.com/docker/docker` (Go) |
+| Was | `v28.5.2+incompatible` |
+| Advisories | CVE-2026-34040, CVE-2026-33997, CVE-2026-41567, CVE-2026-41568, CVE-2026-42306 |
+| Status | **Resolved by migrating off the module.** `github.com/docker/docker` is no longer in the dependency graph. |
+
+### Why the module could not be upgraded
+
+Dependabot advised upgrading to `29.3.1`. That version cannot be required,
+because the module path was retired before v29:
+
+- `github.com/docker/docker` has no `v29` tag. Its highest published version is
+  `v28.5.2+incompatible` (`go list -m -versions github.com/docker/docker`).
+- Upstream now tags releases `docker-v29.7.1` rather than `v29.7.1`, so Go's
+  semver tag resolution finds nothing to select.
+- `github.com/docker/docker/v29` resolves as a path but has zero versions.
+- `go get github.com/docker/docker@v29.3.1+incompatible` fails with
+  `invalid version: unknown revision v29.3.1`.
+
+`govulncheck` agreed there was nothing to move to on that path: all three
+advisories it surfaced reported `Fixed in: N/A`. The Go vulnerability database
+shows the fixes were published under the renamed module `github.com/moby/moby/v2`
+(`v2.0.0-beta.8` and `v2.0.0-beta.14`), never under `github.com/docker/docker`.
+
+So the remediation is an import-path migration, not a version bump.
+
+### What was done
+
+Docker split the monolith at v29. HarborMaster now consumes the two public
+consumer modules and nothing else:
+
+| Old | New | Version |
+|---|---|---|
+| `github.com/docker/docker/client` | `github.com/moby/moby/client` | `v0.5.1` |
+| `github.com/docker/docker/api/types/...` | `github.com/moby/moby/api/types/...` | `v1.55.0` |
+| `github.com/docker/go-connections/nat` | `github.com/moby/moby/api/types/network` | (dropped as a direct dependency) |
+
+`github.com/moby/moby/v2`, the engine monolith that carries the published fixes,
+is deliberately **not** imported. It is not intended to be consumed as an
+application library, and pulling it in would link daemon code into a read-only
+observer — the opposite of what these advisories are about.
+
+`github.com/containerd/errdefs` became a direct dependency: the moby client no
+longer exports `IsErrNotFound`, and errdefs is how a 404 is now recognised.
+
+### Reachability, before and after
+
+All five advisories describe **daemon-side** code: AuthZ plugin dispatch,
+`PUT /containers/{id}/archive` decompression, `docker cp` mount setup, and
+plugin privilege comparison. HarborMaster only ever linked the client and API
+type packages, and is read-only: it never calls the archive endpoints and never
+installs plugins. The advisories were therefore never reachable in the
+exploitable sense.
+
+They were nonetheless *reported* against this code, because an advisory with no
+fixed version and no narrowed symbol set matches the whole module. That is now
+moot:
+
+| | Before | After |
+|---|---|---|
+| `govulncheck ./...` | 3 vulnerabilities affecting the code, 2 more in required modules | **No vulnerabilities found** |
+| `go list -deps ./...` | `github.com/docker/docker/...` present | absent |
+
+### Breaking changes adapted
+
+All confined to `internal/docker`:
+
+- `Ping`, `ContainerList`, `NetworkList`, `VolumeList` take an options struct and
+  return a result struct (`.Items`) instead of a bare slice.
+- `ContainerInspectWithRaw` became `ContainerInspect` with
+  `ContainerInspectResult{Container, Raw}` — same one-round-trip guarantee.
+- `ImageInspect` returns a result wrapping `image.InspectResponse`.
+- `Events` returns one `EventsResult` struct rather than two bare channels.
+- `filters.Args` became `client.Filters`, whose zero value is read-only.
+- `client.IsErrNotFound` is gone; `cerrdefs.IsNotFound` replaces it.
+- `container.InspectResponse` flattened `ContainerJSONBase` away. "Partial
+  record" is now detected by an empty ID rather than a nil embedded pointer.
+- `container.Port` became `container.PortSummary`; `nat.Port`/`nat.PortSet`
+  became `network.Port`/`network.PortSet`.
+- Addresses became `netip.Addr` / `netip.Prefix`, and MAC addresses
+  `network.HardwareAddr`. The invalid zero value is mapped back to `""` rather
+  than rendered as the literal `"invalid IP"`.
+- `network.Summary` now embeds `network.Network`.
+- `events.Message` dropped the deprecated top-level `ID`. See the behaviour note
+  below.
+
+### Behaviour changes
+
+Two, both unavoidable and both narrow:
+
+1. **Legacy event actor fallback removed.** `convertEvent` used to fall back to
+   the deprecated `Message.ID` when `Actor.ID` was empty. The field no longer
+   exists on the typed message. `Actor.ID` has been populated since API 1.22,
+   far below anything this client negotiates, so no supported daemon is
+   affected. An actorless message still converts into a fingerprinted record.
+2. **`kernelMemoryBytes` is always 0.** The moby API removed
+   `HostConfig.KernelMemory`, which the kernel deprecated under cgroup v2. The
+   domain field and the REST response shape are unchanged.
+
+### Security validation performed
+
+`gofmt`, `go vet ./...`, `go vet -tags integration ./...`, `go test ./...`,
+`go test -race ./...` (clean over repeated runs), `go mod tidy`, `go mod verify`
+(all modules verified), `govulncheck ./...` (clean), and a full CodeQL
+`go-security-and-quality` run against an autobuilt database.
+
+New guardrails in `internal/arch` fail the build if the retired module or the
+engine monolith is imported anywhere, if the SDK escapes `internal/docker`, or
+if the read-only runtime interface grows a mutation method. They are AST-based
+rather than grep-based, so they cannot be fooled by an import alias and do not
+match module paths mentioned in prose. Each was negative-tested — deliberately
+violated to confirm it fails — before being kept.
+
+New adapter tests pin the migrated error classification: a 404 maps to
+`ErrContainerVanished` / `ErrImageUnavailable`, a 500 stays `ErrUnreachable`, and
+engine detail never survives into what the API renders. That path changed
+mechanism during the migration and nothing else covered it; had it broken, a
+container vanishing mid-refresh would have failed the whole sweep instead of
+producing one warning.
+
+### Remaining limitations
+
+- **Docker-dependent gates were not run locally.** The live-Docker integration
+  suite, the container image build, and the container smoke tests require a
+  daemon, and none is installed on the machine this migration was performed on.
+  CI runs all three.
+- **`github.com/moby/moby/client` is pre-1.0** (`v0.5.1`). Its API may still
+  change between minor versions, so upgrades should be read rather than taken
+  blind. This is a supported, published consumer module — the pre-1.0 version is
+  about API stability, not support status.
+- **Four pre-existing `go/log-injection` findings** remain in `internal/api`
+  (`middleware.go:66`, `middleware.go:93`, `response.go:94`, `static.go:74`).
+  They are untouched by this change. Both `slog` handlers in use
+  (`NewJSONHandler`, `NewTextHandler`) escape or quote attribute values, so a
+  request path cannot forge a log record; the taint flow is real but the
+  injection is not achievable. Recorded here rather than dismissed.
