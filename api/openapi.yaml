@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: HarborMaster API
-  version: 0.2.0
+  version: 0.2.5
   summary: Safety-first container lifecycle manager.
   description: |
     HarborMaster's REST API.
@@ -39,6 +39,34 @@ info:
     returned masked as `********`. There is deliberately no query parameter,
     header, or endpoint that reveals the real values: with no authentication in
     place, such a switch would be an unauthenticated secret-disclosure API.
+
+    The same masking applies to Docker event actor attributes, which are a
+    resource's labels and can carry arbitrary operator-supplied values.
+    Redaction happens in the Docker adapter, BEFORE an event is logged,
+    persisted, returned by `/events`, or written to the SSE stream. No
+    unredacted value is ever stored.
+
+    ### Docker events
+
+    `/events`, `/event-engine`, and `/events/stream` report what the Docker
+    daemon told HarborMaster.
+
+    **Events are hints, not authoritative state.** The daemon makes no
+    durability promise about its event stream: events emitted while nothing is
+    listening are gone, nothing is replayed across a daemon restart, ordering
+    holds only within one connection, and duplicates are permitted. So event
+    history answers "what did HarborMaster observe, and when" -- never "what
+    happened on the host".
+
+    HarborMaster never writes container state from an event. An event triggers
+    a re-inspection through the same pipeline a full refresh uses, so
+    `/containers` and `/images` remain the authoritative current-state views. A
+    periodic full reconciliation restores accuracy after events are missed.
+
+    Every event carries `sequence`, HarborMaster's own monotonic local ordering.
+    It is the SSE event ID and the deterministic tiebreak for every list query.
+    Because Docker guarantees no global ordering, `sequence` records the order
+    events were OBSERVED in -- the only order this API can honestly claim.
   license:
     name: MIT
     identifier: MIT
@@ -60,6 +88,10 @@ tags:
     description: Read-only image metadata.
   - name: Networks and volumes
     description: Read-only network and volume metadata.
+  - name: Events
+    description: |
+      Observational Docker event history and the event engine that collects it.
+      Read-only: there is no endpoint that creates, edits, or deletes an event.
 
 paths:
   /api/v1/health:
@@ -492,6 +524,430 @@ paths:
         "503":
           $ref: "#/components/responses/InventoryUnavailable"
 
+  /api/v1/events:
+    get:
+      tags: [Events]
+      summary: List observed Docker events
+      operationId: listDockerEvents
+      description: |
+        Returns a page of the Docker events HarborMaster observed, with
+        filtering and sorting applied by the database.
+
+        Ordering is always deterministic: the requested sort field is followed
+        by the local `sequence` as a tiebreak, so paging cannot repeat or skip
+        an event. That tiebreak matters here more than elsewhere -- a burst of
+        events shares a Docker timestamp, so sorting by time alone ties
+        constantly.
+
+        Default ordering is newest first.
+
+        Sort fields are validated against a fixed allowlist. `action` is the one
+        filter checked only for length rather than against a vocabulary, because
+        Docker's action set varies by daemon version and an allowlist would
+        reject a filter for an action the host really emits. It travels as a
+        bound parameter either way; nothing from the query string reaches SQL as
+        an identifier.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: type
+          in: query
+          description: |
+            Filter by event type. Repeat the parameter or supply a
+            comma-separated list; values are OR-ed.
+          schema:
+            type: string
+            examples: ["container", "container,image"]
+        - name: action
+          in: query
+          description: |
+            Filter by action, OR-ed like `type`. Case-insensitive. Actions carry
+            no closed vocabulary: use `GET /api/v1/event-filters` for the ones
+            actually present.
+          schema:
+            type: string
+            maxLength: 64
+            examples: ["start", "die,stop"]
+        - name: result
+          in: query
+          description: Filter by processing outcome, OR-ed like `type`.
+          schema:
+            type: string
+            examples: ["warning", "processed,ignored"]
+        - name: actorId
+          in: query
+          description: |
+            Match the container ID, image ID or reference, network ID, or volume
+            name the event concerns. A prefix is accepted, so a short container
+            ID resolves without supplying all 64 characters.
+          schema: { type: string }
+        - name: project
+          in: query
+          description: Exact Compose project name.
+          schema: { type: string }
+        - name: service
+          in: query
+          description: Exact Compose service name.
+          schema: { type: string }
+        - name: search
+          in: query
+          description: Matches the resource name or an actor ID prefix.
+          schema: { type: string }
+        - name: since
+          in: query
+          description: |
+            Lower bound on `observedAt`, inclusive. RFC 3339 only: accepting
+            several formats would mean guessing which was meant.
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          description: |
+            Upper bound on `observedAt`, inclusive. Must not be earlier than
+            `since`; an inverted range is rejected rather than silently matching
+            nothing.
+          schema: { type: string, format: date-time }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            default: sequence
+            enum: [sequence, observed, dockerTime, type, action, result, project, name]
+        - name: direction
+          in: query
+          schema:
+            type: string
+            default: desc
+            enum: [asc, desc]
+      responses:
+        "200":
+          description: A page of events. Actor attributes are already redacted.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DockerEventList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/EventsUnavailable"
+
+  /api/v1/events/{id}:
+    get:
+      tags: [Events]
+      summary: Get one observed event
+      operationId: getDockerEvent
+      description: |
+        Returns one event by its local `sequence` number, together with links to
+        the resources it concerns where HarborMaster can resolve them.
+
+        A container link keeps working after a destroy: the container row is
+        retained and marked absent rather than deleted, which is the useful
+        answer.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The event's local sequence number. A positive integer.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The event, with redacted attributes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DockerEventDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/EventsUnavailable"
+
+  /api/v1/events/stream:
+    get:
+      tags: [Events]
+      summary: Stream events over Server-Sent Events
+      operationId: streamDockerEvents
+      description: |
+        A long-lived `text/event-stream` response carrying events as they are
+        persisted.
+
+        SSE rather than WebSockets: the traffic is one-way server-to-browser,
+        SSE is plain HTTP so it inherits this server's timeouts, security
+        headers, and access log unchanged, and the browser reconnects on its own.
+        No WebSocket endpoint exists or is planned for this purpose.
+
+        ### Frames
+
+        Three named event types are emitted, plus comment heartbeats:
+
+        - `ready` -- sent once when the stream opens, carrying
+          `{ lastEventId, replayed, redacted, notice }`.
+        - `docker-event` -- one event. The frame's `id:` is the event's local
+          `sequence`, which the browser echoes back as `Last-Event-ID`.
+        - `replay-truncated` -- sent when a replay was capped, carrying
+          `{ skipped, limit, notice }`.
+        - `: heartbeat` -- a comment frame on the configured interval, which
+          keeps proxies from closing an idle connection. Clients ignore it.
+
+        A `retry:` field is sent first, telling the browser how long to wait
+        before reconnecting.
+
+        ### Replay
+
+        A client may resume with the `Last-Event-ID` header (which the browser's
+        EventSource sends automatically on reconnect) or a `lastEventId` query
+        parameter (which is the only route available on a first connection,
+        since EventSource cannot set a header there).
+
+        Replay reads from SQLite and is CAPPED at
+        `HARBORMASTER_EVENTS_STREAM_REPLAY_LIMIT` events. A client that fell
+        further behind receives a `replay-truncated` frame saying how many were
+        skipped, and should reload `GET /api/v1/events` rather than expect the
+        stream to catch it up. A malformed resume point is ignored and the
+        stream starts live, rather than failing a request from a client that is
+        mid-reconnect.
+
+        ### Redaction
+
+        Every frame carries HarborMaster's own event model with attributes
+        already redacted. No raw Docker payload is ever written to this stream.
+        This matters because the endpoint is unauthenticated like the rest of
+        the API.
+
+        ### Limits
+
+        Concurrent subscribers are capped by
+        `HARBORMASTER_EVENTS_STREAM_MAX_SUBSCRIBERS`. At the cap, new
+        connections receive `503` with `Retry-After` rather than being queued: a
+        client told to come back can back off, while one parked in a queue
+        occupies the connection it was refused.
+
+        A subscriber that stops reading has events DROPPED for it alone. It
+        never blocks event processing or back-pressures the Docker stream.
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: |
+            The last `sequence` the client received. Sent automatically by
+            EventSource on reconnect.
+          schema: { type: integer, minimum: 0 }
+        - name: lastEventId
+          in: query
+          required: false
+          description: |
+            The same resume point as the header, for a first connection where
+            EventSource cannot set one.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: |
+            An open event stream. The response does not end until the client
+            disconnects or the server shuts down.
+          headers:
+            Cache-Control:
+              description: Always `no-cache, no-store, must-revalidate`.
+              schema: { type: string }
+            X-Accel-Buffering:
+              description: |
+                Always `no`, which disables nginx response buffering. Without it
+                a proxy accumulates frames and the stream stops being live.
+              schema: { type: string }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  An SSE byte stream. OpenAPI cannot describe frame structure,
+                  so the payload schemas are documented separately: a
+                  `docker-event` frame's `data:` is a `DockerEvent`, a `ready`
+                  frame's is a `StreamReady`, and a `replay-truncated` frame's is
+                  a `StreamTruncated`.
+              examples:
+                stream:
+                  summary: A reconnect that replayed one event, then went live
+                  value: |
+                    retry: 1000
+
+                    id: 41
+                    event: docker-event
+                    data: {"sequence":41,"type":"container","action":"start","actorName":"shop-web-1","result":"processed"}
+
+                    event: ready
+                    data: {"lastEventId":41,"replayed":1,"redacted":true,"notice":"Attribute values matching sensitive-name patterns are masked. No raw Docker payload is sent."}
+
+                    : heartbeat
+
+                    id: 42
+                    event: docker-event
+                    data: {"sequence":42,"type":"container","action":"die","actorName":"shop-web-1","result":"processed"}
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          description: |
+            The event engine is disabled by configuration (`feature_disabled`),
+            or the subscriber limit is reached (`service_unavailable`, with
+            `Retry-After`).
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying, sent at the subscriber limit.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                disabled:
+                  value:
+                    error:
+                      code: feature_disabled
+                      message: the event engine is disabled by configuration
+                atLimit:
+                  value:
+                    error:
+                      code: service_unavailable
+                      message: too many event stream subscribers; try again shortly
+
+  /api/v1/event-engine:
+    get:
+      tags: [Events]
+      summary: Report event-engine status
+      operationId: getEventEngine
+      description: |
+        Returns the event engine's connection state, timings, queue occupancy,
+        counters, and retention policy.
+
+        A DISABLED engine is reported as `enabled: false` with state `disabled`,
+        not as an error: running on periodic reconciliation alone is a supported
+        configuration. A deployment with no engine configured at all returns the
+        same shape, so a client renders one "off" state rather than two.
+
+        `lastError` is a sanitised summary. It never carries a socket path, a
+        daemon internal, or a credential.
+      responses:
+        "200":
+          description: Event-engine status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventEngineStatus"
+              examples:
+                connected:
+                  summary: Live and healthy
+                  value:
+                    enabled: true
+                    state: connected
+                    connectedSince: "2026-08-03T09:00:00Z"
+                    lastEventAt: "2026-08-03T09:20:11.482Z"
+                    lastReconciliationAt: "2026-08-03T09:00:05Z"
+                    currentBackoffMs: 0
+                    queueDepth: 0
+                    queueCapacity: 1024
+                    pendingRefreshes: 0
+                    overflowPending: false
+                    subscribers: 1
+                    subscriberLimit: 16
+                    counters:
+                      eventsReceived: 412
+                      eventsPersisted: 401
+                      eventsDeduplicated: 11
+                      eventsDropped: 0
+                      targetedRefreshes: 388
+                      fullReconciliations: 2
+                      reconnectCount: 0
+                      refreshFailures: 0
+                      eventsPruned: 0
+                    retention: { maxAgeSeconds: 604800, maxCount: 50000, intervalSeconds: 3600 }
+                    storedEvents: 401
+                reconnecting:
+                  summary: Stream lost; the inventory is on periodic reconciliation
+                  value:
+                    enabled: true
+                    state: reconnecting
+                    lastDisconnectedAt: "2026-08-03T09:31:02Z"
+                    currentBackoffMs: 4000
+                    queueDepth: 0
+                    queueCapacity: 1024
+                    pendingRefreshes: 0
+                    overflowPending: false
+                    subscribers: 0
+                    subscriberLimit: 16
+                    counters:
+                      eventsReceived: 412
+                      eventsPersisted: 401
+                      eventsDeduplicated: 11
+                      eventsDropped: 0
+                      targetedRefreshes: 388
+                      fullReconciliations: 3
+                      reconnectCount: 2
+                      refreshFailures: 0
+                      eventsPruned: 0
+                    lastError: docker engine unreachable
+                    retention: { maxAgeSeconds: 604800, maxCount: 50000, intervalSeconds: 3600 }
+                    storedEvents: 401
+                disabled:
+                  summary: Switched off by configuration
+                  value:
+                    enabled: false
+                    state: disabled
+                    currentBackoffMs: 0
+                    queueDepth: 0
+                    queueCapacity: 0
+                    pendingRefreshes: 0
+                    overflowPending: false
+                    subscribers: 0
+                    subscriberLimit: 0
+                    counters:
+                      eventsReceived: 0
+                      eventsPersisted: 0
+                      eventsDeduplicated: 0
+                      eventsDropped: 0
+                      targetedRefreshes: 0
+                      fullReconciliations: 0
+                      reconnectCount: 0
+                      refreshFailures: 0
+                      eventsPruned: 0
+                    retention: { maxAgeSeconds: 0, maxCount: 0, intervalSeconds: 0 }
+                    storedEvents: 0
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/event-filters:
+    get:
+      tags: [Events]
+      summary: List the event filter vocabularies in use
+      operationId: getEventFilters
+      description: |
+        Returns the event types and processing results HarborMaster knows,
+        together with the actions and Compose projects actually present in
+        recorded history, and the sortable field names.
+
+        Actions come from the data rather than a constant because Docker's
+        action set varies by daemon version.
+
+        Registered at `/event-filters` rather than `/events/filters` for a
+        routing reason: a literal `filters` segment there would neither contain
+        nor be contained by `GET /events/{id}`, which Go's ServeMux rejects as an
+        ambiguous pair. It is event metadata either way.
+      responses:
+        "200":
+          description: Filter vocabularies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventFilterOptions"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/EventsUnavailable"
+
 components:
   headers:
     RequestId:
@@ -580,6 +1036,16 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: { code: feature_disabled, message: inventory is disabled by configuration }
+
+    EventsUnavailable:
+      description: |
+        The event engine is not configured on this deployment.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: { code: feature_disabled, message: the event engine is not configured }
 
     PayloadTooLarge:
       description: The request body exceeded the configured limit.
@@ -678,13 +1144,26 @@ components:
           type: string
           description: |
             * `healthy` — every dependency is up.
-            * `degraded` — the Docker Engine is unreachable. HarborMaster still
-              serves; the UI renders a disconnected state.
+            * `degraded` — the Docker Engine is unreachable, or the Docker event
+              stream is disconnected. HarborMaster still serves; the UI renders
+              a disconnected state.
             * `unhealthy` — the database is unreachable.
           enum: [healthy, degraded, unhealthy]
         database:
           $ref: "#/components/schemas/Component"
         docker:
+          $ref: "#/components/schemas/Component"
+        events:
+          description: |
+            The Docker event engine. Omitted entirely when no engine is
+            configured, rather than reporting a fabricated status.
+
+            A disconnected stream yields `degraded` overall and never
+            `unhealthy`: periodic reconciliation still keeps the inventory
+            correct, and a transient reconnect must not fail the container
+            health check and cause a restart loop. A DISABLED engine reports
+            `up`, because running on periodic reconciliation alone is a
+            supported configuration.
           $ref: "#/components/schemas/Component"
         checkedAt: { type: string, format: date-time }
         uptimeSeconds: { type: integer, format: int64, minimum: 0 }
@@ -698,6 +1177,389 @@ components:
         buildDate: { type: string, examples: ["2026-08-03T08:00:00Z"] }
         goVersion: { type: string, examples: [go1.26.5] }
         platform: { type: string, examples: [linux/amd64] }
+
+    # ------------------------------------------------------ docker events --
+
+    DockerEventType:
+      type: string
+      description: |
+        The kind of object an event describes. `other` covers anything
+        HarborMaster does not model: such events are recorded so the history is
+        honest about what arrived, but they trigger no inventory work.
+      enum: [container, image, network, volume, daemon, other]
+
+    EventProcessingResult:
+      type: string
+      description: |
+        * `processed` — recorded, and a refresh was requested where applicable.
+        * `deduplicated` — an identical event was already seen inside the
+          deduplication window. Counted, not stored, and it does no extra work.
+        * `ignored` — recorded, but the event has no inventory consequence
+          (an exec, an unmodelled type).
+        * `warning` — recorded, but it could not be mapped onto one resource, so
+          a full reconciliation was requested instead. A conservative success,
+          not a failure.
+        * `failed` — processing raised an error. The event is still stored, and
+          `error` carries a sanitised summary.
+      enum: [processed, deduplicated, ignored, warning, failed]
+
+    RefreshRequest:
+      type: string
+      description: |
+        The synchronization the event asked for. Events never write container
+        state; they request one of these, and the inventory service performs the
+        actual read and persist.
+      enum:
+        - none
+        - container
+        - container_absent
+        - image
+        - image_catalog
+        - networks
+        - volumes
+        - full
+
+    EventConnectionState:
+      type: string
+      description: |
+        The event stream's connection state. `disabled` is a deliberate
+        operating mode, not a fault.
+      enum: [disabled, connecting, connected, reconnecting, stopped]
+
+    DockerEvent:
+      type: object
+      description: |
+        One normalized, redacted observation from the Docker event stream.
+
+        A hint that something MAY have changed, never a statement of what a
+        container now is. Attribute values whose key matched a sensitive-name
+        pattern carry `********`.
+      required:
+        - sequence
+        - fingerprint
+        - hostId
+        - type
+        - action
+        - attributes
+        - dockerTime
+        - observedAt
+        - result
+        - refreshRequested
+        - createdAt
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          description: |
+            HarborMaster's monotonic local ordering, assigned on persistence. It
+            is the SSE event ID and the deterministic tiebreak for every list
+            query. Because Docker guarantees no global ordering, this records
+            the order events were OBSERVED in.
+        fingerprint:
+          type: string
+          description: |
+            The deterministic deduplication identity, derived from host, type,
+            action, actor, scope, and the daemon's nanosecond timestamp. Widened
+            to include every actor attribute when the daemon supplied only whole
+            seconds, which is too coarse to separate a burst.
+        hostId: { type: string, examples: [local] }
+        type:
+          $ref: "#/components/schemas/DockerEventType"
+        action:
+          type: string
+          description: |
+            The verb, lower-cased. Deliberately an open string rather than an
+            enum: daemons differ by version in which actions they emit. A
+            colon-separated suffix (a health status, an exec command line) is
+            split off into the `harbormaster.actionDetail` attribute so the verb
+            stays filterable and the detail is not lost.
+          examples: [start, die, health_status, pull]
+        actorId:
+          type: string
+          description: |
+            The container ID, image ID or reference, network ID, or volume name
+            the event concerns. Empty when the daemon supplied none, in which
+            case HarborMaster escalates to a full reconciliation rather than
+            guessing.
+        actorName:
+          type: string
+          description: The human-readable resource name, where the daemon provides one.
+        scope:
+          type: string
+          description: "`local` for engine events, `swarm` for cluster events."
+          examples: [local]
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Actor attributes AFTER redaction. These are the resource's labels
+            plus daemon-supplied fields, so they can carry credentials; any
+            value whose KEY matched a sensitive pattern is `********`.
+            Non-sensitive structural metadata is preserved, because inventory
+            correlation depends on it.
+          examples:
+            - name: shop-web-1
+              image: "nginx:1.27"
+              DB_PASSWORD: "********"
+        composeProject: { type: string }
+        composeService: { type: string }
+        harbormasterLabels:
+          type: object
+          additionalProperties: { type: string }
+          description: "`io.harbormaster.*` attributes with the prefix stripped."
+        dockerTime:
+          type: string
+          format: date-time
+          description: When the daemon says the event happened.
+        dockerTimeNano:
+          type: integer
+          format: int64
+          description: |
+            The same instant in nanoseconds, when the daemon supplied one.
+            Absent (0) on older daemons that report whole seconds only.
+        observedAt:
+          type: string
+          format: date-time
+          description: |
+            When HarborMaster read the event off the stream. It differs from
+            `dockerTime` by the stream latency normally, and by much more after
+            a reconnect -- which is exactly why both are recorded.
+        result:
+          $ref: "#/components/schemas/EventProcessingResult"
+        refreshRequested:
+          $ref: "#/components/schemas/RefreshRequest"
+        error:
+          type: string
+          description: |
+            A sanitised processing failure or warning reason. Never a raw Docker
+            error, which can name the socket path.
+        connectionState:
+          $ref: "#/components/schemas/EventConnectionState"
+        createdAt: { type: string, format: date-time }
+
+    DockerEventDetail:
+      allOf:
+        - $ref: "#/components/schemas/DockerEvent"
+        - type: object
+          required: [links, redacted]
+          properties:
+            links:
+              type: object
+              description: |
+                API paths for the resources this event concerns, where they can
+                be resolved. Absent rather than guessed when they cannot.
+              properties:
+                container: { type: string, examples: ["/api/v1/containers/b8f1c0d2e3a4"] }
+                image: { type: string, examples: ["/api/v1/images/sha256:abc"] }
+            redacted:
+              type: boolean
+              const: true
+              description: |
+                Always true. Attribute values matching sensitive-name patterns
+                were replaced before the event was stored, so there is no
+                unredacted copy anywhere.
+
+    DockerEventList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DockerEvent"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    EventEngineCounters:
+      type: object
+      description: |
+        Lifetime tallies. Plain counters rather than a metrics framework:
+        HarborMaster has no metrics dependency, and adding one to publish nine
+        integers would be a poor trade.
+      required:
+        - eventsReceived
+        - eventsPersisted
+        - eventsDeduplicated
+        - eventsDropped
+        - targetedRefreshes
+        - fullReconciliations
+        - reconnectCount
+        - refreshFailures
+        - eventsPruned
+      properties:
+        eventsReceived:
+          type: integer
+          format: int64
+          description: Events read off the Docker stream.
+        eventsPersisted:
+          type: integer
+          format: int64
+        eventsDeduplicated:
+          type: integer
+          format: int64
+          description: |
+            Suppressed by the in-memory window or rejected by the event table's
+            unique fingerprint constraint.
+        eventsDropped:
+          type: integer
+          format: int64
+          description: |
+            Discarded because the processing queue was full. Every drop also
+            requests a full reconciliation, because a dropped event may have
+            been the only notice of a change.
+        targetedRefreshes: { type: integer, format: int64 }
+        fullReconciliations: { type: integer, format: int64 }
+        reconnectCount:
+          type: integer
+          format: int64
+          description: Cumulative across restarts, so flapping survives one.
+        refreshFailures: { type: integer, format: int64 }
+        eventsPruned:
+          type: integer
+          format: int64
+          description: Event rows removed by retention.
+
+    EventRetentionPolicy:
+      type: object
+      description: |
+        How long event history is kept. Zero on either bound disables that
+        dimension; both zero keeps everything, which is valid but unbounded.
+
+        Pruning is internal only: this phase deliberately exposes no destructive
+        endpoint, because an unauthenticated one that deletes history would be
+        exactly the wrong thing to add first.
+      required: [maxAgeSeconds, maxCount, intervalSeconds]
+      properties:
+        maxAgeSeconds: { type: integer, format: int64, minimum: 0 }
+        maxCount: { type: integer, format: int64, minimum: 0 }
+        intervalSeconds: { type: integer, format: int64, minimum: 0 }
+
+    EventEngineStatus:
+      type: object
+      required:
+        - enabled
+        - state
+        - currentBackoffMs
+        - queueDepth
+        - queueCapacity
+        - pendingRefreshes
+        - overflowPending
+        - subscribers
+        - subscriberLimit
+        - counters
+        - retention
+        - storedEvents
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            Reflects configuration. When false nothing connects, and the
+            application is NOT degraded: periodic reconciliation carries the
+            inventory alone, which is a supported mode.
+        state:
+          $ref: "#/components/schemas/EventConnectionState"
+        connectedSince: { type: string, format: date-time }
+        lastConnectedAt: { type: string, format: date-time }
+        lastDisconnectedAt: { type: string, format: date-time }
+        lastEventAt: { type: string, format: date-time }
+        lastReconciliationAt: { type: string, format: date-time }
+        currentBackoffMs:
+          type: integer
+          format: int64
+          description: |
+            The delay before the next connection attempt, after jitter. Zero
+            while connected.
+        queueDepth:
+          type: integer
+          description: |
+            Events waiting to be processed. A depth approaching capacity means
+            events are arriving faster than they can be persisted.
+        queueCapacity: { type: integer }
+        pendingRefreshes:
+          type: integer
+          description: Distinct resources waiting for a debounced refresh.
+        overflowPending:
+          type: boolean
+          description: |
+            True while a queue overflow has forced a full reconciliation that
+            has not completed. The application reports degraded until it does.
+        subscribers: { type: integer }
+        subscriberLimit:
+          type: integer
+          description: |
+            Concurrent SSE clients allowed. Zero means unlimited. At the limit,
+            `GET /api/v1/events/stream` returns 503.
+        counters:
+          $ref: "#/components/schemas/EventEngineCounters"
+        lastError:
+          type: string
+          description: |
+            A sanitised summary of the most recent failure. It never carries a
+            socket path, a daemon internal, or a credential.
+          examples: [docker engine unreachable]
+        retention:
+          $ref: "#/components/schemas/EventRetentionPolicy"
+        storedEvents: { type: integer, format: int64 }
+
+    EventFilterOptions:
+      type: object
+      required: [types, actions, results, projects, sortFields]
+      properties:
+        types:
+          type: array
+          items: { type: string }
+        actions:
+          type: array
+          description: |
+            The actions actually present in recorded history, not a constant:
+            Docker's action set varies by daemon version.
+          items: { type: string }
+        results:
+          type: array
+          items: { type: string }
+        projects:
+          type: array
+          items: { type: string }
+        sortFields:
+          type: array
+          items: { type: string }
+
+    StreamReady:
+      type: object
+      description: |
+        The payload of the SSE `ready` frame, sent once when a stream opens.
+        Not returned by any JSON endpoint; documented here because OpenAPI
+        cannot describe SSE frame structure directly.
+      required: [lastEventId, replayed, redacted, notice]
+      properties:
+        lastEventId:
+          type: integer
+          format: int64
+          description: |
+            The newest sequence the client now holds, so a client that sent no
+            resume point knows where the live stream begins.
+        replayed:
+          type: integer
+          description: How many stored events were replayed before going live.
+        redacted:
+          type: boolean
+          const: true
+        notice: { type: string }
+
+    StreamTruncated:
+      type: object
+      description: |
+        The payload of the SSE `replay-truncated` frame, sent when a
+        Last-Event-ID replay hit the cap.
+      required: [skipped, limit, notice]
+      properties:
+        skipped:
+          type: integer
+          description: |
+            How many stored events the replay could not include. Reload
+            `GET /api/v1/events` to see them; the stream will not catch up.
+        limit: { type: integer }
+        notice: { type: string }
 
     # ---------------------------------------------------------- inventory --
 

@@ -9,6 +9,11 @@ import type {
   ListResponse,
   RawInspection,
 } from "../api/inventoryTypes";
+import type {
+  DockerEvent,
+  EventEngineStatus,
+  EventFilterOptions,
+} from "../api/eventTypes";
 import type { HealthReport, VersionInfo } from "../api/types";
 
 export const healthyReport: HealthReport = {
@@ -241,6 +246,175 @@ export function defaultImageUsage(): ImageUsage {
   };
 }
 
+// ---------------------------------------------------------- docker events --
+
+export function dockerEvent(overrides: Partial<DockerEvent> = {}): DockerEvent {
+  return {
+    sequence: 1,
+    fingerprint: "fp-1",
+    hostId: "local",
+    type: "container",
+    action: "start",
+    actorId: "abcdef0123456789",
+    actorName: "web",
+    scope: "local",
+    attributes: {
+      name: "web",
+      // Already masked, as everything the API returns must be.
+      DB_PASSWORD: "********",
+    },
+    composeProject: "shop",
+    composeService: "web",
+    dockerTime: "2026-08-03T09:00:00Z",
+    observedAt: "2026-08-03T09:00:01Z",
+    result: "processed",
+    refreshRequested: "container",
+    createdAt: "2026-08-03T09:00:01Z",
+    ...overrides,
+  };
+}
+
+export function eventPage(
+  items: DockerEvent[] = [dockerEvent()],
+  totalItems = items.length,
+): ListResponse<DockerEvent> {
+  return {
+    items,
+    pagination: {
+      page: 1,
+      pageSize: 25,
+      totalItems,
+      totalPages: Math.max(Math.ceil(totalItems / 25), 1),
+      hasNext: totalItems > 25,
+      hasPrevious: false,
+    },
+  };
+}
+
+export function eventEngineStatus(
+  overrides: Partial<EventEngineStatus> = {},
+): EventEngineStatus {
+  return {
+    enabled: true,
+    state: "connected",
+    connectedSince: "2026-08-03T09:00:00Z",
+    lastConnectedAt: "2026-08-03T09:00:00Z",
+    lastEventAt: "2026-08-03T09:05:00Z",
+    lastReconciliationAt: "2026-08-03T09:00:05Z",
+    currentBackoffMs: 0,
+    queueDepth: 0,
+    queueCapacity: 1024,
+    pendingRefreshes: 0,
+    overflowPending: false,
+    subscribers: 1,
+    subscriberLimit: 16,
+    counters: {
+      eventsReceived: 42,
+      eventsPersisted: 40,
+      eventsDeduplicated: 2,
+      eventsDropped: 0,
+      targetedRefreshes: 38,
+      fullReconciliations: 1,
+      reconnectCount: 0,
+      refreshFailures: 0,
+      eventsPruned: 0,
+    },
+    retention: { maxAgeSeconds: 604800, maxCount: 50000, intervalSeconds: 3600 },
+    storedEvents: 40,
+    ...overrides,
+  };
+}
+
+export const eventFilterOptions: EventFilterOptions = {
+  types: ["container", "image", "network", "volume", "daemon", "other"],
+  actions: ["start", "stop", "die", "pull"],
+  results: ["processed", "deduplicated", "ignored", "warning", "failed"],
+  projects: ["shop", "blog"],
+  sortFields: ["action", "dockerTime", "name", "observed", "project", "result", "sequence", "type"],
+};
+
+/**
+ * A controllable stand-in for EventSource.
+ *
+ * The hook takes its stream factory as an option precisely so tests never open
+ * a real connection: nothing here depends on a network, a timer, or jsdom
+ * having an EventSource implementation.
+ */
+export class FakeEventStream {
+  readonly url: string;
+  onerror: ((event: Event) => void) | null = null;
+  onopen: ((event: Event) => void) | null = null;
+  closed = false;
+
+  private listeners = new Map<string, ((event: MessageEvent) => void)[]>();
+
+  constructor(url: string) {
+    this.url = url;
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  /** Delivers a named frame, as the server would. */
+  emit(type: string, payload: unknown): void {
+    const data = typeof payload === "string" ? payload : JSON.stringify(payload);
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(new MessageEvent(type, { data }));
+    }
+  }
+
+  /** Signals that the connection opened. */
+  open(): void {
+    this.onopen?.(new Event("open"));
+  }
+
+  /** Signals a dropped connection, which EventSource retries on its own. */
+  fail(): void {
+    this.onerror?.(new Event("error"));
+  }
+}
+
+/**
+ * Builds a stream factory and exposes the streams it created, so a test can
+ * drive the connection it caused.
+ */
+export function fakeStreamFactory(): {
+  factory: (url: string) => FakeEventStream;
+  streams: FakeEventStream[];
+} {
+  const streams: FakeEventStream[] = [];
+  return {
+    factory: (url: string) => {
+      const stream = new FakeEventStream(url);
+      streams.push(stream);
+      return stream;
+    },
+    streams,
+  };
+}
+
+/**
+ * A stubbed endpoint that ANSWERS with an HTTP error.
+ *
+ * Distinct from passing an Error, which models the backend being unreachable.
+ * The UI renders those two very differently -- "check the request" versus
+ * "check the server is running" -- so a test must be able to produce each.
+ */
+export class HttpFailure {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    readonly message: string,
+  ) {}
+}
+
 /** A recorded request, so tests can assert on the URLs the UI produced. */
 export interface RecordedRequest {
   url: string;
@@ -257,6 +431,10 @@ export interface ApiStubOptions {
   filters?: FilterOptions;
   /** Status code and body for POST /inventory/refresh. */
   refresh?: { status: number; body: unknown };
+
+  events?: ListResponse<DockerEvent> | Error | HttpFailure;
+  eventEngine?: EventEngineStatus | Error | HttpFailure;
+  eventFilters?: EventFilterOptions;
 }
 
 /**
@@ -279,6 +457,13 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
     );
 
   const respond = (value: unknown | Error | undefined, fallback: unknown) => {
+    // An HttpFailure is the server ANSWERING with an error, which the UI must
+    // render differently from an Error, which is the server being unreachable.
+    // The two states have different remedies, so the stub has to tell them
+    // apart or a test cannot distinguish them either.
+    if (value instanceof HttpFailure) {
+      return json({ error: { code: value.code, message: value.message } }, value.status);
+    }
     if (value instanceof Error) return Promise.reject(value);
     return json(value ?? fallback);
   };
@@ -288,6 +473,18 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, method: init?.method ?? "GET" });
+
+      // Event routes are matched first: "/event-engine" and "/events" would
+      // both be swallowed by a looser prefix match further down.
+      if (url.includes("/event-engine")) {
+        return respond(options.eventEngine, eventEngineStatus());
+      }
+      if (url.includes("/event-filters")) {
+        return respond(options.eventFilters, eventFilterOptions);
+      }
+      if (url.includes("/events")) {
+        return respond(options.events, eventPage());
+      }
 
       if (url.includes("/inventory/refresh")) {
         const refresh = options.refresh ?? {
@@ -334,6 +531,21 @@ export function lastContainerQuery(requests: RecordedRequest[]): URLSearchParams
   const match = [...requests]
     .reverse()
     .find((request) => request.url.includes("/containers?") || request.url.endsWith("/containers"));
+  if (!match) return new URLSearchParams();
+
+  const index = match.url.indexOf("?");
+  return new URLSearchParams(index >= 0 ? match.url.slice(index + 1) : "");
+}
+
+/** Returns the query parameters of the most recent event list request. */
+export function lastEventQuery(requests: RecordedRequest[]): URLSearchParams {
+  const match = [...requests]
+    .reverse()
+    .find(
+      (request) =>
+        request.url.includes("/events?") ||
+        request.url.endsWith("/events"),
+    );
   if (!match) return new URLSearchParams();
 
   const index = match.url.indexOf("?");

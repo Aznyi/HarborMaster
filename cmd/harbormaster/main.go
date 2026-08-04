@@ -180,48 +180,87 @@ func run() error {
 
 	probeDocker(ctx, logger, dockerClient, db)
 
-	health := service.NewHealthService(service.HealthOptions{
-		DB:        db,
-		Docker:    dockerClient,
-		Logger:    logger,
-		StartedAt: startedAt,
-	})
-
 	assets, err := web.Assets()
 	if err != nil {
 		return fmt.Errorf("load embedded frontend: %w", err)
 	}
 
+	// Exactly one component owns the periodic full sweep. When the event engine
+	// runs it takes that job at its own reconciliation interval and the
+	// inventory's ticker is suppressed, so two full-refresh timers can never
+	// both be hammering a privileged socket.
+	reconcileInterval, eventsOwnReconciliation := cfg.ReconcileInterval()
+	logger.Info("periodic full refresh configured",
+		slog.Duration("interval", reconcileInterval),
+		slog.String("owner", refreshOwner(eventsOwnReconciliation)))
+
 	inventory := service.NewInventoryService(service.InventoryOptions{
-		Runtime:    dockerClient,
-		Inventory:  db.Inventory,
-		Containers: db.Containers,
-		Logger:     logger,
-		Config:     cfg.Inventory,
+		Runtime:          dockerClient,
+		Inventory:        db.Inventory,
+		Containers:       db.Containers,
+		Logger:           logger,
+		Config:           cfg.Inventory,
+		SuppressPeriodic: eventsOwnReconciliation,
 	})
 
-	// The refresh loop runs in its own goroutine, so a sweep of a large host
-	// never sits in front of an HTTP handler. It stops when ctx is cancelled,
-	// which is the same signal that shuts the server down.
-	var inventoryDone sync.WaitGroup
-	inventoryDone.Add(1)
+	events := service.NewEventService(service.EventOptions{
+		Runtime:   dockerClient,
+		Events:    db.DockerEvents,
+		Inventory: inventory,
+		Logger:    logger,
+		Config:    cfg.Events,
+	})
+
+	health := service.NewHealthService(service.HealthOptions{
+		DB:        db,
+		Docker:    dockerClient,
+		Events:    events,
+		Logger:    logger,
+		StartedAt: startedAt,
+	})
+
+	// SHUTDOWN ORDER, and why it is what it is.
+	//
+	// Deferred calls unwind last-to-first, and the order below is deliberate:
+	//
+	//  1. serve() returns after the HTTP server has drained. In-flight requests
+	//     and open SSE streams end first, so nothing is still reading.
+	//  2. background.Wait() (deferred here, runs next) waits for the inventory
+	//     loop and the event engine to exit. Both are cancelled by the same ctx
+	//     the signal handler cancels, and both return only once every goroutine
+	//     they own has stopped.
+	//  3. dockerClient.Close() and db.Close() (deferred earlier in this
+	//     function, so they run last) release the socket and the database.
+	//
+	// The database MUST close after the background services, or a final event
+	// flush would write to a closed handle. That ordering is the reason this
+	// wait group is deferred here rather than anywhere earlier.
+	var background sync.WaitGroup
+	background.Add(2)
+
 	go func() {
-		defer inventoryDone.Done()
+		defer background.Done()
 		inventory.Run(ctx)
 	}()
-	defer inventoryDone.Wait()
+	go func() {
+		defer background.Done()
+		events.Run(ctx)
+	}()
+	defer background.Wait()
 
 	server := api.NewServer(api.Options{
-		Health:     health,
-		Inventory:  inventory,
-		Containers: db.Containers,
-		Warnings:   db.Inventory,
-		Images:     db.Images,
-		Networks:   db.Networks,
-		Volumes:    db.Volumes,
-		Logger:     logger,
-		Config:     cfg.Server,
-		Assets:     assets,
+		Health:       health,
+		Inventory:    inventory,
+		Containers:   db.Containers,
+		Warnings:     db.Inventory,
+		Images:       db.Images,
+		Networks:     db.Networks,
+		Volumes:      db.Volumes,
+		DockerEvents: db.DockerEvents,
+		EventEngine:  events,
+		Logger:       logger,
+		Config:       cfg.Server,
+		Assets:       assets,
 	})
 
 	recordEvent(ctx, logger, db, domain.Event{
@@ -231,6 +270,15 @@ func run() error {
 	})
 
 	return serve(ctx, logger, db, server.HTTPServer(), cfg.Server.ShutdownTimeout)
+}
+
+// refreshOwner names the component that owns the periodic full sweep, for the
+// startup log line.
+func refreshOwner(eventEngine bool) string {
+	if eventEngine {
+		return "event engine reconciliation"
+	}
+	return "inventory refresh interval"
 }
 
 // serve runs the HTTP server until ctx is cancelled, then drains in-flight

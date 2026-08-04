@@ -26,6 +26,14 @@ const (
 	TriggerStartup  RefreshTrigger = "startup"
 	TriggerPeriodic RefreshTrigger = "periodic"
 	TriggerManual   RefreshTrigger = "manual"
+	// TriggerReconcile marks a full sweep the event engine asked for: the
+	// periodic reconciliation, or a recovery after a reconnect, a queue
+	// overflow, or an event that could not be mapped onto a resource.
+	//
+	// Distinct from TriggerPeriodic so an operator can tell a routine sweep
+	// from one the engine escalated to, which is the difference between "all
+	// is well" and "events were missed".
+	TriggerReconcile RefreshTrigger = "reconcile"
 )
 
 // WarningCode classifies a non-fatal problem encountered during a refresh.

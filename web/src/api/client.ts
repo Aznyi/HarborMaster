@@ -23,6 +23,13 @@ import type {
   RawInspection,
   RefreshAccepted,
 } from "./inventoryTypes";
+import type {
+  DockerEvent,
+  DockerEventDetail,
+  DockerEventQuery,
+  EventEngineStatus,
+  EventFilterOptions,
+} from "./eventTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -272,4 +279,83 @@ export function listImages(
 /** GET /api/v1/images/{id} */
 export function getImage(id: string, options?: RequestOptions): Promise<ImageUsage> {
   return request<ImageUsage>(`/images/${encodeURIComponent(id)}`, options);
+}
+
+// --------------------------------------------------------- docker events --
+
+/**
+ * Builds the event list query string.
+ *
+ * Empty values are omitted rather than sent blank, so the request URL reflects
+ * exactly which filters are active -- which is also what makes it assertable.
+ */
+export function buildEventQuery(query: DockerEventQuery): string {
+  const params = new URLSearchParams();
+
+  const setIf = (key: string, value: string | number | undefined) => {
+    if (value === undefined || value === "") return;
+    params.set(key, String(value));
+  };
+
+  setIf("page", query.page);
+  setIf("pageSize", query.pageSize);
+  setIf("actorId", query.actorId);
+  setIf("project", query.project);
+  setIf("service", query.service);
+  setIf("search", query.search?.trim() || undefined);
+  setIf("since", query.since);
+  setIf("until", query.until);
+  setIf("sort", query.sort);
+  setIf("direction", query.direction);
+
+  // Repeated rather than comma-joined: both are accepted, and repetition
+  // survives a value that itself contains a comma.
+  for (const type of query.type ?? []) params.append("type", type);
+  for (const action of query.action ?? []) params.append("action", action);
+  for (const result of query.result ?? []) params.append("result", result);
+
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+/** GET /api/v1/events */
+export function listDockerEvents(
+  query: DockerEventQuery = {},
+  options?: RequestOptions,
+): Promise<ListResponse<DockerEvent>> {
+  return request<ListResponse<DockerEvent>>(`/events${buildEventQuery(query)}`, options);
+}
+
+/** GET /api/v1/events/{id} -- the id is the local sequence number. */
+export function getDockerEvent(
+  sequence: number,
+  options?: RequestOptions,
+): Promise<DockerEventDetail> {
+  return request<DockerEventDetail>(`/events/${sequence}`, options);
+}
+
+/** GET /api/v1/event-engine */
+export function getEventEngine(options?: RequestOptions): Promise<EventEngineStatus> {
+  return request<EventEngineStatus>("/event-engine", options);
+}
+
+/** GET /api/v1/event-filters */
+export function getEventFilterOptions(
+  options?: RequestOptions,
+): Promise<EventFilterOptions> {
+  return request<EventFilterOptions>("/event-filters", options);
+}
+
+/**
+ * The SSE endpoint's URL.
+ *
+ * `lastEventId` is passed as a query parameter because EventSource cannot set a
+ * request header on its first connection. On an automatic reconnect the browser
+ * sends the Last-Event-ID header itself, and the server accepts either.
+ */
+export function eventStreamUrl(lastEventId?: number): string {
+  if (lastEventId === undefined || lastEventId <= 0) {
+    return `${API_BASE}/events/stream`;
+  }
+  return `${API_BASE}/events/stream?lastEventId=${lastEventId}`;
 }

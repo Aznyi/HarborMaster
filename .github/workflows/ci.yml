@@ -49,10 +49,53 @@ jobs:
 
       # The race detector needs cgo, so it is enabled for this step only. The
       # shipped binary is still built with CGO_ENABLED=0.
+      #
+      # -race is not optional here: the event engine owns several long-lived
+      # goroutines and a bounded queue, and the detector is what stops a data
+      # race reaching a release.
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...
         env:
           CGO_ENABLED: "1"
+
+      # Build-tagged out of the default run, so a syntax error there would
+      # otherwise go unnoticed until someone ran the integration suite.
+      - name: Vet the integration suite
+        run: go vet -tags integration ./...
+
+  integration:
+    name: Live Docker integration
+    runs-on: ubuntu-latest
+    # The runner's own Docker daemon is enough; no privileged Docker-in-Docker
+    # is needed, and asking for one would make this job harder to run anywhere
+    # else.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Confirm a Docker daemon is reachable
+        run: docker version
+
+      # Every resource these tests create is prefixed harbormaster-it-, and the
+      # suite sweeps strays at the end. The timeout is generous because pulling
+      # the test image on a cold runner dominates the run.
+      - name: Integration tests against the runner's Docker daemon
+        run: go test -tags integration -v -timeout 15m ./internal/integration/...
+
+      - name: Confirm no test resources were left behind
+        if: always()
+        run: |
+          strays="$(docker ps -aq --filter 'name=harbormaster-it-')"
+          if [ -n "$strays" ]; then
+            echo "leftover containers:"; docker ps -a --filter 'name=harbormaster-it-'
+            docker rm -f $strays
+            exit 1
+          fi
+          echo "no leftover test resources"
 
   frontend:
     name: Frontend (test, build)

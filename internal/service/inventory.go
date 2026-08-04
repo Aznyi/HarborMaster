@@ -43,6 +43,16 @@ type InventoryService struct {
 	running  bool
 	runState refreshState
 
+	// targeted serialises single-resource writes against each other. See
+	// targeted.go for why it does not serialise against a full refresh.
+	targeted targetedState
+
+	// suppressPeriodic disables this service's own refresh ticker because
+	// another component owns periodic full reconciliation. Phase 2.5's event
+	// engine sets it: two independent full-refresh timers would double the load
+	// on a privileged socket and make "when was the last sweep" ambiguous.
+	suppressPeriodic bool
+
 	// now is injectable for deterministic tests.
 	now func() time.Time
 }
@@ -61,6 +71,9 @@ type InventoryOptions struct {
 	Logger     *slog.Logger
 	Config     config.Inventory
 	Now        func() time.Time
+	// SuppressPeriodic hands ownership of the periodic full refresh to another
+	// component. Startup and manual refreshes are unaffected.
+	SuppressPeriodic bool
 }
 
 // NewInventoryService builds an InventoryService.
@@ -78,12 +91,13 @@ func NewInventoryService(opts InventoryOptions) *InventoryService {
 	}
 
 	return &InventoryService{
-		runtime:    opts.Runtime,
-		inventory:  opts.Inventory,
-		containers: opts.Containers,
-		logger:     logger,
-		cfg:        opts.Config,
-		now:        now,
+		runtime:          opts.Runtime,
+		inventory:        opts.Inventory,
+		containers:       opts.Containers,
+		logger:           logger,
+		cfg:              opts.Config,
+		suppressPeriodic: opts.SuppressPeriodic,
+		now:              now,
 	}
 }
 
@@ -115,6 +129,15 @@ func (s *InventoryService) Run(ctx context.Context) {
 			s.logger.Warn("startup inventory refresh failed",
 				slog.String("error", docker.SanitizeError(err)))
 		}
+	}
+
+	if s.suppressPeriodic {
+		// The event engine owns periodic full reconciliation. Startup and
+		// manual refreshes still run through this service; only the ticker
+		// moves, so there is never more than one full-refresh timer.
+		s.logger.Info("periodic inventory refresh delegated to the event engine")
+		<-ctx.Done()
+		return
 	}
 
 	if s.cfg.RefreshInterval <= 0 {

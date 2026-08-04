@@ -21,6 +21,9 @@ type Server struct {
 	networks   NetworkReader
 	volumes    VolumeReader
 
+	dockerEvents DockerEventReader
+	eventEngine  EventEngineReader
+
 	logger  *slog.Logger
 	cfg     config.Server
 	assets  fs.FS
@@ -47,6 +50,12 @@ type Options struct {
 	Networks NetworkReader
 	Volumes  VolumeReader
 
+	// DockerEvents answers the event history endpoints, and EventEngine the
+	// status and SSE endpoints. Both nil in a deployment without the event
+	// engine, which yields a disabled status rather than a broken route.
+	DockerEvents DockerEventReader
+	EventEngine  EventEngineReader
+
 	// Logger receives access and error records. Defaults to slog.Default.
 	Logger *slog.Logger
 	// Config supplies request-size and timeout limits.
@@ -70,9 +79,13 @@ func NewServer(opts Options) *Server {
 		images:     opts.Images,
 		networks:   opts.Networks,
 		volumes:    opts.Volumes,
-		logger:     logger,
-		cfg:        opts.Config,
-		assets:     opts.Assets,
+
+		dockerEvents: opts.DockerEvents,
+		eventEngine:  opts.EventEngine,
+
+		logger: logger,
+		cfg:    opts.Config,
+		assets: opts.Assets,
 	}
 	s.handler = s.routes()
 	return s
@@ -106,10 +119,29 @@ func (s *Server) routes() http.Handler {
 		APIPrefix + "/images/{id}":         s.handleImageDetail,
 		APIPrefix + "/networks":            s.handleNetworks,
 		APIPrefix + "/volumes":             s.handleVolumes,
+		// Event history. The engine's status lives at /event-engine rather
+		// than /events/engine for the same ServeMux reason as
+		// /inventory/filters above: a literal "engine" segment registered for
+		// all methods would neither contain nor be contained by
+		// "GET /events/{id}", which ServeMux rejects as an ambiguous pair.
+		APIPrefix + "/events":        s.handleEvents,
+		APIPrefix + "/events/{id}":   s.handleEventDetail,
+		APIPrefix + "/event-engine":  s.handleEventEngine,
+		APIPrefix + "/event-filters": s.handleEventFilters,
 	} {
 		mux.HandleFunc("GET "+path, handler)
 		mux.HandleFunc(path, s.handleMethodNotAllowed("GET, HEAD"))
 	}
+
+	// The SSE stream is registered for GET ONLY, with no bare companion.
+	//
+	// A bare "/events/stream" would match every method on that one path, while
+	// "GET /events/{id}" matches GET on every path -- neither contains the
+	// other, so ServeMux would panic on the conflicting pair at startup. GET
+	// alone is a strict subset of both patterns above, so it resolves cleanly,
+	// and a POST to /events/stream still gets an honest 405 from the bare
+	// "/events/{id}" handler rather than a 404.
+	mux.HandleFunc("GET "+APIPrefix+"/events/stream", s.handleEventStream)
 
 	// The one non-GET endpoint in the whole router. It mutates HarborMaster's
 	// own inventory, never Docker: it re-reads the host and replaces what

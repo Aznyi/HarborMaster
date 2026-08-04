@@ -19,10 +19,23 @@ type DatabasePinger interface {
 	Ping(ctx context.Context) error
 }
 
+// EventEngineReporter is the event-engine capability health depends on.
+//
+// A narrow interface rather than *EventService, so health stays testable
+// without a Docker daemon and without starting the engine.
+type EventEngineReporter interface {
+	// Enabled reports whether the engine is switched on.
+	Enabled() bool
+	// Degraded reports whether the engine's state should degrade health, with
+	// an operator-safe reason.
+	Degraded() (bool, string)
+}
+
 // HealthService reports whether HarborMaster's dependencies are reachable.
 type HealthService struct {
 	db        DatabasePinger
 	docker    docker.Pinger
+	events    EventEngineReporter
 	logger    *slog.Logger
 	startedAt time.Time
 	// now is injectable so tests can assert on uptime deterministically.
@@ -31,8 +44,11 @@ type HealthService struct {
 
 // HealthOptions configures a HealthService.
 type HealthOptions struct {
-	DB        DatabasePinger
-	Docker    docker.Pinger
+	DB     DatabasePinger
+	Docker docker.Pinger
+	// Events is optional. A nil reporter omits the event component entirely,
+	// which is what an API-only or pre-Phase-2.5 deployment looks like.
+	Events    EventEngineReporter
 	Logger    *slog.Logger
 	StartedAt time.Time
 	Now       func() time.Time
@@ -55,6 +71,7 @@ func NewHealthService(opts HealthOptions) *HealthService {
 	return &HealthService{
 		db:        opts.DB,
 		docker:    opts.Docker,
+		events:    opts.Events,
 		logger:    logger,
 		startedAt: startedAt,
 		now:       now,
@@ -68,11 +85,18 @@ func NewHealthService(opts HealthOptions) *HealthService {
 // being down is "degraded" -- HarborMaster still serves and the UI shows a
 // disconnected state -- while the database being down is "unhealthy", since
 // nothing else can function without it.
+//
+// The event engine follows the same reasoning and never escalates past
+// degraded. A disconnected event stream means the inventory falls back to
+// periodic reconciliation, which is a slower but correct mode -- and a
+// transient reconnect must NOT make the container health check fail, or a
+// daemon restart would put HarborMaster into a restart loop.
 func (s *HealthService) Check(ctx context.Context) domain.HealthReport {
 	now := s.now().UTC()
 	report := domain.HealthReport{
 		Database:  s.checkDatabase(ctx),
 		Docker:    s.checkDocker(ctx),
+		Events:    s.checkEvents(),
 		CheckedAt: now,
 		UptimeSec: int64(now.Sub(s.startedAt).Seconds()),
 	}
@@ -82,10 +106,41 @@ func (s *HealthService) Check(ctx context.Context) domain.HealthReport {
 		report.Status = domain.StatusUnhealthy
 	case report.Docker.Status != domain.StatusUp:
 		report.Status = domain.StatusDegraded
+	case report.Events != nil && report.Events.Status != domain.StatusUp:
+		report.Status = domain.StatusDegraded
 	default:
 		report.Status = domain.StatusHealthy
 	}
 	return report
+}
+
+// checkEvents reports the event engine's contribution to health.
+//
+// Returns nil when no engine is configured, which omits the component from the
+// response rather than inventing a status for something that does not exist.
+//
+// A DISABLED engine reports up, not down. Running on periodic reconciliation
+// alone is a supported configuration, and reporting it as degraded forever
+// would train an operator to ignore the field.
+func (s *HealthService) checkEvents() *domain.Component {
+	if s.events == nil {
+		return nil
+	}
+
+	if !s.events.Enabled() {
+		return &domain.Component{
+			Status: domain.StatusUp,
+			Detail: "event engine disabled by configuration; inventory uses periodic reconciliation",
+		}
+	}
+
+	degraded, reason := s.events.Degraded()
+	if !degraded {
+		return &domain.Component{Status: domain.StatusUp}
+	}
+	// The reason comes from the engine already sanitised; it is prose about
+	// state, never a Docker error.
+	return &domain.Component{Status: domain.StatusDown, Detail: reason}
 }
 
 func (s *HealthService) checkDatabase(ctx context.Context) domain.Component {

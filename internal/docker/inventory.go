@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
@@ -49,6 +50,14 @@ type Runtime interface {
 	ListNetworks(ctx context.Context) ([]domain.Network, error)
 	// ListVolumes returns normalized volume metadata.
 	ListVolumes(ctx context.Context) ([]domain.Volume, error)
+
+	// StreamEvents subscribes to the runtime's event stream, optionally
+	// resuming from a point in time.
+	//
+	// Observation only. Subscribing changes nothing on the host, and the
+	// subscription hands out HarborMaster's own event records rather than the
+	// SDK's, so no caller can reach the underlying stream.
+	StreamEvents(ctx context.Context, since time.Time) (*EventSubscription, error)
 }
 
 // Inspection is the result of inspecting one container.

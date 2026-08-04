@@ -6,7 +6,9 @@ import type { InventoryStatus } from "../api/inventoryTypes";
 import type { HealthReport } from "../api/types";
 import type { ResourceState } from "../hooks/useApiResource";
 import { useInventory } from "../hooks/useContainers";
+import { useEventEngine } from "../hooks/useDockerEvents";
 import { useVersion } from "../hooks/useHealth";
+import { ConnectionStateBadge } from "../components/EventBadges";
 import {
   DisconnectedState,
   ErrorState,
@@ -47,10 +49,119 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
     <div className="flex flex-col gap-6">
       <InventoryHeader inventory={inventory} />
       <ConnectionCards status={inventory.data} health={health} />
+      <EventEnginePanel />
       <ContainerMetrics status={inventory.data} />
       <CatalogMetrics status={inventory.data} />
       <WarningsPanel status={inventory.data} />
     </div>
+  );
+}
+
+/**
+ * Event-engine status.
+ *
+ * The one thing this panel must communicate clearly: whether the inventory is
+ * being kept current by live events or has fallen back to periodic polling. An
+ * operator seeing a stale container state needs to know which, because the two
+ * have very different expected latencies.
+ */
+function EventEnginePanel() {
+  const engine = useEventEngine();
+
+  if (!engine.data) {
+    return (
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <h2 className="text-lg font-semibold">Docker events</h2>
+        <p className="mt-2 text-sm text-content-muted">
+          Event engine status is unavailable.
+        </p>
+      </section>
+    );
+  }
+
+  const status = engine.data;
+
+  if (!status.enabled) {
+    return (
+      <section
+        aria-labelledby="events-heading"
+        className="rounded-xl border border-border-subtle bg-surface-raised p-5"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="events-heading" className="text-lg font-semibold">
+              Docker events
+            </h2>
+            <p className="mt-1 text-sm text-content-muted">
+              Disabled by configuration. The inventory refreshes on its own
+              schedule, which is a supported mode.
+            </p>
+          </div>
+          <ConnectionStateBadge state={status.state} />
+        </div>
+      </section>
+    );
+  }
+
+  const disconnected = status.state !== "connected";
+  const degraded = disconnected || status.overflowPending;
+
+  return (
+    <section
+      aria-labelledby="events-heading"
+      className={`rounded-xl border p-5 ${
+        degraded ? "border-warn/40 bg-warn-soft" : "border-border-subtle bg-surface-raised"
+      }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 id="events-heading" className="text-lg font-semibold">
+            Docker events
+          </h2>
+          <p className="mt-1 text-sm text-content-muted">
+            Live synchronisation with the Docker daemon
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <ConnectionStateBadge state={status.state} />
+          <Link to="/events" className="text-sm font-medium text-accent hover:underline">
+            View all
+          </Link>
+        </div>
+      </div>
+
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="Last event" value={formatTimestamp(status.lastEventAt)} />
+        <Metric
+          label="Last reconciliation"
+          value={formatTimestamp(status.lastReconciliationAt)}
+        />
+        <Metric label="Reconnects" value={String(status.counters.reconnectCount)} />
+        <Metric label="Queue" value={`${status.queueDepth} / ${status.queueCapacity}`} />
+        <Metric label="Recorded events" value={String(status.storedEvents)} />
+        <Metric label="Received" value={String(status.counters.eventsReceived)} />
+        <Metric label="Dropped" value={String(status.counters.eventsDropped)} />
+        <Metric
+          label="Targeted refreshes"
+          value={String(status.counters.targetedRefreshes)}
+        />
+      </dl>
+
+      {disconnected ? (
+        <p role="alert" className="mt-4 rounded-lg border border-warn/40 px-3 py-2 text-sm">
+          The Docker event stream is disconnected, so HarborMaster is relying on
+          periodic reconciliation. Container state may lag by up to one
+          reconciliation interval until the stream is back.
+        </p>
+      ) : null}
+
+      {status.overflowPending ? (
+        <p role="alert" className="mt-4 rounded-lg border border-warn/40 px-3 py-2 text-sm">
+          The event queue overflowed. A full reconciliation is running to restore
+          the inventory.
+        </p>
+      ) : null}
+    </section>
   );
 }
 

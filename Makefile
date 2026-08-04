@@ -31,7 +31,7 @@ IMAGE_TAG   ?= dev
 COMPOSE     := docker compose -f deployments/compose.yaml
 COMPOSE_DEV := $(COMPOSE) -f deployments/compose.build.yaml
 
-.PHONY: help tidy fmt fmt-check vet test test-race cover \
+.PHONY: help tidy fmt fmt-check vet vet-integration test test-race test-integration cover \
         web-install web-test web-build web-dev \
         build run clean \
         docker-build docker-smoke docker-inspect \
@@ -61,8 +61,14 @@ vet: ## Run go vet
 test: ## Run Go tests
 	go test ./...
 
-test-race: ## Run Go tests with the race detector
-	go test -race ./...
+test-race: ## Run Go tests with the race detector (needs cgo and a C toolchain)
+	CGO_ENABLED=1 go test -race ./...
+
+test-integration: ## Run the live-Docker integration suite (needs a reachable daemon)
+	go test -tags integration -v -timeout 15m ./internal/integration/...
+
+vet-integration: ## Vet the build-tagged integration suite, which the default vet skips
+	go vet -tags integration ./...
 
 cover: ## Run Go tests and report coverage
 	go test -coverprofile=coverage.out ./...
@@ -129,5 +135,5 @@ compose-down: ## Stop the stack
 
 ## ---------------------------------------------------------------------- CI --
 
-ci: fmt-check vet test web-install web-test web-build ## Everything CI runs
+ci: fmt-check vet vet-integration test web-install web-test web-build ## Everything CI runs
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(CMD_PKG)

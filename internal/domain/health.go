@@ -46,9 +46,18 @@ const (
 // still serves, and the frontend renders a disconnected state. Only the
 // database, which HarborMaster cannot operate without, yields StatusUnhealthy.
 type HealthReport struct {
-	Status    OverallStatus `json:"status"`
-	Database  Component     `json:"database"`
-	Docker    Component     `json:"docker"`
-	CheckedAt time.Time     `json:"checkedAt"`
-	UptimeSec int64         `json:"uptimeSeconds"`
+	Status   OverallStatus `json:"status"`
+	Database Component     `json:"database"`
+	Docker   Component     `json:"docker"`
+	// Events reports the Docker event engine. A pointer, and omitted when nil,
+	// so a deployment with no event engine configured says nothing about it
+	// rather than reporting a fabricated status.
+	//
+	// A disconnected event stream yields StatusDegraded overall, never
+	// StatusUnhealthy: periodic reconciliation still keeps the inventory
+	// correct, and a transient reconnect must not fail the container health
+	// check and trigger a restart loop.
+	Events    *Component `json:"events,omitempty"`
+	CheckedAt time.Time  `json:"checkedAt"`
+	UptimeSec int64      `json:"uptimeSeconds"`
 }

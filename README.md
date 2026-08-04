@@ -10,10 +10,12 @@ order matters — the observation and recovery machinery is built first, so that
 by the time HarborMaster can change a container it can already undo it.
 
 > **Read-only today.** HarborMaster inventories the containers, images,
-> networks, and volumes on a Docker host and reports their normalized
-> configuration. It cannot pull images, create, recreate, update, restart, or
-> remove containers, and it has no command-execution path. See
-> [Status](#status) for what is and is not here yet.
+> networks, and volumes on a Docker host, reports their normalized
+> configuration, and subscribes to the Docker event stream to keep that
+> inventory current. It cannot pull images, create, recreate, update, restart,
+> or remove containers, and it has no command-execution path. Watching events
+> does not change that: an event only ever causes HarborMaster to re-read the
+> host. See [Status](#status) for what is and is not here yet.
 
 ## Contents
 
@@ -21,6 +23,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Deploying on Linux](#deploying-on-linux)
 - [Container image](#container-image)
 - [Inventory](#inventory)
+- [Docker events](#docker-events)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [API](#api)
@@ -387,6 +390,204 @@ useful for troubleshooting — it carries fields HarborMaster has not normalized
 yet — but it is **not** a faithful copy: redacted values are gone, not
 recoverable, so it cannot recreate a container exactly.
 
+## Docker events
+
+HarborMaster subscribes to the Docker daemon's event stream so the inventory
+tracks the host in near real time instead of waiting for the next sweep.
+
+### Events are hints, not authoritative state
+
+This is the rule the whole subsystem is built around, and it is worth stating
+plainly because it is easy to assume the opposite:
+
+> **A Docker event says a resource MAY have changed. It never says what the
+> resource now is, and HarborMaster does not believe it if it did.**
+
+Every event triggers a **re-inspection** through the same pipeline a full
+refresh uses — the same normalization, the same masking, the same transaction
+rules. Nothing parses an event payload into container state. So there is exactly
+one path by which a container becomes rows in the database, regardless of what
+triggered the write.
+
+The reason is not purity. Docker promises far less about its event stream than
+it appears to:
+
+- Events emitted while nothing is listening are **gone**. There is no durable log.
+- Nothing is replayed across a **daemon restart**.
+- Ordering holds only **within one connection**.
+- **Duplicates** are permitted.
+- Some daemon versions emit only whole-second timestamps, and some omit actions
+  others send.
+
+An inventory reconstructed from that stream would drift and never notice. One
+rebuilt by inspection cannot.
+
+### What the engine does
+
+```
+Docker event stream
+   │  (subscribe; reconnect with bounded backoff + jitter)
+   ▼
+normalize + redact          ← internal/docker, the only place that sees SDK types
+   │
+   ▼
+deduplicate (fingerprint)   ← bounded in-memory window + a UNIQUE column
+   │
+   ▼
+persist in batches          ← docker_events, monotonic local sequence
+   │
+   ├──► SSE subscribers     ← live UI, redacted, non-blocking
+   │
+   ▼
+classify → debounce/coalesce
+   │
+   ├──► targeted refresh    ← re-inspect ONE container/image/network/volume
+   └──► full reconciliation ← the Phase 2 refresh pipeline, unchanged
+```
+
+### Reconnection
+
+A dropped stream is expected — a daemon restart, a socket hiccup, an upgrade.
+The reader reconnects with **bounded exponential backoff and jitter**: the delay
+starts at `EVENTS_RECONNECT_INITIAL_DELAY`, multiplies by
+`EVENTS_RECONNECT_MULTIPLIER` after each consecutive failure, is capped at
+`EVENTS_RECONNECT_MAX_DELAY`, and is spread over 50–100% of its nominal value so
+several HarborMasters that lost the same daemon do not reconnect in lockstep.
+
+A connection that stays up for the maximum-delay duration **resets** the
+backoff, so a daemon that flaps hourly does not stay parked at the ceiling.
+
+Shutdown never waits out a backoff: the delay is a timer inside a `select`, so
+cancellation returns immediately rather than sixty seconds later.
+
+**Every reconnect also triggers a full reconciliation.** Whatever happened while
+disconnected produced no event HarborMaster saw, and the daemon's own replay is
+bounded and unreliable, so a sweep is the only honest way to be sure.
+
+A daemon that is down at startup is not a startup failure. HarborMaster serves
+the last inventory it stored, reports `degraded`, and keeps retrying.
+
+### Reconciliation
+
+Periodic full reconciliation stays on **even when events flow perfectly**, for
+all the reasons above.
+
+**Exactly one component owns the periodic full sweep.** While the event engine
+runs it owns reconciliation at `EVENTS_RECONCILE_INTERVAL` (15m by default), and
+`INVENTORY_REFRESH_INTERVAL` is suppressed. Turn the engine off and the
+inventory's own ticker takes over again, unchanged — an existing Phase 2
+configuration keeps working exactly as it did. Two independent full-refresh
+timers would double the load on a privileged socket and make "when was the last
+sweep" ambiguous.
+
+Reconciliation is also requested on demand when:
+
+- the event stream reconnects,
+- the daemon reports a configuration reload,
+- an event cannot be mapped onto a resource,
+- a targeted refresh fails,
+- the processing queue overflows.
+
+A reconciliation is recorded with the `reconcile` trigger, distinct from
+`periodic`, so an operator can tell a routine sweep from one the engine
+escalated to — the difference between "all is well" and "events were missed".
+
+### Deduplication and debouncing
+
+Each event carries a deterministic **fingerprint** derived from the host, type,
+action, actor, scope, and the daemon's nanosecond timestamp. A duplicate
+delivery inside `EVENTS_DEDUP_WINDOW` is counted and discarded. A genuinely
+repeated action at a different instant has a different fingerprint and is **not**
+suppressed — suppressing a real second `start` would lose a state transition.
+The window is bounded in memory and expires; a `UNIQUE` constraint on the column
+catches anything that outlives it, including across a restart.
+
+One lifecycle transition emits a burst — `docker restart` produces kill, die,
+stop, start, and usually a health_status within a second or two. A debounce
+window (`EVENTS_REFRESH_DEBOUNCE`) coalesces them into **one** refresh per
+resource. There is one worker and one timer for the whole scheduler: no
+goroutine per event, no timer per event, and the pending set is capped.
+
+When the queue or the pending set is full, HarborMaster records a warning,
+increments the drop counter, and requests a full reconciliation. It never blocks
+the stream reader — a blocked reader stalls the daemon's event dispatch and
+fails silently.
+
+### Retention
+
+Event history is observational and would otherwise grow without limit. It is
+pruned by age (`EVENTS_RETENTION_AGE`) and by row count
+(`EVENTS_RETENTION_COUNT`), in bounded batches so a large backlog does not hold
+one long write lock. Pruning touches **only** the event table — it can never
+remove a current inventory record.
+
+There is deliberately **no destructive API endpoint** for pruning in this phase.
+An unauthenticated endpoint that deletes history would be exactly the wrong
+thing to add first.
+
+### Live updates (Server-Sent Events)
+
+`GET /api/v1/events/stream` is a `text/event-stream` endpoint carrying events as
+they are persisted. SSE rather than WebSockets: the traffic is one-way, SSE is
+plain HTTP so it inherits the server's timeouts, security headers, and access
+log unchanged, and the browser reconnects on its own.
+
+- Frames are named: `docker-event`, `ready`, `replay-truncated`, plus comment
+  heartbeats.
+- Each event's SSE `id:` is its local sequence, which the browser echoes back as
+  `Last-Event-ID` on reconnect.
+- Replay from `Last-Event-ID` reads from SQLite and is **capped**. A client that
+  fell further behind gets a `replay-truncated` frame saying how many were
+  skipped, and should reload the paginated history rather than expect the stream
+  to catch it up.
+- Concurrent subscribers are capped; over the limit the endpoint answers `503`
+  with `Retry-After`.
+- A subscriber that stops reading has events dropped **for it alone**. It never
+  blocks event processing or back-pressures the Docker stream.
+
+The endpoint is **unauthenticated**, like the rest of the API, so it carries only
+already-redacted event data and never a raw Docker payload.
+
+### Redaction
+
+Actor attributes are a resource's labels plus daemon-supplied fields — arbitrary
+operator-supplied key/value pairs that can and do carry credentials. Any value
+whose **key** matches a sensitive-name pattern (`PASSWORD`, `SECRET`, `TOKEN`,
+`API_KEY`, `AUTH`, …) is replaced with `********`.
+
+Redaction happens in the Docker adapter, **before** an event is logged,
+persisted, returned by the API, or written to the SSE stream. There is no
+unredacted copy anywhere, and no switch to reveal one. Docker registry
+authentication is never stored.
+
+Non-sensitive structural metadata is preserved, because inventory correlation
+depends on it.
+
+### Live UI
+
+The Events page shows two views over the same data, and the distinction matters:
+
+- **Live** — what has arrived over SSE since the page opened. Bounded at 250
+  rows; not a complete record.
+- **History** — the server-side paginated, filtered query. The complete record
+  of what HarborMaster observed.
+
+Both show **two timestamps per event**: the Docker time and HarborMaster's
+observed time. They differ by the stream latency normally and by a great deal
+after a reconnect, and that gap is exactly what an operator needs to see.
+
+Pausing the live view stops the list moving but keeps the connection open, so
+resuming does not trigger a reconnect and replay.
+
+### Events tables
+
+Migration `0003_events.sql` adds `docker_events` and `event_engine_state`, and
+widens the `inventory_refreshes` trigger constraint to accept `reconcile`.
+
+`docker_events` is distinct from the `events` table in `0001`, and the two must
+not be conflated: that one is HarborMaster's audit log of its **own** actions,
+this one records what the **Docker daemon** reported.
+
 ## Architecture
 
 Layers depend inward. Nothing in `domain` imports an adapter, and services
@@ -400,8 +601,8 @@ added without touching the service or API layers.
 
 ```
 cmd/harbormaster      Composition root: config, wiring, signals, shutdown
-  └── internal/api        REST handlers, middleware, SPA static serving
-        └── internal/service   Application logic (health checks)
+  └── internal/api        REST handlers, middleware, SSE, SPA static serving
+        └── internal/service   Application logic (health, inventory, events)
               ├── internal/docker  Docker Engine SDK adapter (read-only)
               └── internal/store   SQLite persistence, embedded migrations
                     └── internal/domain  Models shared by every layer
@@ -415,12 +616,44 @@ deployments           Docker Compose stack
 
 Two boundaries carry most of the safety burden:
 
-- **`internal/docker`** is the only package that talks to the Engine, and it
-  exposes exactly one operation, `Ping`. Gaining write access to Docker
-  requires editing this package, which makes that change reviewable in a diff.
+- **`internal/docker`** is the only package that talks to the Engine, and every
+  operation it exposes is an observation: ping, list, inspect, and subscribe to
+  events. There is no method that creates, starts, stops, removes, pulls, or
+  executes anything, and no accessor that hands out the SDK client. Gaining
+  write access to Docker requires editing this package, which makes that change
+  reviewable in a diff.
+
+  The event subscription hands out HarborMaster's own event records, never the
+  SDK's `events.Message` and never a raw channel, so nothing downstream can come
+  to depend on the SDK's shape.
 - **`internal/api`** is the only package that renders errors to a client. It
   logs the real error and returns a stable code with a generic message, so
   stack traces and socket paths never leave the process.
+
+### Concurrency and shutdown
+
+The event engine introduces long-lived goroutines, so ownership is explicit.
+`EventService.Run` is the sole owner of exactly three children — the stream
+reader, the event processor, and the refresh/reconcile/prune worker — and
+returns only once all three have exited. Every child selects on the context. The
+processing queue has one writer, which is also its only closer, so there is no
+send-on-closed race and no double close.
+
+Shutdown order is deliberate, because the last step depends on the first:
+
+1. The HTTP server drains. In-flight requests and open SSE streams end.
+2. Background services stop. The inventory loop and the event engine exit, and
+   the engine flushes anything already read using a context detached from
+   cancellation so those events are not lost.
+3. The Docker client and the database close — the database **after** background
+   persistence has stopped, or a final flush would write to a closed handle.
+
+One subtlety worth knowing if you touch the adapter: the event stream uses a
+**second SDK client built without a request timeout**. The SDK's `WithTimeout`
+sets `http.Client.Timeout`, which bounds the whole exchange including reading
+the body — and the event stream is a body that never ends. Sharing the timed
+client would tear the stream down every `DOCKER_TIMEOUT` seconds and present as
+a daemon that will not stay up. Every other call keeps its timeout.
 
 ### Frontend
 
@@ -457,6 +690,23 @@ for the full list with defaults.
 | `HARBORMASTER_INVENTORY_WORKERS` | `8` | Concurrent inspections (1–64) |
 | `HARBORMASTER_INVENTORY_ABSENT_RETENTION` | `168h` | How long absent containers are kept |
 | `HARBORMASTER_INVENTORY_MASK_PATTERNS` | see below | Names treated as secret-bearing |
+| `HARBORMASTER_EVENTS_ENABLED` | `true` | Turn the Docker event engine on or off |
+| `HARBORMASTER_EVENTS_RECONNECT_INITIAL_DELAY` | `1s` | First backoff delay after a dropped stream |
+| `HARBORMASTER_EVENTS_RECONNECT_MAX_DELAY` | `60s` | Backoff ceiling |
+| `HARBORMASTER_EVENTS_RECONNECT_MULTIPLIER` | `2.0` | Backoff growth factor (≥ 1) |
+| `HARBORMASTER_EVENTS_BUFFER_SIZE` | `1024` | Processing queue depth |
+| `HARBORMASTER_EVENTS_BATCH_SIZE` | `64` | Events persisted per transaction |
+| `HARBORMASTER_EVENTS_BATCH_FLUSH_INTERVAL` | `500ms` | How long a partial batch waits |
+| `HARBORMASTER_EVENTS_DEDUP_WINDOW` | `10s` | Duplicate-fingerprint memory |
+| `HARBORMASTER_EVENTS_REFRESH_DEBOUNCE` | `750ms` | Coalescing window per resource |
+| `HARBORMASTER_EVENTS_RECONCILE_INTERVAL` | `15m` | Periodic full sweep while the engine runs |
+| `HARBORMASTER_EVENTS_RETENTION_AGE` | `168h` | Event age limit; `0` disables |
+| `HARBORMASTER_EVENTS_RETENTION_COUNT` | `50000` | Event row limit; `0` disables |
+| `HARBORMASTER_EVENTS_PRUNE_INTERVAL` | `1h` | How often retention runs |
+| `HARBORMASTER_EVENTS_STREAM_MAX_SUBSCRIBERS` | `16` | Concurrent SSE clients |
+| `HARBORMASTER_EVENTS_STREAM_BUFFER_SIZE` | `128` | Per-subscriber queue |
+| `HARBORMASTER_EVENTS_STREAM_REPLAY_LIMIT` | `200` | Cap on `Last-Event-ID` replay |
+| `HARBORMASTER_EVENTS_STREAM_HEARTBEAT` | `20s` | SSE keep-alive comment interval |
 | `HARBORMASTER_HEALTHCHECK_TIMEOUT` | `3s` | Bound on `harbormaster healthcheck` |
 | `HARBORMASTER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `HARBORMASTER_LOG_FORMAT` | `json` | `json` or `text` |
@@ -475,7 +725,15 @@ Setting it **replaces** that list rather than extending it, so to add a pattern
 repeat the defaults and append yours.
 
 Every value is validated at startup and the process refuses to start on a bad
-one.
+one. The event-engine settings are validated **even when the engine is
+disabled**: a configuration error that only surfaces the day someone flips
+`EVENTS_ENABLED` to true is a worse failure than one caught at boot.
+
+**Only one component runs the periodic full sweep.** With the event engine
+enabled, `EVENTS_RECONCILE_INTERVAL` governs it and
+`INVENTORY_REFRESH_INTERVAL` is suppressed; with the engine disabled, the
+inventory's own interval takes over unchanged. Startup and manual refreshes are
+unaffected either way. The startup log states which component owns it.
 
 The default bind address is loopback so that running the bare binary never
 exposes the API to the network by accident. The container image overrides it to
@@ -504,8 +762,14 @@ The contract is [`api/openapi.yaml`](api/openapi.yaml) (OpenAPI 3.1).
 | `GET` | `/api/v1/images/{id}` | One image |
 | `GET` | `/api/v1/networks` | Networks |
 | `GET` | `/api/v1/volumes` | Volumes |
+| `GET` | `/api/v1/events` | Paged, filtered Docker event history |
+| `GET` | `/api/v1/events/{id}` | One event by local sequence number |
+| `GET` | `/api/v1/events/stream` | Live events over Server-Sent Events |
+| `GET` | `/api/v1/event-engine` | Event-engine connection state and counters |
+| `GET` | `/api/v1/event-filters` | Event filter vocabularies actually present |
 
-Every path except the refresh returns `405` for any write method.
+Every path except the refresh returns `405` for any write method. There is no
+event mutation endpoint of any kind, including pruning.
 
 ### Examples
 
@@ -527,6 +791,18 @@ curl -s http://127.0.0.1:8080/api/v1/containers/abcdef012345 | jq '.security'
 
 # Environment, showing that secrets are masked
 curl -s http://127.0.0.1:8080/api/v1/containers/abcdef012345 | jq '.environment'
+
+# Event-engine state: connected? how far behind? how many reconnects?
+curl -s http://127.0.0.1:8080/api/v1/event-engine | jq '{state, lastEventAt, queueDepth, counters}'
+
+# Everything that happened to one Compose project in the last hour
+curl -s "http://127.0.0.1:8080/api/v1/events?project=shop&since=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"
+
+# Events HarborMaster could not map onto a resource
+curl -s 'http://127.0.0.1:8080/api/v1/events?result=warning' | jq '.items[] | {action, error}'
+
+# Follow live events (Ctrl-C to stop)
+curl -N http://127.0.0.1:8080/api/v1/events/stream
 ```
 
 List responses carry an `items` array and a `pagination` object:
@@ -550,7 +826,8 @@ is ever interpolated into SQL.
 
 Status codes worth knowing: `400` invalid query parameter, `404` container not
 found, `409` ambiguous ID prefix **or** refresh already running, `503` Docker
-unreachable or inventory disabled.
+unreachable, inventory or event engine disabled, **or** the SSE subscriber limit
+reached (with `Retry-After`).
 
 `GET /api/v1/health` always returns `200` while the server is running. The
 endpoint answering at all is the liveness signal; the body carries readiness:
@@ -566,10 +843,26 @@ endpoint answering at all is the liveness signal; the body carries readiness:
 ```
 
 `status` is `healthy` when everything is up, `degraded` when Docker is
-unreachable but HarborMaster is still serving, and `unhealthy` when the
-database is unreachable. Clients must branch on `status` rather than on the
-HTTP code, so they can distinguish "HarborMaster is down" (no response at all)
-from "Docker is down" (`degraded`).
+unreachable **or the Docker event stream is disconnected** but HarborMaster is
+still serving, and `unhealthy` when the database is unreachable. Clients must
+branch on `status` rather than on the HTTP code, so they can distinguish
+"HarborMaster is down" (no response at all) from "Docker is down" (`degraded`).
+
+The event engine contributes an optional `events` component and never escalates
+past `degraded`:
+
+| Condition | Verdict |
+| --- | --- |
+| Event stream connected | not degraded |
+| Event stream disconnected | `degraded` — periodic reconciliation still runs |
+| Queue overflow pending reconciliation | `degraded` until the sweep completes |
+| Event engine disabled by configuration | **not** degraded — a supported mode |
+| Docker unreachable | `degraded`, unchanged from Phase 2 |
+| Database unreachable | `unhealthy` |
+
+A transient reconnect must never fail the container health check, or a daemon
+restart would put HarborMaster into a restart loop. The native health check
+continues to treat `degraded` as exit 0.
 
 Errors use a stable envelope. Branch on `error.code`, not on the prose:
 
@@ -585,7 +878,7 @@ detail the API deliberately withholds.
 
 ## Web interface
 
-Five sections, served from the binary.
+Six sections, served from the binary.
 
 **Dashboard** — Docker and database connectivity, refresh state, generation,
 last successful refresh and its duration, container counts (total, running,
@@ -595,23 +888,43 @@ itself while a refresh runs, reports whether the refresh started, conflicted,
 or was refused because Docker is unreachable, and reloads the metrics when the
 generation advances.
 
+The **Docker events** panel reports the event-engine connection state, the last
+Docker event, the last reconciliation, the reconnect count, queue usage, and the
+recorded-event count. When the stream is disconnected it says so explicitly and
+explains the consequence: HarborMaster is relying on periodic reconciliation, so
+container state may lag by up to one reconciliation interval.
+
 **Containers** — a sortable table with server-side pagination, search, and
 filters for state, health, Compose project, and image. Filters and sorting are
 sent to the API; the browser never holds more than one page, which is why no
 virtualisation is needed. Rows link to the detail view.
 
 **Container detail** — tabs for Overview, Configuration, Environment, Mounts,
-Networks, Ports, Resources, Security, Labels, Compose, and Raw inspection.
-Sensitive environment values render as `********` with a "masked" marker and
-there is no control to reveal them. The raw payload is fetched only when its
-tab is opened, and is redacted server-side.
+Networks, Ports, Resources, Security, Labels, Compose, Events, and Raw
+inspection. Sensitive environment values render as `********` with a "masked"
+marker and there is no control to reveal them. The raw payload is fetched only
+when its tab is opened, and is redacted server-side. The Events tab shows a
+bounded list of recent Docker events naming this container, served by the same
+events API filtered on actor ID.
 
 **Images** — repository tags, digests, creation time, size, platform, and how
 many containers reference each image.
 
-**Snapshots** and **Events** remain explicit empty states: their endpoints do
-not exist yet, and placeholder rows in an operations tool are indistinguishable
-from real data at a glance.
+**Events** — the event-engine status panel, a bounded live view fed by
+Server-Sent Events, and the server-side paginated history with filters for type,
+action, Compose project, processing status, and free-text search.
+
+The live and history views are deliberately distinct: live shows what has
+arrived since the page opened and is capped at 250 rows, while history is the
+complete record. Every row shows **both** the Docker timestamp and
+HarborMaster's observed timestamp, because the gap between them is what tells
+you the stream fell behind. Pausing stops the live list moving without closing
+the connection, so resuming does not trigger a reconnect and replay. Status
+badges distinguish processed, deduplicated, ignored, warning, and failed.
+
+**Snapshots** remains an explicit empty state: its endpoints do not exist yet,
+and placeholder rows in an operations tool are indistinguishable from real data
+at a glance.
 
 Every view has explicit loading, empty, disconnected, and error states, and
 none of them displays invented data.
@@ -650,6 +963,24 @@ accessible names rather than class names. Filter, sort, and pagination tests
 assert on the **request URL the UI produced**, which is how they verify the
 work happens on the server rather than in the browser.
 
+The event engine's tests never sleep to wait for a state change. Timing
+behaviour — backoff growth, the cap, debouncing — is driven through injected
+clock and jitter functions, so the *sequence* of delays is asserted rather than
+the elapsed time. Everything else polls a condition and fails fast. A test that
+sleeps for a fixed duration is slow, flaky, or both, and it hides the very
+concurrency defect it was meant to catch.
+
+The SSE hook takes its stream factory as an option, so frontend tests drive a
+controllable fake rather than depending on jsdom having an `EventSource`.
+
+`go test -race ./...` is a required gate and runs in CI on every push. The
+race detector needs cgo and a C toolchain, so it may not run on a developer
+machine without one; CI enforces it regardless.
+
+A test in `internal/api` reads `api/openapi.yaml` and asserts the documented
+paths and the routed paths are exactly the same set, in both directions, so the
+spec cannot drift from the router silently.
+
 ## Security
 
 The Docker socket is a privileged interface: anything able to reach it can
@@ -658,14 +989,22 @@ to root. HarborMaster is built accordingly.
 
 - **Read-only by construction.** `internal/docker` exposes only observations:
   `Ping`, `ListContainers`, `InspectContainer`, `InspectImage`, `ListNetworks`,
-  `ListVolumes`. No code path in this build mutates a container, and there is no
+  `ListVolumes`, and `StreamEvents`. Subscribing to events changes nothing on
+  the host. No code path in this build mutates a container, and there is no
   shell or command execution anywhere in the codebase. Docker SDK types never
-  leave that package.
-- **Secrets are masked at the adapter boundary.** Environment values and
-  log-driver options matching the configured name patterns are replaced before
-  they leave `internal/docker`, so no downstream call site can leak one by
-  forgetting to mask. Raw values are never persisted, never logged, never in an
-  API response, and there is no parameter or UI control that reveals them.
+  leave that package, and the event subscription hands out HarborMaster's own
+  records rather than the SDK's or a raw channel.
+- **Secrets are masked at the adapter boundary.** Environment values,
+  log-driver options, and Docker **event actor attributes** matching the
+  configured name patterns are replaced before they leave `internal/docker`, so
+  no downstream call site can leak one by forgetting to mask. Raw values are
+  never persisted, never logged, never in an API response or an SSE frame, and
+  there is no parameter or UI control that reveals them. Docker registry
+  authentication is never stored.
+- **The live event stream is bounded and non-blocking.** Concurrent SSE
+  subscribers are capped, each has a bounded buffer, and a subscriber that stops
+  reading has events dropped for it alone rather than stalling event processing
+  or holding memory. Replay is capped. No raw Docker payload reaches the wire.
 - **Loopback by default.** The bare binary binds to `127.0.0.1`, and Compose
   publishes to `127.0.0.1` on the host. The server logs a warning if you bind
   it wider.
@@ -692,20 +1031,33 @@ to root. HarborMaster is built accordingly.
 
 ### Read this before deploying
 
-Four statements, all of them true today:
+Six statements, all of them true today:
 
 1. **HarborMaster does not update containers.** It observes them. There is no
-   image pull, no recreation, no restart, no rollback, and no exec.
+   image pull, no recreation, no restart, no rollback, and no exec. Subscribing
+   to the Docker event stream does not change that: reading events is an
+   observation, and an event only ever causes HarborMaster to *re-read* the
+   host.
 2. **Docker socket access remains highly privileged despite HarborMaster's
    read-only behaviour.** The application only reads, but the socket it holds
    could do anything. Mounting it `:ro` restricts the socket *file*, not the
    Docker *API*. Treat access to this service as equivalent to root on the host.
 3. **Authentication is not implemented.** Anyone who can reach the port can read
    your entire container inventory — image references, mounts, network layout,
-   labels, and the *names* of every environment variable.
-4. **Keep it on loopback**, or behind a trusted reverse proxy with access
+   labels, the *names* of every environment variable, and the full Docker event
+   history including the live SSE stream.
+4. **Event history is observational and incomplete by nature.** It records what
+   HarborMaster observed, not what happened. Events emitted while the engine was
+   disconnected, or before it first connected, were never seen and are not in
+   the history. Full reconciliation restores **current-state** accuracy after
+   missed events; it does not backfill the log.
+5. **Event payloads are redacted**, and there is no unredacted copy anywhere.
+   Variable and label *names* are still disclosed.
+6. **Keep it on loopback**, or behind a trusted reverse proxy with access
    controls. Every deployment example in this README binds to `127.0.0.1` for
-   this reason.
+   this reason. If you front it with a proxy, note that the SSE endpoint needs
+   response buffering disabled — HarborMaster sends `X-Accel-Buffering: no`,
+   which nginx honours.
 
 On masking specifically: environment values are masked in the API and the UI,
 and raw values are not persisted. That is a meaningful reduction in exposure,
@@ -730,11 +1082,21 @@ than a public issue.
 - **Inventory checksum and generation** for change detection
 - **Environment masking** by configurable name pattern, applied at the adapter
   boundary and never reversible through the API or UI
+- **Docker event engine**: subscribes to the daemon's event stream, reconnects
+  with bounded exponential backoff and jitter, deduplicates by deterministic
+  fingerprint, debounces and coalesces refresh work, and escalates to full
+  reconciliation whenever events may have been missed. Events are hints; every
+  inventory write still comes from a fresh Docker inspection.
+- **Event history** with server-side filtering, pagination, and configurable
+  retention by age and count
+- **Live updates over Server-Sent Events**, with `Last-Event-ID` replay,
+  heartbeats, a subscriber cap, and bounded per-subscriber buffers
 - **REST API**: inventory status and refresh, containers with server-side
   filtering, sorting and pagination, container detail, redacted raw inspection,
-  images, networks, volumes
-- **Web interface**: populated Dashboard, Containers table, container detail
-  with eleven sections, and Images
+  images, networks, volumes, event history, event-engine status, and the live
+  event stream
+- **Web interface**: populated Dashboard with event-engine status, Containers
+  table, container detail with twelve sections, Images, and a live Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -747,7 +1109,6 @@ than a public issue.
 - Configuration snapshots and drift detection — the snapshot store exists from
   the earlier phase, but no service captures one. Snapshots and the current
   inventory are separate concepts and remain separate.
-- Docker event streaming; the inventory is polled, not subscribed
 - Image update checks, image pulls, and container recreation
 - Container start, stop, restart, and removal
 - Health validation with automatic rollback, and deployment history
@@ -755,6 +1116,27 @@ than a public issue.
 - Authentication and authorization
 - Multi-host management — the schema is keyed by host, but exactly one host row
   exists
+- Distributed event processing. Everything is in-process bounded queues and
+  SQLite; there is no message broker, and no WebSocket endpoint.
+
+### Known limitations of the event engine
+
+- **Event history is not a complete record of the host.** Docker drops events
+  while nothing is listening and replays nothing across a daemon restart, so a
+  prolonged outage leaves a permanent gap in the log. Full reconciliation
+  restores current-state accuracy; it does not backfill history.
+- **Exact global ordering is not guaranteed by Docker.** The `sequence` field
+  records the order HarborMaster observed events in, which is the only order it
+  can honestly claim.
+- **Image `delete` and `prune` events do not resolve to a single image**, so
+  they defer to the next reconciliation rather than attempting a narrower pass
+  that could not be correct.
+- **Networks and volumes refresh as a set**, not one at a time: the read-only
+  adapter lists them in a single call and has no per-resource inspect, so a
+  "targeted" single-resource read would do the same work while widening the
+  adapter surface for no gain.
+- **A container event with no actor ID** cannot be targeted and escalates to a
+  full reconciliation.
 
 The order is deliberate. The observation and recovery machinery comes first, so
 that by the time HarborMaster can change a container it can already undo it.

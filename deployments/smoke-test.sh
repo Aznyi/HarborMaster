@@ -269,6 +269,27 @@ health_status="$(json_field "$health_body" '.status' '"status":"[a-z]*"')"
 check_contains "health reports degraded without Docker" "degraded" "$health_status"
 check_contains "health reports the database as up" '"status":"up"' "$health_body"
 
+# The event engine must be reachable and must report itself honestly with no
+# Docker socket: connecting is impossible, so anything but a live stream is the
+# correct answer.
+check "GET /api/v1/event-engine returns 200" "200" "$(http_status GET /api/v1/event-engine)"
+engine_body="$(http_body /api/v1/event-engine)"
+check_contains "event-engine payload carries a connection state" '"state"' "$engine_body"
+check_contains "event-engine payload carries counters" '"counters"' "$engine_body"
+if printf '%s' "$engine_body" | grep -q '"state":"connected"'; then
+  fail "the event engine reports connected without a Docker socket"
+else
+  pass "the event engine does not claim a live stream without Docker"
+fi
+
+check "GET /api/v1/events returns 200" "200" "$(http_status GET /api/v1/events)"
+check_contains "event list returns a paginated envelope" '"pagination"' "$(http_body /api/v1/events)"
+
+# Read-only: no event endpoint may accept a write, and no prune endpoint exists.
+check "POST /api/v1/events returns 405" "405" "$(http_status POST /api/v1/events)"
+check "DELETE /api/v1/events/1 returns 405" "405" "$(http_status DELETE /api/v1/events/1)"
+check "POST /api/v1/events/stream returns 405" "405" "$(http_status POST /api/v1/events/stream)"
+
 info "Frontend serving"
 
 check "GET / returns 200" "200" "$(http_status GET /)"

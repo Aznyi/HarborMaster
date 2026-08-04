@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -56,6 +57,32 @@ type Fake struct {
 	// ImageCallsByID counts per-image inspections, which is what proves the
 	// per-refresh cache works.
 	ImageCallsByID map[string]int
+
+	// ---------------------------------------------------------- events --
+
+	// StreamErr, when set, fails StreamEvents outright. Use it to model a
+	// daemon that is down when the event engine tries to connect.
+	StreamErr error
+	// StreamCalls counts subscription attempts, which is what a backoff test
+	// asserts on.
+	StreamCalls int
+	// SinceValues records the `since` argument of every subscription, so a test
+	// can prove a reconnect resumes rather than restarting from now.
+	SinceValues []time.Time
+
+	// streams holds the live subscriptions so a test can push events into them
+	// and fail them on demand.
+	streams []*fakeStream
+}
+
+// fakeStream is one subscription handed out by Fake.StreamEvents.
+type fakeStream struct {
+	events chan domain.DockerEvent
+	errs   chan error
+	done   chan struct{}
+	// closed guards against a test failing the same stream twice, which would
+	// otherwise panic on a double close.
+	closed bool
 }
 
 // NewFake returns a Fake with initialised maps.
@@ -67,6 +94,143 @@ func NewFake() *Fake {
 		ImageErrs:      map[string]error{},
 		ImageCallsByID: map[string]int{},
 	}
+}
+
+// StreamEvents implements Runtime.
+//
+// The returned subscription stays open until the test fails it, until every
+// stream is closed, or until ctx is cancelled -- the same three ways a real
+// subscription ends.
+func (f *Fake) StreamEvents(ctx context.Context, since time.Time) (*EventSubscription, error) {
+	f.mu.Lock()
+	f.StreamCalls++
+	f.SinceValues = append(f.SinceValues, since)
+	streamErr := f.StreamErr
+	f.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if streamErr != nil {
+		return nil, streamErr
+	}
+
+	stream := &fakeStream{
+		// Unbuffered, matching the SDK, so a test that pushes an event knows
+		// the engine has taken it once Emit returns.
+		events: make(chan domain.DockerEvent),
+		errs:   make(chan error, 1),
+		done:   make(chan struct{}),
+	}
+
+	f.mu.Lock()
+	f.streams = append(f.streams, stream)
+	f.mu.Unlock()
+
+	// Mirrors the real adapter's ownership: one goroutine per subscription,
+	// exiting on context cancellation, and it is the only closer of `events`.
+	go func() {
+		<-ctx.Done()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !stream.closed {
+			stream.closed = true
+			close(stream.done)
+			close(stream.events)
+		}
+	}()
+
+	return &EventSubscription{Events: stream.events, Errors: stream.errs}, nil
+}
+
+// Emit pushes an event into the newest open subscription.
+//
+// It blocks until the engine receives the event or ctx is cancelled, which is
+// what lets a test assert on the effect of an event without sleeping. Reports
+// false when there is no open stream or the send was abandoned.
+func (f *Fake) Emit(ctx context.Context, event domain.DockerEvent) bool {
+	stream := f.currentStream()
+	if stream == nil {
+		return false
+	}
+
+	select {
+	case stream.events <- event:
+		return true
+	case <-stream.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// FailStream ends the newest open subscription with err, modelling a dropped
+// connection. Reports false when there was nothing to fail.
+func (f *Fake) FailStream(err error) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.streams) - 1; i >= 0; i-- {
+		stream := f.streams[i]
+		if stream.closed {
+			continue
+		}
+		stream.closed = true
+		stream.errs <- err
+		close(stream.done)
+		close(stream.events)
+		return true
+	}
+	return false
+}
+
+// OpenStreams reports how many subscriptions are still live. A test asserting
+// no goroutine leak checks this reaches zero after shutdown.
+func (f *Fake) OpenStreams() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	open := 0
+	for _, stream := range f.streams {
+		if !stream.closed {
+			open++
+		}
+	}
+	return open
+}
+
+// Subscriptions reports how many times StreamEvents was called.
+func (f *Fake) Subscriptions() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.StreamCalls
+}
+
+// SetStreamErr sets or clears the subscription failure, so a test can model
+// Docker going away and coming back.
+func (f *Fake) SetStreamErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.StreamErr = err
+}
+
+// SetPingErr sets or clears the ping failure.
+func (f *Fake) SetPingErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.PingErr = err
+}
+
+func (f *Fake) currentStream() *fakeStream {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.streams) - 1; i >= 0; i-- {
+		if !f.streams[i].closed {
+			return f.streams[i]
+		}
+	}
+	return nil
 }
 
 // Ping implements Pinger.

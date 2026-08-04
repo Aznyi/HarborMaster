@@ -32,6 +32,11 @@ type DB struct {
 	Images     *ImageRepository
 	Networks   *NetworkRepository
 	Volumes    *VolumeRepository
+
+	// DockerEvents is the observational Docker event history. Distinct from
+	// Events above: that is HarborMaster's audit log of its OWN actions, while
+	// this records what the Docker daemon reported.
+	DockerEvents *DockerEventRepository
 }
 
 // Open opens (creating if necessary) the SQLite database at path, applies the
@@ -75,6 +80,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		Images:     &ImageRepository{db: sqlDB},
 		Networks:   &NetworkRepository{db: sqlDB},
 		Volumes:    &VolumeRepository{db: sqlDB},
+
+		DockerEvents: &DockerEventRepository{db: sqlDB},
 	}, nil
 }
 

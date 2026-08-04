@@ -55,6 +55,44 @@ const (
 	MinRefreshInterval      = 5 * time.Second
 	MaxInventoryWorkers     = 64
 
+	// Event engine defaults.
+	//
+	// DefaultEventReconcileInterval is deliberately much longer than
+	// DefaultRefreshInterval. With live events driving targeted refreshes, a
+	// full sweep is a safety net for what the stream missed rather than the
+	// primary way the inventory stays current. See Config.ReconcileInterval for
+	// how the two settings relate.
+	DefaultEventsEnabled          = true
+	DefaultEventReconnectInitial  = 1 * time.Second
+	DefaultEventReconnectMax      = 60 * time.Second
+	DefaultEventReconnectFactor   = 2.0
+	DefaultEventBufferSize        = 1024
+	DefaultEventBatchSize         = 64
+	DefaultEventBatchFlush        = 500 * time.Millisecond
+	DefaultEventDedupWindow       = 10 * time.Second
+	DefaultEventRefreshDebounce   = 750 * time.Millisecond
+	DefaultEventReconcileInterval = 15 * time.Minute
+	DefaultEventRetentionAge      = 7 * 24 * time.Hour
+	DefaultEventRetentionCount    = int64(50000)
+	DefaultEventPruneInterval     = 1 * time.Hour
+	DefaultEventStreamSubscribers = 16
+	DefaultEventStreamBuffer      = 128
+	DefaultEventStreamReplay      = 200
+	DefaultEventStreamHeartbeat   = 20 * time.Second
+
+	// Event engine bounds. The minimums exist for the same reason
+	// MinRefreshInterval does: a tiny value would hammer a privileged socket or
+	// spin a goroutine, and is far more likely to be a typo than an intention.
+	MinEventReconnectDelay    = 100 * time.Millisecond
+	MinEventDedupWindow       = 1 * time.Second
+	MinEventReconcileInterval = 30 * time.Second
+	MinEventPruneInterval     = 1 * time.Minute
+	MinEventStreamHeartbeat   = 1 * time.Second
+	MaxEventBufferSize        = 1 << 16
+	MaxEventBatchSize         = 1024
+	MaxEventStreamSubscribers = 256
+	MaxEventStreamReplay      = 1000
+
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
 	// orchestrator's own timeout is worse than useless, because the runtime
@@ -112,6 +150,73 @@ type Inventory struct {
 	AbsentRetention time.Duration
 }
 
+// Events holds settings for the read-only Docker event engine.
+//
+// The engine subscribes to the daemon's event stream and uses events as HINTS
+// that inventory may have changed. It never writes container state from an
+// event: it asks the inventory service to re-read the resource, so there stays
+// exactly one normalization and persistence path.
+type Events struct {
+	// Enabled turns the whole event engine on or off. When false nothing
+	// connects to the event stream, the SSE endpoint reports the feature
+	// disabled, and periodic inventory refresh carries the inventory alone.
+	Enabled bool
+
+	// ReconnectInitial is the first backoff delay after a stream drop, and
+	// ReconnectMax caps it. ReconnectFactor multiplies the delay after each
+	// consecutive failure. Jitter is applied on top so a daemon restart does
+	// not produce a synchronised reconnect storm across several HarborMasters.
+	ReconnectInitial time.Duration
+	ReconnectMax     time.Duration
+	ReconnectFactor  float64
+
+	// BufferSize bounds the in-process queue between the stream reader and the
+	// event processor. The reader never blocks on it: when it is full the event
+	// is dropped, counted, and a full reconciliation is requested, because a
+	// blocked reader would silently stall the whole stream.
+	BufferSize int
+	// BatchSize and BatchFlush bound how many events are persisted in one
+	// transaction and how long a partial batch waits.
+	BatchSize  int
+	BatchFlush time.Duration
+
+	// DedupWindow is how long an event fingerprint is remembered in memory. A
+	// genuinely repeated event with a different Docker timestamp has a
+	// different fingerprint and is NOT suppressed.
+	DedupWindow time.Duration
+
+	// RefreshDebounce coalesces the burst of events one lifecycle transition
+	// produces (die, stop, start, health_status) into a single refresh per
+	// resource.
+	RefreshDebounce time.Duration
+
+	// ReconcileInterval is the periodic full-reconciliation period. See
+	// Config.ReconcileInterval for how it interacts with the inventory's own
+	// refresh interval.
+	ReconcileInterval time.Duration
+
+	// RetentionAge and RetentionCount bound stored event history. Zero on
+	// either disables that dimension of pruning; both zero keeps everything,
+	// which is a valid but unbounded choice.
+	RetentionAge   time.Duration
+	RetentionCount int64
+	// PruneInterval is how often retention runs.
+	PruneInterval time.Duration
+
+	// StreamSubscribers caps concurrent SSE clients. StreamBuffer bounds each
+	// subscriber's queue: a slow reader drops events rather than blocking event
+	// processing for everyone else.
+	StreamSubscribers int
+	StreamBuffer      int
+	// StreamReplay caps how many stored events a Last-Event-ID reconnect
+	// replays. A client that fell far behind gets a truncation notice and
+	// should reload the paginated history instead.
+	StreamReplay int
+	// StreamHeartbeat is the comment-frame interval that keeps an idle stream
+	// alive through proxies.
+	StreamHeartbeat time.Duration
+}
+
 // Healthcheck holds settings for the `harbormaster healthcheck` command.
 type Healthcheck struct {
 	// Timeout bounds the whole probe, connection included.
@@ -134,6 +239,7 @@ type Config struct {
 	Log         Log
 	Healthcheck Healthcheck
 	Inventory   Inventory
+	Events      Events
 }
 
 var (
@@ -210,6 +316,48 @@ func load(lookup lookupFunc) (Config, error) {
 	collect(err)
 	cfg.Inventory.Workers = int(workers)
 
+	cfg.Events.Enabled, err = boolVar(lookup, "EVENTS_ENABLED", DefaultEventsEnabled)
+	collect(err)
+	cfg.Events.ReconnectInitial, err = durationVar(lookup, "EVENTS_RECONNECT_INITIAL_DELAY", DefaultEventReconnectInitial)
+	collect(err)
+	cfg.Events.ReconnectMax, err = durationVar(lookup, "EVENTS_RECONNECT_MAX_DELAY", DefaultEventReconnectMax)
+	collect(err)
+	cfg.Events.ReconnectFactor, err = floatVar(lookup, "EVENTS_RECONNECT_MULTIPLIER", DefaultEventReconnectFactor)
+	collect(err)
+	cfg.Events.BatchFlush, err = durationVar(lookup, "EVENTS_BATCH_FLUSH_INTERVAL", DefaultEventBatchFlush)
+	collect(err)
+	cfg.Events.DedupWindow, err = durationVar(lookup, "EVENTS_DEDUP_WINDOW", DefaultEventDedupWindow)
+	collect(err)
+	cfg.Events.RefreshDebounce, err = durationVar(lookup, "EVENTS_REFRESH_DEBOUNCE", DefaultEventRefreshDebounce)
+	collect(err)
+	cfg.Events.ReconcileInterval, err = durationVar(lookup, "EVENTS_RECONCILE_INTERVAL", DefaultEventReconcileInterval)
+	collect(err)
+	cfg.Events.RetentionAge, err = durationVar(lookup, "EVENTS_RETENTION_AGE", DefaultEventRetentionAge)
+	collect(err)
+	cfg.Events.PruneInterval, err = durationVar(lookup, "EVENTS_PRUNE_INTERVAL", DefaultEventPruneInterval)
+	collect(err)
+	cfg.Events.StreamHeartbeat, err = durationVar(lookup, "EVENTS_STREAM_HEARTBEAT", DefaultEventStreamHeartbeat)
+	collect(err)
+
+	cfg.Events.RetentionCount, err = int64Var(lookup, "EVENTS_RETENTION_COUNT", DefaultEventRetentionCount)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"EVENTS_BUFFER_SIZE", DefaultEventBufferSize, &cfg.Events.BufferSize},
+		{"EVENTS_BATCH_SIZE", DefaultEventBatchSize, &cfg.Events.BatchSize},
+		{"EVENTS_STREAM_MAX_SUBSCRIBERS", DefaultEventStreamSubscribers, &cfg.Events.StreamSubscribers},
+		{"EVENTS_STREAM_BUFFER_SIZE", DefaultEventStreamBuffer, &cfg.Events.StreamBuffer},
+		{"EVENTS_STREAM_REPLAY_LIMIT", DefaultEventStreamReplay, &cfg.Events.StreamReplay},
+	} {
+		value, convErr := int64Var(lookup, target.name, int64(target.fallback))
+		collect(convErr)
+		*target.into = int(value)
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -273,7 +421,107 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("%sINVENTORY_ABSENT_RETENTION must not be negative", envPrefix))
 	}
 
+	errs = append(errs, c.Events.validate()...)
+
 	return errors.Join(errs...)
+}
+
+// validate checks the event-engine settings.
+//
+// The settings are validated even when the engine is disabled. A configuration
+// error that only surfaces the day someone flips EVENTS_ENABLED to true is a
+// worse failure than one caught at startup.
+func (e Events) validate() []error {
+	var errs []error
+
+	positiveDurations := []struct {
+		name  string
+		value time.Duration
+		min   time.Duration
+	}{
+		{"EVENTS_RECONNECT_INITIAL_DELAY", e.ReconnectInitial, MinEventReconnectDelay},
+		{"EVENTS_RECONNECT_MAX_DELAY", e.ReconnectMax, MinEventReconnectDelay},
+		{"EVENTS_BATCH_FLUSH_INTERVAL", e.BatchFlush, time.Millisecond},
+		{"EVENTS_DEDUP_WINDOW", e.DedupWindow, MinEventDedupWindow},
+		{"EVENTS_REFRESH_DEBOUNCE", e.RefreshDebounce, time.Millisecond},
+		{"EVENTS_RECONCILE_INTERVAL", e.ReconcileInterval, MinEventReconcileInterval},
+		{"EVENTS_PRUNE_INTERVAL", e.PruneInterval, MinEventPruneInterval},
+		{"EVENTS_STREAM_HEARTBEAT", e.StreamHeartbeat, MinEventStreamHeartbeat},
+	}
+	for _, d := range positiveDurations {
+		if d.value < d.min {
+			errs = append(errs, fmt.Errorf("%s%s must be at least %s", envPrefix, d.name, d.min))
+		}
+	}
+
+	// A maximum below the initial delay would make the backoff shrink on the
+	// first failure, which is the opposite of what backoff is for.
+	if e.ReconnectMax > 0 && e.ReconnectInitial > 0 && e.ReconnectMax < e.ReconnectInitial {
+		errs = append(errs, fmt.Errorf(
+			"%sEVENTS_RECONNECT_MAX_DELAY must not be smaller than %sEVENTS_RECONNECT_INITIAL_DELAY",
+			envPrefix, envPrefix))
+	}
+	// A multiplier of exactly 1 is a fixed-interval retry, which is allowed;
+	// below 1 the delay would decay towards zero.
+	if e.ReconnectFactor < 1 {
+		errs = append(errs, fmt.Errorf("%sEVENTS_RECONNECT_MULTIPLIER must be at least 1", envPrefix))
+	}
+
+	bounded := []struct {
+		name            string
+		value, min, max int
+	}{
+		{"EVENTS_BUFFER_SIZE", e.BufferSize, 1, MaxEventBufferSize},
+		{"EVENTS_BATCH_SIZE", e.BatchSize, 1, MaxEventBatchSize},
+		{"EVENTS_STREAM_MAX_SUBSCRIBERS", e.StreamSubscribers, 0, MaxEventStreamSubscribers},
+		{"EVENTS_STREAM_BUFFER_SIZE", e.StreamBuffer, 1, MaxEventBufferSize},
+		{"EVENTS_STREAM_REPLAY_LIMIT", e.StreamReplay, 0, MaxEventStreamReplay},
+	}
+	for _, b := range bounded {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	// Zero is the documented way to disable a retention dimension. Negative is
+	// not a way to do anything.
+	if e.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sEVENTS_RETENTION_AGE must not be negative", envPrefix))
+	}
+	if e.RetentionCount < 0 {
+		errs = append(errs, fmt.Errorf("%sEVENTS_RETENTION_COUNT must not be negative", envPrefix))
+	}
+	// Batching more than the queue holds cannot help and reads as a mistake.
+	if e.BatchSize > e.BufferSize && e.BufferSize > 0 {
+		errs = append(errs, fmt.Errorf("%sEVENTS_BATCH_SIZE must not exceed %sEVENTS_BUFFER_SIZE",
+			envPrefix, envPrefix))
+	}
+
+	return errs
+}
+
+// ReconcileInterval reports the period of the ONE periodic full-inventory
+// sweep, together with which component owns it.
+//
+// Exactly one full-refresh timer may run. Two would double the load on a
+// privileged socket and make "when was the last sweep" ambiguous. So:
+//
+//   - Event engine enabled: the engine owns reconciliation at
+//     EVENTS_RECONCILE_INTERVAL, and the inventory service's own ticker is
+//     suppressed. Targeted, event-driven refreshes carry the inventory between
+//     sweeps, so the sweep is a safety net rather than the main mechanism.
+//   - Event engine disabled: nothing changes from Phase 2. The inventory
+//     service keeps its own INVENTORY_REFRESH_INTERVAL ticker, including the
+//     documented "0 disables it" behaviour.
+//
+// INVENTORY_REFRESH_INTERVAL is therefore retained, not removed: an existing
+// configuration keeps working, and it still governs the no-events case.
+func (c Config) ReconcileInterval() (interval time.Duration, ownedByEventEngine bool) {
+	if c.Events.Enabled && c.Inventory.Enabled {
+		return c.Events.ReconcileInterval, true
+	}
+	return c.Inventory.RefreshInterval, false
 }
 
 // String renders the configuration for logs WITHOUT any environment-variable
@@ -282,7 +530,7 @@ func (c Config) Validate() error {
 //
 // Do not add value interpolation here.
 func (c Config) String() string {
-	return "config{redacted: server, docker, store, log, healthcheck, inventory}"
+	return "config{redacted: server, docker, store, log, healthcheck, inventory, events}"
 }
 
 // Masker builds the environment masker from the configured patterns.
@@ -354,6 +602,18 @@ func int64Var(lookup lookupFunc, name string, fallback int64) (int64, error) {
 	if err != nil {
 		// The offending value is deliberately omitted from the error.
 		return 0, fmt.Errorf("%s%s must be an integer", envPrefix, name)
+	}
+	return v, nil
+}
+
+func floatVar(lookup lookupFunc, name string, fallback float64) (float64, error) {
+	raw, ok := lookup(envPrefix + name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s%s must be a number", envPrefix, name)
 	}
 	return v, nil
 }

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { getContainerRaw } from "../api/client";
@@ -9,6 +9,8 @@ import type {
 } from "../api/inventoryTypes";
 import { useApiResource } from "../hooks/useApiResource";
 import { useContainerDetail } from "../hooks/useContainers";
+import { useDockerEventPage } from "../hooks/useDockerEvents";
+import { EventResultBadge } from "../components/EventBadges";
 import {
   BoolField,
   CodeBlock,
@@ -38,10 +40,20 @@ const TABS = [
   "Security",
   "Labels",
   "Compose",
+  "Events",
   "Raw inspection",
 ] as const;
 
 type Tab = (typeof TABS)[number];
+
+/**
+ * How many recent events the detail view shows.
+ *
+ * Small on purpose: this is a supporting panel on a page about current state,
+ * and an unbounded event query here would compete with the primary Events page
+ * for no benefit.
+ */
+const RECENT_EVENT_LIMIT = 20;
 
 export function ContainerDetailPage() {
   const { id = "" } = useParams();
@@ -117,10 +129,109 @@ export function ContainerDetailPage() {
         {tab === "Security" && <SecurityTab detail={container} />}
         {tab === "Labels" && <LabelsTab detail={container} />}
         {tab === "Compose" && <ComposeTab detail={container} />}
+        {tab === "Events" && <EventsTab id={container.overview.id} />}
         {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
       </div>
     </div>
   );
+}
+
+/**
+ * The container's recent Docker events.
+ *
+ * Bounded to one small page and served by the existing events API filtered on
+ * actor ID -- no new endpoint, and no unbounded query on a detail page. It is
+ * an observation log, not a state record: what the container IS now is on the
+ * other tabs, which read the inventory.
+ */
+function EventsTab({ id }: { id: string }) {
+  const query = useMemo(
+    () => ({ actorId: id, pageSize: RECENT_EVENT_LIMIT, page: 1 }),
+    [id],
+  );
+  const page = useDockerEventPage(query);
+
+  if (page.status === "loading") {
+    return <LoadingState label="Loading events" />;
+  }
+  if (page.status === "disconnected") {
+    return <DisconnectedState onRetry={page.refresh} />;
+  }
+  if (page.error) {
+    return <ErrorState error={page.error} onRetry={page.refresh} />;
+  }
+
+  const events = page.data?.items ?? [];
+
+  return (
+    <DetailSection
+      title="Recent events"
+      description={
+        `The most recent ${RECENT_EVENT_LIMIT} Docker events naming this container, ` +
+        "newest first. HarborMaster records what the daemon reported; it does not " +
+        "reconstruct state from these."
+      }
+    >
+      <p className="mb-3 text-sm text-content-muted">
+        See{" "}
+        <Link to="/events" className="text-accent hover:underline">
+          Events
+        </Link>{" "}
+        for the full log and its filters.
+      </p>
+
+      {events.length === 0 ? (
+        <p className="text-sm text-content-muted">
+          No events have been recorded for this container. Event history begins
+          when the engine first connects; anything earlier was not observed.
+        </p>
+      ) : (
+        <ScrollArea>
+          <table className="w-full min-w-[36rem] text-left text-sm">
+            <caption className="sr-only">Recent events for this container</caption>
+            <thead className="border-b border-border-subtle text-xs uppercase tracking-wide text-content-muted">
+              <tr>
+                <th scope="col" className="px-3 py-2 font-medium">
+                  Docker time
+                </th>
+                <th scope="col" className="px-3 py-2 font-medium">
+                  Observed
+                </th>
+                <th scope="col" className="px-3 py-2 font-medium">
+                  Action
+                </th>
+                <th scope="col" className="px-3 py-2 font-medium">
+                  Status
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event) => (
+                <tr key={event.sequence} className="border-b border-border-subtle last:border-0">
+                  <td className="px-3 py-2 text-xs text-content-muted" title={event.dockerTime}>
+                    {formatEventTime(event.dockerTime)}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-content-muted" title={event.observedAt}>
+                    {formatEventTime(event.observedAt)}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">{event.action || "—"}</td>
+                  <td className="px-3 py-2">
+                    <EventResultBadge result={event.result} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ScrollArea>
+      )}
+    </DetailSection>
+  );
+}
+
+function formatEventTime(iso: string | undefined): string {
+  if (!iso) return "—";
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
 }
 
 function WarningList({ detail }: { detail: ContainerDetailData }) {

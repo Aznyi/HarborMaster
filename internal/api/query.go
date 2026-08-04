@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/store"
@@ -141,6 +142,117 @@ func parseContainerFilter(query url.Values) (store.ContainerFilter, error) {
 	}
 
 	return filter, nil
+}
+
+// parseEventFilter builds a Docker event filter from the query string.
+//
+// Same discipline as parseContainerFilter: enumerated values are checked
+// against the domain's closed vocabulary and the sort field against the
+// repository's allowlist, so nothing caller-controlled reaches the SQL builder
+// as an identifier.
+//
+// Action is the one filter validated only for length rather than against a
+// vocabulary. Docker's action set varies by daemon version, so an allowlist
+// here would reject a legitimate filter for an action the host really emits.
+// It travels as a bound parameter regardless, so it cannot reach the SQL text.
+func parseEventFilter(query url.Values) (store.DockerEventFilter, error) {
+	page, pageSize, err := parsePage(query)
+	if err != nil {
+		return store.DockerEventFilter{}, err
+	}
+
+	filter := store.DockerEventFilter{
+		ActorID:        strings.TrimSpace(query.Get("actorId")),
+		ComposeProject: strings.TrimSpace(query.Get("project")),
+		ComposeService: strings.TrimSpace(query.Get("service")),
+		Search:         strings.TrimSpace(query.Get("search")),
+		// Newest first: an event log is read from the top, and the newest
+		// event is the one an operator opened the page for.
+		Sort:      "sequence",
+		Direction: store.SortDesc,
+		Page:      store.Page{Limit: pageSize, Offset: (page - 1) * pageSize},
+	}
+
+	for _, raw := range multiValue(query, "type") {
+		if !domain.ValidDockerEventType(raw) {
+			return store.DockerEventFilter{}, invalidParam("type", "a known event type")
+		}
+		filter.Types = append(filter.Types, domain.DockerEventType(raw))
+	}
+
+	for _, raw := range multiValue(query, "result") {
+		if !domain.ValidEventResult(raw) {
+			return store.DockerEventFilter{}, invalidParam("result", "a known processing result")
+		}
+		filter.Results = append(filter.Results, domain.EventProcessingResult(raw))
+	}
+
+	for _, raw := range multiValue(query, "action") {
+		if len(raw) > maxActionLength {
+			return store.DockerEventFilter{}, invalidParam("action",
+				fmt.Sprintf("at most %d characters", maxActionLength))
+		}
+		filter.Actions = append(filter.Actions, strings.ToLower(raw))
+	}
+
+	if raw := strings.TrimSpace(query.Get("sort")); raw != "" {
+		if !store.ValidEventSortField(raw) {
+			return store.DockerEventFilter{}, invalidParam("sort",
+				"one of "+strings.Join(store.EventSortFields(), ", "))
+		}
+		filter.Sort = raw
+	}
+
+	if raw := strings.TrimSpace(query.Get("direction")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "asc":
+			filter.Direction = store.SortAsc
+		case "desc":
+			filter.Direction = store.SortDesc
+		default:
+			return store.DockerEventFilter{}, invalidParam("direction", "asc or desc")
+		}
+	}
+
+	if filter.Since, err = parseTimeParam(query, "since"); err != nil {
+		return store.DockerEventFilter{}, err
+	}
+	if filter.Until, err = parseTimeParam(query, "until"); err != nil {
+		return store.DockerEventFilter{}, err
+	}
+
+	// An inverted range matches nothing, which reads to a caller as "there were
+	// no events" rather than "your range is backwards".
+	if filter.Since != nil && filter.Until != nil && filter.Until.Before(*filter.Since) {
+		return store.DockerEventFilter{}, queryError{message: "until must not be earlier than since"}
+	}
+
+	return filter, nil
+}
+
+// maxActionLength bounds the action filter. Docker's longest action is well
+// under this; the limit exists so a caller cannot send a megabyte of text to be
+// bound into a query.
+const maxActionLength = 64
+
+// parseTimeParam reads an RFC 3339 timestamp parameter.
+//
+// RFC 3339 only, deliberately: accepting several formats means guessing which
+// one was meant, and a time filter that silently interprets a value differently
+// from what the caller intended is worse than one that rejects it.
+func parseTimeParam(query url.Values, name string) (*time.Time, error) {
+	raw := strings.TrimSpace(query.Get(name))
+	if raw == "" {
+		return nil, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		// The offending value is deliberately omitted from the error.
+		return nil, invalidParam(name, "an RFC 3339 timestamp such as 2026-08-03T09:20:11Z")
+	}
+	utc := parsed.UTC()
+	return &utc, nil
 }
 
 // multiValue reads a parameter that may repeat or hold a comma-separated list,

@@ -46,8 +46,18 @@ type Pinger interface {
 
 // Client is a Runtime backed by the official Engine SDK.
 type Client struct {
-	api     *client.Client
-	timeout time.Duration
+	api *client.Client
+	// streamAPI is a second SDK client built WITHOUT a request timeout, used
+	// only for the event stream.
+	//
+	// The SDK's WithTimeout sets http.Client.Timeout, which bounds the entire
+	// exchange including reading the response body. The event stream is a body
+	// that never ends, so sharing the timed client would tear it down every
+	// DOCKER_TIMEOUT seconds and present as a daemon that will not stay up.
+	// Every other call keeps its timeout: an unbounded inspect is its own
+	// hazard.
+	streamAPI *client.Client
+	timeout   time.Duration
 	// masker classifies environment variables and log options during
 	// normalization, so values are masked at the adapter boundary rather than
 	// somewhere further out where one missed call site would leak them.
@@ -91,7 +101,18 @@ func New(opts Options) (*Client, error) {
 		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
 	}
 
-	return &Client{api: api, timeout: opts.Timeout, masker: opts.Masker}, nil
+	// See Client.streamAPI: the event stream needs a client with no request
+	// timeout. Its lifetime is bounded by the caller's context instead.
+	streamAPI, err := client.NewClientWithOpts(
+		client.WithHost(opts.Host),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		_ = api.Close()
+		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
+	}
+
+	return &Client{api: api, streamAPI: streamAPI, timeout: opts.Timeout, masker: opts.Masker}, nil
 }
 
 // Ping verifies the Engine is reachable.
@@ -110,12 +131,22 @@ func (c *Client) Ping(ctx context.Context) (Info, error) {
 	return Info{APIVersion: ping.APIVersion, OSType: ping.OSType}, nil
 }
 
-// Close releases the underlying HTTP transport.
+// Close releases both underlying HTTP transports.
+//
+// Closing the stream client does not by itself stop an in-flight subscription:
+// cancelling the context the subscription was created with is what does that.
+// Close is the last step, after the event engine has stopped.
 func (c *Client) Close() error {
-	if c.api == nil {
-		return nil
+	var firstErr error
+	for _, api := range []*client.Client{c.api, c.streamAPI} {
+		if api == nil {
+			continue
+		}
+		if err := api.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return c.api.Close()
+	return firstErr
 }
 
 // SanitizeError maps any Docker failure onto a short, operator-safe phrase
