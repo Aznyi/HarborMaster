@@ -8,6 +8,8 @@ import { Dashboard } from "./pages/Dashboard";
 import { Events } from "./pages/Events";
 import { Images } from "./pages/Images";
 import { Settings } from "./pages/Settings";
+import { SnapshotDetailPage } from "./pages/SnapshotDetail";
+import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
 import { Snapshots } from "./pages/Snapshots";
 
 /**
@@ -26,6 +28,8 @@ export function App() {
         <Route path="/containers/:id" element={<ContainerDetailPage />} />
         <Route path="/images" element={<Images />} />
         <Route path="/snapshots" element={<Snapshots />} />
+        <Route path="/snapshots/:id" element={<SnapshotDetailPage />} />
+        <Route path="/snapshots/:id/readiness" element={<SnapshotReadinessPage />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

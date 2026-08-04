@@ -57,6 +57,15 @@ func TestRedactRawInspectionMasksEnvironmentValues(t *testing.T) {
 		}
 	}
 
+	// A log-driver endpoint URL is masked from Phase 3 onwards. It reads like
+	// harmless metadata, but this is precisely the field that carries a Loki
+	// basic-auth URL or a Splunk collector with an embedded token, and the
+	// classifier cannot tell those apart from a bare hostname by name alone.
+	if strings.Contains(rendered, "logs.example.com") {
+		t.Error("redacted payload still contains the log endpoint URL; " +
+			"endpoint URLs routinely embed credentials and are masked by design")
+	}
+
 	// Names survive: knowing a variable exists is the point of keeping the
 	// payload at all.
 	for _, name := range []string{"DB_PASSWORD", "STRIPE_SECRET", "NESTED_PASSWORD", "splunk-token"} {
@@ -66,7 +75,7 @@ func TestRedactRawInspectionMasksEnvironmentValues(t *testing.T) {
 	}
 
 	// Non-sensitive values are untouched, or the payload would be useless.
-	for _, keep := range []string{"/usr/bin", "fine", "nginx:1.27", "https://logs.example.com", "net.ipv4.ip_forward"} {
+	for _, keep := range []string{"/usr/bin", "fine", "nginx:1.27", "net.ipv4.ip_forward"} {
 		if !strings.Contains(rendered, keep) {
 			t.Errorf("redacted payload dropped the non-sensitive value %q", keep)
 		}

@@ -34,6 +34,15 @@ coverage.txt
 .env.*
 !.env.example
 
+# Local agent instructions (not part of the published repository)
+/CLAUDE.md
+/CLAUDE.local.md
+
+# Working notes: design docs, implementation plans, and triage write-ups.
+# Kept locally, not published. Previously tracked files under here were
+# untracked with `git rm --cached`, which leaves them in existing history.
+/docs/
+
 # Editors and OS
 .vscode/
 .idea/

@@ -10,7 +10,9 @@ import type {
 import { useApiResource } from "../hooks/useApiResource";
 import { useContainerDetail } from "../hooks/useContainers";
 import { useDockerEventPage } from "../hooks/useDockerEvents";
+import { useSnapshots } from "../hooks/useSnapshots";
 import { EventResultBadge } from "../components/EventBadges";
+import { ReadinessBadge, TriggerBadge } from "../components/SnapshotBadges";
 import {
   BoolField,
   CodeBlock,
@@ -40,6 +42,7 @@ const TABS = [
   "Security",
   "Labels",
   "Compose",
+  "Snapshots",
   "Events",
   "Raw inspection",
 ] as const;
@@ -129,6 +132,7 @@ export function ContainerDetailPage() {
         {tab === "Security" && <SecurityTab detail={container} />}
         {tab === "Labels" && <LabelsTab detail={container} />}
         {tab === "Compose" && <ComposeTab detail={container} />}
+        {tab === "Snapshots" && <SnapshotsTab id={container.overview.id} />}
         {tab === "Events" && <EventsTab id={container.overview.id} />}
         {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
       </div>
@@ -144,6 +148,81 @@ export function ContainerDetailPage() {
  * an observation log, not a state record: what the container IS now is on the
  * other tabs, which read the inventory.
  */
+/** How many snapshots the container detail lists. */
+const RECENT_SNAPSHOT_LIMIT = 10;
+
+/**
+ * This container's snapshot history.
+ *
+ * Read-only, like every other tab. There is no capture button here and no
+ * restore control: capture is a deliberate operator action taken from the
+ * snapshots API, and restore does not exist.
+ */
+function SnapshotsTab({ id }: { id: string }) {
+  const query = useMemo(
+    () => ({ containerId: id, pageSize: RECENT_SNAPSHOT_LIMIT, page: 1 }),
+    [id],
+  );
+  const page = useSnapshots(query);
+
+  if (page.status === "loading") {
+    return <LoadingState label="Loading snapshots" />;
+  }
+  if (page.status === "disconnected") {
+    return <DisconnectedState onRetry={page.refresh} />;
+  }
+  if (page.error) {
+    return <ErrorState error={page.error} onRetry={page.refresh} />;
+  }
+
+  const snapshots = page.data?.items ?? [];
+
+  return (
+    <DetailSection
+      title="Configuration snapshots"
+      description={
+        `The ${RECENT_SNAPSHOT_LIMIT} most recent captures of this container's ` +
+        "configuration, newest first. Snapshots are immutable records; HarborMaster " +
+        "cannot restore one."
+      }
+    >
+      {snapshots.length === 0 ? (
+        <p className="text-sm text-content-muted">
+          No snapshots have been captured for this container.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {snapshots.map((snapshot) => (
+            <li
+              key={snapshot.id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm"
+            >
+              <span className="flex flex-wrap items-center gap-2">
+                <Link
+                  to={`/snapshots/${snapshot.id}`}
+                  className="font-medium text-accent hover:underline"
+                >
+                  <time dateTime={snapshot.createdAt}>
+                    {new Date(snapshot.createdAt).toLocaleString()}
+                  </time>
+                </Link>
+                <TriggerBadge trigger={snapshot.trigger} />
+                <ReadinessBadge status={snapshot.readinessStatus} />
+              </span>
+              <Link
+                to={`/snapshots/${snapshot.id}`}
+                className="text-xs text-accent hover:underline"
+              >
+                Compare with current
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </DetailSection>
+  );
+}
+
 function EventsTab({ id }: { id: string }) {
   const query = useMemo(
     () => ({ actorId: id, pageSize: RECENT_EVENT_LIMIT, page: 1 }),

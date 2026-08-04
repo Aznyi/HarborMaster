@@ -67,9 +67,17 @@ var routedPaths = []string{
 	APIPrefix + "/inventory/filters",
 	APIPrefix + "/inventory/refresh",
 	APIPrefix + "/networks",
+	APIPrefix + "/snapshots",
+	APIPrefix + "/snapshots/{id}",
+	APIPrefix + "/snapshots/{id}/diff",
+	APIPrefix + "/snapshots/{id}/restore-readiness",
 	APIPrefix + "/version",
 	APIPrefix + "/volumes",
 }
+
+// There is no restore, rollback, or apply path, and this is the list that would
+// have to change for one to appear. Phase 3 records configuration and validates
+// whether it could be restored; it does not restore.
 
 func TestOpenAPIDocumentsExactlyTheRoutedPaths(t *testing.T) {
 	documented := documentedPaths(t)

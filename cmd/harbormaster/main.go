@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -178,7 +179,7 @@ func run() error {
 		}
 	}()
 
-	probeDocker(ctx, logger, dockerClient, db)
+	dockerAPIVersion := probeDocker(ctx, logger, dockerClient, db)
 
 	assets, err := web.Assets()
 	if err != nil {
@@ -219,6 +220,64 @@ func run() error {
 		StartedAt: startedAt,
 	})
 
+	// Configuration snapshots.
+	//
+	// The key is resolved BEFORE anything can capture. Failing here is
+	// deliberate and total: a snapshot written under the wrong key produces
+	// digests that compare unequal against all history, which reads as "every
+	// secret changed at once" -- a false alarm indistinguishable from a breach.
+	// Refusing to start is loud, recoverable, and honest.
+	snapshotKey, err := service.ResolveSnapshotKey(ctx, db.Snapshots, cfg.Snapshots,
+		filepath.Join(filepath.Dir(cfg.Store.Path), "snapshot-hmac.key"))
+	if err != nil {
+		return fmt.Errorf("resolve snapshot signing key: %w", err)
+	}
+	// Key ID and source only. The key itself never reaches a log record.
+	logger.Info("snapshot digest key ready",
+		slog.String("keyId", snapshotKey.KeyID),
+		slog.String("source", string(snapshotKey.Source)))
+	if snapshotKey.PermissionsTooWide {
+		logger.Warn("snapshot key file is readable beyond its owner",
+			slog.String("mode", fmt.Sprintf("%#o", snapshotKey.ObservedMode)),
+			slog.String("expected", "0600"))
+	}
+	if cfg.MaskPatternsWereOverridden() {
+		logger.Warn("default secret-masking patterns were REPLACED by configuration",
+			slog.Int("configuredPatterns", len(cfg.Snapshots.MaskPatternsOverride)),
+			slog.String("effect", "variables matching only the defaults will no longer be masked"))
+	}
+
+	hasher := service.NewHasher(snapshotKey)
+
+	snapshots := service.NewSnapshotService(service.SnapshotOptions{
+		Containers: db.Containers,
+		Snapshots:  db.Snapshots,
+		Inventory:  db.Inventory,
+		Hasher:     hasher,
+		Versions: service.HostVersions{
+			HarborMaster: build.Version,
+			DockerAPI:    dockerAPIVersion,
+		},
+		Config: cfg.Snapshots,
+		Logger: logger,
+	})
+
+	readiness := service.NewReadinessEngine(service.ReadinessOptions{
+		Inventory: service.StoreReadinessInventory{
+			Inventory: db.Inventory,
+			Images:    db.Images,
+			Networks:  db.Networks,
+			Volumes:   db.Volumes,
+		},
+		Pinger: inventory,
+		// The null provider: Phase 3 inspects no filesystem at all.
+		Host:   service.NewNullHostValidation(),
+		Config: cfg.Snapshots,
+	})
+
+	diffs := service.NewDiffEngine(cfg.Snapshots)
+	retention := service.NewRetentionService(db.Snapshots, cfg.Snapshots, logger)
+
 	// SHUTDOWN ORDER, and why it is what it is.
 	//
 	// Deferred calls unwind last-to-first, and the order below is deliberate:
@@ -236,7 +295,7 @@ func run() error {
 	// flush would write to a closed handle. That ordering is the reason this
 	// wait group is deferred here rather than anywhere earlier.
 	var background sync.WaitGroup
-	background.Add(2)
+	background.Add(3)
 
 	go func() {
 		defer background.Done()
@@ -245,6 +304,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		events.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		retention.Run(ctx)
 	}()
 	defer background.Wait()
 
@@ -258,9 +321,21 @@ func run() error {
 		Volumes:      db.Volumes,
 		DockerEvents: db.DockerEvents,
 		EventEngine:  events,
-		Logger:       logger,
-		Config:       cfg.Server,
-		Assets:       assets,
+
+		Snapshots: db.Snapshots,
+		Capture:   snapshots,
+		Diffs:     diffs,
+		Readiness: readiness,
+		// Renders a container's CURRENT configuration for a diff against the
+		// present. In memory only: a GET must not write a snapshot.
+		SnapshotSpecBuilder: func(detail domain.ContainerDetail) domain.SnapshotSpec {
+			return service.BuildSpec(detail, detail.Image, hasher)
+		},
+
+		Logger:         logger,
+		Config:         cfg.Server,
+		SnapshotConfig: cfg.Snapshots,
+		Assets:         assets,
 	})
 
 	recordEvent(ctx, logger, db, domain.Event{
@@ -333,7 +408,11 @@ func serve(ctx context.Context, logger *slog.Logger, db *store.DB, httpServer *h
 //
 // An unreachable socket is logged and recorded, not fatal: HarborMaster is
 // useful in a degraded state, and the UI renders the disconnected condition.
-func probeDocker(ctx context.Context, logger *slog.Logger, client docker.Pinger, db *store.DB) {
+// probeDocker reports Engine reachability at startup and returns the observed
+// API version, which snapshots record as provenance. An empty string means the
+// daemon was unreachable; a snapshot taken later simply carries no version
+// rather than blocking capture on a transient outage.
+func probeDocker(ctx context.Context, logger *slog.Logger, client docker.Pinger, db *store.DB) string {
 	info, err := client.Ping(ctx)
 	if err != nil {
 		logger.Warn("docker engine unreachable at startup; continuing in degraded mode",
@@ -343,7 +422,7 @@ func probeDocker(ctx context.Context, logger *slog.Logger, client docker.Pinger,
 			Severity: domain.SeverityWarning,
 			Message:  docker.SanitizeError(err),
 		})
-		return
+		return ""
 	}
 
 	logger.Info("docker engine reachable",
@@ -354,6 +433,7 @@ func probeDocker(ctx context.Context, logger *slog.Logger, client docker.Pinger,
 		Severity: domain.SeverityInfo,
 		Message:  "docker engine reachable",
 	})
+	return info.APIVersion
 }
 
 // recordEvent appends to the audit log. A failure to record must not take the

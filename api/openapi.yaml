@@ -92,6 +92,23 @@ tags:
     description: |
       Observational Docker event history and the event engine that collects it.
       Read-only: there is no endpoint that creates, edits, or deletes an event.
+  - name: Snapshots
+    description: |
+      Immutable configuration snapshots, restore-readiness validation, and
+      configuration comparison.
+
+      A snapshot records what a container's configuration WAS. Capture reads
+      HarborMaster's own inventory and writes to HarborMaster's own database; it
+      never changes a container.
+
+      **There is no restore endpoint.** Readiness validation answers "could this
+      be restored" so a future phase has an honest baseline — it does not
+      restore, and HarborMaster has no capability to.
+
+      Snapshots are append-only. Nothing edits a captured configuration; the
+      only fields that change after capture are the denormalised readiness
+      summary, and the only thing that removes a snapshot is the configured
+      retention policy.
 
 paths:
   /api/v1/health:
@@ -948,6 +965,316 @@ paths:
         "503":
           $ref: "#/components/responses/EventsUnavailable"
 
+  /api/v1/snapshots:
+    get:
+      tags: [Snapshots]
+      summary: List configuration snapshots
+      operationId: listSnapshots
+      description: |
+        Returns a paginated, filterable list of immutable configuration
+        snapshots, newest first by default.
+
+        The canonical configuration document is deliberately omitted from list
+        rows: a page of fifty snapshots would otherwise carry fifty complete
+        configurations to render a table that shows none of them. Fetch a single
+        snapshot to get it.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: containerId
+          in: query
+          description: Restrict to one container's history.
+          schema: { type: string, maxLength: 255 }
+        - name: trigger
+          in: query
+          description: |
+            Filter by what caused the capture. Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/SnapshotTrigger" }
+          style: form
+          explode: true
+        - name: readiness
+          in: query
+          description: |
+            Filter by the last recorded restore-readiness verdict. `unknown`
+            means no evaluation has run yet.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/ReadinessStatus" }
+          style: form
+          explode: true
+        - name: checksum
+          in: query
+          description: Find the snapshot with an exact configuration checksum.
+          schema: { type: string, pattern: "^[0-9a-fA-F]{1,64}$" }
+        - name: since
+          in: query
+          description: Only snapshots captured at or after this RFC 3339 instant.
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          description: Only snapshots captured at or before this RFC 3339 instant.
+          schema: { type: string, format: date-time }
+        - name: sort
+          in: query
+          description: Sort field. Validated against a fixed allowlist.
+          schema:
+            type: string
+            enum: [createdAt, id, container, readiness, trigger]
+            default: createdAt
+        - name: direction
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of snapshots.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SnapshotsUnavailable"
+
+    post:
+      tags: [Snapshots]
+      summary: Capture a configuration snapshot
+      operationId: createSnapshot
+      description: |
+        Captures a container's current configuration as an immutable snapshot.
+
+        **This does not change the container.** Capture reads HarborMaster's own
+        inventory and writes to HarborMaster's own database. HarborMaster has no
+        ability to create, update, restart, or remove a container, and no
+        endpoint restores a snapshot.
+
+        Re-capturing an unchanged configuration returns the **existing**
+        snapshot with `deduplicated: true` and status `200` rather than creating
+        a duplicate. That deduplication is what makes this endpoint safe to call
+        repeatedly, and it means Phase 3 records *configuration history* rather
+        than time-series evidence: an unchanged capture leaves no new record.
+
+        Sensitive environment values are never stored. Each contributes a keyed
+        digest instead, which supports exactly one operation: deciding whether
+        the value changed between two snapshots.
+
+        ### Request limits
+
+        The body must be exactly one JSON object with `Content-Type:
+        application/json`. Unknown fields are rejected rather than ignored,
+        trailing content is refused, and every string must be valid UTF-8 with
+        no control characters. The endpoint is rate limited per process.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSnapshotRequest"
+      responses:
+        "201":
+          description: A new snapshot was captured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "200":
+          description: |
+            The configuration was unchanged, so the existing snapshot is
+            returned with `deduplicated: true`. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: A capture is already in progress for this container.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotConflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SnapshotsUnavailable"
+
+  /api/v1/snapshots/{id}:
+    get:
+      tags: [Snapshots]
+      summary: Get one snapshot
+      operationId: getSnapshot
+      description: |
+        Returns one snapshot including its canonical configuration document and
+        its derived environment, mount, and network sections.
+
+        Sensitive environment entries carry no value and no digest: presence and
+        byte length are all the API exposes about them.
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SnapshotsUnavailable"
+
+  /api/v1/snapshots/{id}/diff:
+    get:
+      tags: [Snapshots]
+      summary: Compare a snapshot against another or against current
+      operationId: getSnapshotDiff
+      description: |
+        Compares the snapshot against another snapshot, or against the
+        container's current configuration.
+
+        Comparing against `current` reads live configuration in memory and
+        writes nothing: a GET never creates a snapshot as a side effect.
+
+        ### Secrets
+
+        A sensitive entry reports only *that* it changed, derived from digest
+        comparison. Values and digests are never returned. Two digests produced
+        under different HMAC keys report `unverifiable` rather than a
+        false `modified` — otherwise a key rotation would look like every secret
+        changing at once.
+
+        ### Limits
+
+        Concurrency, wall time, entries compared, entries returned, and the size
+        of any single value are all bounded. Truncation is **always explicit**
+        via `truncated`, `truncationReason`, and per-group `returned`/`total`
+        counts, so a client can distinguish "no further changes" from "we
+        stopped looking". A truncated diff never reports `identical`.
+
+        There are no user-defined comparison expressions, JSONPath, selectors,
+        or patterns. Output is narrowed by naming groups from a closed
+        vocabulary.
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+        - name: against
+          in: query
+          description: |
+            `current` (the default) compares against live configuration; a
+            numeric snapshot id compares against that snapshot.
+          schema: { type: string, default: current }
+        - name: group
+          in: query
+          description: Restrict output to these groups. Repeatable.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DiffGroupName" }
+          style: form
+          explode: true
+        - name: includeUnchanged
+          in: query
+          description: |
+            Include unchanged entries. Off by default so a response is
+            proportional to the change rather than to the configuration.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The comparison.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotDiff"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SnapshotsUnavailable"
+
+  /api/v1/snapshots/{id}/restore-readiness:
+    get:
+      tags: [Snapshots]
+      summary: Validate whether a snapshot could be restored
+      operationId: getSnapshotReadiness
+      description: |
+        Evaluates whether restoring this snapshot **would** succeed.
+
+        **HarborMaster cannot restore a container, and this endpoint does not
+        bring it closer to being able to.** The report is informational: it
+        exists so an operator can see today whether the baseline a future
+        restore would need is complete.
+
+        ### Provenance matters
+
+        Most checks answer from HarborMaster's cached inventory rather than from
+        the daemon, so the report carries `inventoryGeneration`,
+        `inventoryCompletedAt`, `inventoryAgeSeconds`, and `daemonCheckedAt`.
+        Beyond a configured freshness threshold, `inventoryStale` is set and the
+        overall verdict degrades to at most `warning`: HarborMaster does not
+        claim `ready` on the strength of a stale reading.
+
+        Evaluation never triggers an inventory refresh. A read endpoint that
+        could drive privileged socket traffic would be a denial-of-service
+        amplifier.
+
+        ### Secrets and bind mounts always cap the verdict
+
+        Because sensitive values are never stored, any container with sensitive
+        environment variables reports at best `warning` — restoring it requires
+        secret injection that does not exist yet.
+
+        Bind-mount sources always report `unverifiable`: Phase 3 inspects no
+        host filesystem, and `unverifiable` caps the overall verdict at
+        `warning` rather than being rounded to a pass.
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+      responses:
+        "200":
+          description: The readiness report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessReport"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/SnapshotsUnavailable"
+
 components:
   headers:
     RequestId:
@@ -974,6 +1301,12 @@ components:
       required: true
       description: Full container ID, unambiguous ID prefix, or exact container name.
       schema: { type: string }
+    SnapshotId:
+      name: id
+      in: path
+      required: true
+      description: Numeric snapshot identifier.
+      schema: { type: integer, format: int64, minimum: 1 }
 
   responses:
     NotFound:
@@ -1059,6 +1392,55 @@ components:
         An unexpected server-side failure. The message is deliberately generic:
         the API never returns a stack trace or an internal error chain. Use
         `requestId` to find the full detail in the server log.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    SnapshotsUnavailable:
+      description: Snapshots are not configured or are disabled by configuration.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    UnsupportedMediaType:
+      description: |
+        The request did not carry `Content-Type: application/json`. Required on
+        every write endpoint, which also forces a CORS preflight for
+        cross-origin callers.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    CrossOriginRejected:
+      description: |
+        The request carried `Sec-Fetch-Site: cross-site`/`same-site`, or an
+        `Origin` that does not match the request host.
+
+        This is defence in depth rather than the primary control: these headers
+        are absent in older browsers and trivially omitted by a non-browser
+        client. Request validation, rate limiting, and concurrency limits hold
+        independently of them.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    RateLimited:
+      description: |
+        The write or comparison rate limit was exceeded. `Retry-After` gives the
+        seconds to wait.
+
+        The limit is per process, not per client: HarborMaster is
+        unauthenticated, so there is no trustworthy client identity to key on,
+        and a per-IP bucket would be trivially evaded while implying a precision
+        the system does not have.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, minimum: 1 }
       content:
         application/json:
           schema:
@@ -2291,3 +2673,443 @@ components:
           items: { $ref: "#/components/schemas/Volume" }
         pagination:
           $ref: "#/components/schemas/Pagination"
+
+    # -------------------------------------------------------- snapshots --
+
+    SnapshotTrigger:
+      type: string
+      description: |
+        What caused a capture. A closed vocabulary, enforced by a database
+        constraint.
+
+        Notably absent: anything implying HarborMaster acted on a container.
+        `scheduled` and `pre_update` are reserved for later phases and are never
+        produced today.
+      enum: [manual, api, scheduled, pre_update]
+
+    ReadinessStatus:
+      type: string
+      description: |
+        A restore-readiness verdict.
+
+        `unknown` means no evaluation has run; it is the stored default and a
+        valid filter value, and is never produced by an evaluation.
+
+        `unverifiable` appears on individual checks only. It means HarborMaster
+        could not establish the answer, and it caps the overall verdict at
+        `warning` -- a report never claims `ready` on a fact it did not check.
+      enum: [unknown, ready, warning, not_ready, unverifiable]
+
+    ReadinessCheckId:
+      type: string
+      description: Identifier of one restore-readiness check.
+      enum:
+        - daemon_reachable
+        - inventory_fresh
+        - image_available
+        - image_digest_known
+        - named_volumes_present
+        - mount_sources
+        - networks_present
+        - restart_policy_valid
+        - compose_metadata_complete
+        - secrets_available
+        - config_consistent
+        - runtime_features
+
+    Sensitivity:
+      type: string
+      description: |
+        How a value is treated. `sensitive` means the value is never stored,
+        never logged, and never returned by this API.
+      enum: [normal, sensitive]
+
+    Snapshot:
+      type: object
+      description: |
+        An immutable configuration checkpoint.
+
+        Everything except `readinessStatus` and `readinessEvaluatedAt` is fixed
+        at capture time. `spec` is the canonical document and `checksum` covers
+        it together with the secret digests, so a snapshot can be verified
+        without trusting the row it came from.
+
+        `spec` is omitted from list responses.
+      required:
+        [id, containerId, containerName, specVersion, checksum, trigger,
+         readinessStatus, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        hostId: { type: string }
+        containerId: { type: string }
+        containerName: { type: string }
+        imageReference: { type: string }
+        imageDigest: { type: string }
+        imageId: { type: string }
+        specVersion:
+          type: integer
+          description: |
+            Shape of the canonical document. Old documents are never rewritten:
+            re-encoding evidence would change its checksum.
+        spec:
+          $ref: "#/components/schemas/SnapshotSpec"
+        checksum:
+          type: string
+          description: |
+            Hex SHA-256 over the canonical document plus the secret digests.
+            Identical logical configuration produces an identical checksum.
+          pattern: "^[0-9a-f]{64}$"
+        harbormasterVersion: { type: string }
+        dockerApiVersion: { type: string }
+        dockerEngineVersion: { type: string }
+        trigger:
+          $ref: "#/components/schemas/SnapshotTrigger"
+        reason:
+          type: string
+          description: Operator-supplied prose. Length-bounded and UTF-8 validated.
+          maxLength: 4096
+        inventoryGeneration:
+          type: integer
+          format: int64
+          description: The inventory generation the capture observed.
+        eventSequence: { type: integer, format: int64 }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryWarning" }
+        warningCount: { type: integer }
+        readinessStatus:
+          $ref: "#/components/schemas/ReadinessStatus"
+        readinessEvaluatedAt: { type: string, format: date-time }
+        digestKeyId:
+          type: string
+          description: |
+            Identifies the HMAC key this snapshot's secret digests were produced
+            under. Derived from the key by hashing, so it cannot produce it.
+            Digests under different key IDs are not comparable, and a diff that
+            spans two reports `unverifiable` rather than guessing.
+        createdAt: { type: string, format: date-time }
+        deduplicated:
+          type: boolean
+          description: |
+            Present on a capture response only. True means the configuration was
+            unchanged and this is the pre-existing snapshot: nothing was created.
+
+    SnapshotEnvEntry:
+      type: object
+      description: |
+        One captured environment variable or log-driver option.
+
+        **A sensitive entry carries no `value` and no digest.** The API cannot
+        return either: the digest fields are unserialisable by construction.
+        `present` and `length` are all that is exposed, which is what an
+        operator needs to reason about a restore without revealing the value.
+      required: [position, key, classification, present]
+      properties:
+        position:
+          type: integer
+          description: |
+            Captured order, preserved because environment order is semantically
+            meaningful to some programs.
+        key: { type: string }
+        classification:
+          $ref: "#/components/schemas/Sensitivity"
+        present:
+          type: boolean
+          description: |
+            False means the variable was not set at all, which is distinct from
+            being set to the empty string.
+        value:
+          type: string
+          description: Empty and omitted for a sensitive entry.
+        length:
+          type: integer
+          description: Byte length of the original value.
+
+    SnapshotMount:
+      type: object
+      required: [destination, type]
+      properties:
+        destination: { type: string }
+        type: { type: string, enum: [bind, volume, tmpfs, npipe, cluster, unknown] }
+        source: { type: string }
+        readOnly: { type: boolean }
+        volumeName: { type: string }
+        driver: { type: string }
+
+    SnapshotNetwork:
+      type: object
+      required: [networkName]
+      properties:
+        networkName: { type: string }
+        aliases:
+          type: array
+          items: { type: string }
+
+    SnapshotSpec:
+      type: object
+      description: |
+        The canonical configuration document: the single source of truth for a
+        snapshot, from which every relational section is derived.
+
+        Volatile fields are ABSENT rather than filtered -- timestamps, status
+        prose, restart counts, runtime IP addresses, gateways, MAC addresses,
+        endpoint IDs, and health results have no field to occupy. That is what
+        makes the checksum stable across restarts.
+
+        It contains no plaintext secret in any encoding.
+      required: [specVersion, identity, image]
+      properties:
+        specVersion: { type: integer }
+        identity:
+          type: object
+          properties:
+            containerId: { type: string }
+            containerName: { type: string }
+        image:
+          type: object
+          properties:
+            reference: { type: string }
+            repository: { type: string }
+            tag: { type: string }
+            digest: { type: string }
+            imageId: { type: string }
+            repoDigests:
+              type: array
+              items: { type: string }
+            architecture: { type: string }
+            os: { type: string }
+        process:
+          $ref: "#/components/schemas/Process"
+        environment:
+          type: array
+          items: { $ref: "#/components/schemas/SnapshotEnvEntry" }
+        labels:
+          type: array
+          items: { $ref: "#/components/schemas/Label" }
+        ports:
+          type: array
+          items: { $ref: "#/components/schemas/Port" }
+        networks:
+          type: array
+          items: { $ref: "#/components/schemas/SnapshotNetwork" }
+        mounts:
+          type: array
+          items: { $ref: "#/components/schemas/SnapshotMount" }
+        restartPolicy:
+          $ref: "#/components/schemas/RestartPolicy"
+        healthCheck:
+          $ref: "#/components/schemas/HealthCheck"
+        resources:
+          $ref: "#/components/schemas/Resources"
+        security:
+          $ref: "#/components/schemas/Security"
+        logging:
+          type: object
+          properties:
+            driver: { type: string }
+            options:
+              type: array
+              items: { $ref: "#/components/schemas/SnapshotEnvEntry" }
+        compose:
+          $ref: "#/components/schemas/ComposeMetadata"
+        harbormaster:
+          $ref: "#/components/schemas/HarborMasterMetadata"
+
+    SnapshotDetail:
+      allOf:
+        - $ref: "#/components/schemas/Snapshot"
+        - type: object
+          properties:
+            environment:
+              type: array
+              items: { $ref: "#/components/schemas/SnapshotEnvEntry" }
+            mounts:
+              type: array
+              items: { $ref: "#/components/schemas/SnapshotMount" }
+            networks:
+              type: array
+              items: { $ref: "#/components/schemas/SnapshotNetwork" }
+
+    SnapshotList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Snapshot" }
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    CreateSnapshotRequest:
+      type: object
+      description: |
+        Decoded strictly: unknown fields are rejected rather than ignored, and
+        the body must be exactly one JSON object.
+      required: [containerId]
+      properties:
+        containerId:
+          type: string
+          description: Full ID, unambiguous ID prefix, or exact container name.
+          minLength: 1
+          maxLength: 255
+        reason:
+          type: string
+          description: |
+            Why the snapshot was taken. Must be valid UTF-8 with no control
+            characters, and is bounded by configuration (500 bytes by default).
+          maxLength: 4096
+
+    SnapshotConflict:
+      type: object
+      description: A capture is already running for this container.
+      required: [error, active]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+        requestId: { type: string }
+        active:
+          type: object
+          properties:
+            inProgress: { type: boolean }
+            startedAt: { type: string, format: date-time }
+
+    ReadinessCheck:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/ReadinessCheckId"
+        status:
+          $ref: "#/components/schemas/ReadinessStatus"
+        detail:
+          type: string
+          description: |
+            Operator-facing prose. Never contains a secret value, a raw daemon
+            error, or a path the snapshot does not already record.
+
+    ReadinessReport:
+      type: object
+      description: |
+        A complete restore-readiness evaluation. Informational: HarborMaster
+        cannot restore a container.
+      required: [snapshotId, status, checks, evaluatedAt]
+      properties:
+        snapshotId: { type: integer, format: int64 }
+        status:
+          $ref: "#/components/schemas/ReadinessStatus"
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/ReadinessCheck" }
+        evaluatedAt: { type: string, format: date-time }
+        daemonCheckedAt:
+          type: string
+          format: date-time
+          description: When the reachability ping in this evaluation ran.
+        inventoryGeneration:
+          type: integer
+          format: int64
+          description: The inventory generation the evaluation read.
+        inventoryCompletedAt:
+          type: string
+          format: date-time
+          description: |
+            When that inventory refresh finished. Measured from the last
+            SUCCESSFUL refresh: a failed attempt does not make data fresher.
+        inventoryAgeSeconds: { type: integer, format: int64 }
+        inventoryStale:
+          type: boolean
+          description: |
+            The inventory exceeded the configured freshness threshold, which
+            caps the overall verdict at `warning`.
+        readyCount: { type: integer }
+        warningCount: { type: integer }
+        notReadyCount: { type: integer }
+        unverifiableCount: { type: integer }
+
+    DiffGroupName:
+      type: string
+      description: |
+        A configuration section. A closed, code-defined vocabulary -- output is
+        narrowed by naming groups, never by a user-supplied expression or path.
+      enum:
+        [environment, labels, ports, networks, mounts, resources, security,
+         compose, metadata]
+
+    ChangeKind:
+      type: string
+      description: |
+        How one entry differs.
+
+        `unverifiable` means the two values cannot be compared at all --
+        specifically, two secret digests produced under different HMAC keys.
+        Reporting `modified` there would tell an operator every secret changed
+        after a key rotation.
+      enum: [added, removed, modified, unchanged, unverifiable]
+
+    DiffEntry:
+      type: object
+      required: [key, kind]
+      properties:
+        key: { type: string }
+        kind:
+          $ref: "#/components/schemas/ChangeKind"
+        old:
+          type: string
+          description: Always empty for a sensitive entry.
+        new:
+          type: string
+          description: Always empty for a sensitive entry.
+        sensitive:
+          type: boolean
+          description: |
+            The entry's values are withheld. The change is reported through
+            `kind` alone, derived from digest comparison.
+        note: { type: string }
+
+    DiffGroup:
+      type: object
+      required: [name, entries]
+      properties:
+        name:
+          $ref: "#/components/schemas/DiffGroupName"
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/DiffEntry" }
+        added: { type: integer }
+        removed: { type: integer }
+        modified: { type: integer }
+        unchanged: { type: integer }
+        truncated:
+          type: boolean
+          description: |
+            This group stopped short of comparing or returning everything.
+            Never silent: a truncated group that looked complete would read as
+            two identical configurations.
+        returned: { type: integer }
+        total: { type: integer }
+
+    SnapshotDiff:
+      type: object
+      required: [fromSnapshotId, groups, identical]
+      properties:
+        fromSnapshotId: { type: integer, format: int64 }
+        toSnapshotId:
+          type: integer
+          format: int64
+          description: Zero when the comparison target was live configuration.
+        againstCurrent: { type: boolean }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/DiffGroup" }
+        identical:
+          type: boolean
+          description: |
+            Nothing differs. Never true on a truncated diff: a truncated
+            comparison has not established that the two are identical.
+        addedCount: { type: integer }
+        removedCount: { type: integer }
+        modifiedCount: { type: integer }
+        changedCount: { type: integer }
+        unchangedCount: { type: integer }
+        truncated: { type: boolean }
+        truncationReason: { type: string }
