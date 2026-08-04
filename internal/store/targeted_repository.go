@@ -143,7 +143,9 @@ func (r *InventoryRepository) ReplaceNetworks(ctx context.Context, networks []do
 			// retained. Unlike a container, a network carries no history worth
 			// keeping, and a stale row would show an attachment target that
 			// cannot be attached to.
-			return deleteMissing(ctx, tx, "networks", "id", idsOfNetworks(networks))
+			// emptyIsSuspect: a daemon reporting zero networks is reporting
+			// something impossible, since bridge, host, and none always exist.
+			return deleteMissing(ctx, tx, "networks", "id", idsOfNetworks(networks), emptyIsSuspect)
 		})
 }
 
@@ -155,7 +157,9 @@ func (r *InventoryRepository) ReplaceVolumes(ctx context.Context, volumes []doma
 			if err := upsertVolumes(ctx, tx, volumes, generation, at); err != nil {
 				return err
 			}
-			return deleteMissing(ctx, tx, "volumes", "name", namesOfVolumes(volumes))
+			// emptyMeansEmpty: a host with no volumes is an ordinary state, and
+			// the last volume being removed is exactly when this matters.
+			return deleteMissing(ctx, tx, "volumes", "name", namesOfVolumes(volumes), emptyMeansEmpty)
 		})
 }
 
@@ -195,15 +199,52 @@ func (r *InventoryRepository) inCurrentGeneration(
 	return nil
 }
 
+// emptyRule says how a catalog read of zero rows is to be interpreted.
+//
+// The two catalogs differ, and treating them the same was a bug. A read only
+// reaches this layer when it SUCCEEDED -- the services return early on error --
+// so the question is not "did the read work" but "is zero a believable answer
+// for this catalog".
+type emptyRule int
+
+const (
+	// emptyMeansEmpty: zero is a legitimate state, so the catalog is emptied.
+	// True of volumes: a host with no volumes is ordinary.
+	emptyMeansEmpty emptyRule = iota
+
+	// emptyIsSuspect: zero cannot occur on a healthy daemon, so it is read as a
+	// degraded response and the catalog is left alone. True of networks, where
+	// bridge, host, and none always exist. Retaining a stale row briefly is a
+	// better failure than blanking the catalog on a hiccup, and the next
+	// reconciliation corrects it either way.
+	emptyIsSuspect
+)
+
 // deleteMissing removes rows of a catalog table whose key is not in keep.
 //
-// Guarded against an empty keep set: an empty list from a failed read would
-// otherwise wipe the table. A daemon reporting genuinely zero networks is
-// impossible (the default bridge always exists), and zero volumes is
-// indistinguishable at this layer from a read that returned nothing, so the
-// safe reading is "do nothing".
-func deleteMissing(ctx context.Context, tx *sql.Tx, table, keyColumn string, keep []string) error {
+// When keep is empty the behaviour is governed by rule; see emptyRule.
+//
+// This function previously returned early on ANY empty set. That cost a real
+// bug: on a host whose only volume was removed, the correct catalog is empty,
+// the early return skipped the delete, and the removed volume stayed in the
+// inventory until the next full reconciliation -- fifteen minutes by default.
+// It went unnoticed because networks, which always have a floor of three, can
+// never exercise the empty case on a real daemon.
+//
+// The full-refresh path does NOT come through here. It writes a new generation
+// wholesale and does tolerate an empty list from a failed read: see
+// InventoryService.collect, which records a warning and degrades rather than
+// failing.
+func deleteMissing(ctx context.Context, tx *sql.Tx, table, keyColumn string, keep []string, rule emptyRule) error {
+	// table and keyColumn are compile-time constants from this file only; no
+	// caller-supplied string reaches the query text.
 	if len(keep) == 0 {
+		if rule == emptyIsSuspect {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("prune %s: %w", table, err)
+		}
 		return nil
 	}
 
@@ -217,8 +258,6 @@ func deleteMissing(ctx context.Context, tx *sql.Tx, table, keyColumn string, kee
 		args = append(args, key)
 	}
 
-	// table and keyColumn are compile-time constants from this file only; no
-	// caller-supplied string reaches the query text.
 	query := "DELETE FROM " + table + " WHERE " + keyColumn + " NOT IN (" + string(placeholders) + ")"
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("prune %s: %w", table, err)

@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+﻿import { useCallback, useMemo, useState } from "react";
+import { Link } from "react-router";
 
 import type { DockerEvent, DockerEventQuery } from "../api/eventTypes";
 import {
@@ -549,7 +549,7 @@ function EventRow({ event }: { event: DockerEvent }) {
       <td className="px-4 py-3">
         <EventTypeBadge type={event.type} />
       </td>
-      <td className="px-4 py-3 font-mono text-xs">{event.action || "—"}</td>
+      <td className="px-4 py-3 font-mono text-xs">{event.action || "â€”"}</td>
       <td className="px-4 py-3">
         <ResourceCell event={event} />
       </td>
@@ -560,7 +560,7 @@ function EventRow({ event }: { event: DockerEvent }) {
             <span className="text-content-muted">{event.composeService}</span>
           </>
         ) : (
-          <span className="text-content-muted">—</span>
+          <span className="text-content-muted">â€”</span>
         )}
       </td>
       <td className="px-4 py-3">
@@ -580,7 +580,7 @@ function EventRow({ event }: { event: DockerEvent }) {
  * absent, which is the useful answer rather than a dead link.
  */
 function ResourceCell({ event }: { event: DockerEvent }) {
-  const label = event.actorName || event.actorId || "—";
+  const label = event.actorName || event.actorId || "â€”";
 
   if (event.type === "container" && event.actorId) {
     return (

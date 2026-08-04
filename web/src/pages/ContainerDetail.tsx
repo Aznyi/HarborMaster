@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+﻿import { useCallback, useMemo, useState } from "react";
+import { Link, useParams } from "react-router";
 
 import { getContainerRaw } from "../api/client";
 import type {
@@ -214,7 +214,7 @@ function EventsTab({ id }: { id: string }) {
                   <td className="px-3 py-2 text-xs text-content-muted" title={event.observedAt}>
                     {formatEventTime(event.observedAt)}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">{event.action || "—"}</td>
+                  <td className="px-3 py-2 font-mono text-xs">{event.action || "â€”"}</td>
                   <td className="px-3 py-2">
                     <EventResultBadge result={event.result} />
                   </td>
@@ -229,7 +229,7 @@ function EventsTab({ id }: { id: string }) {
 }
 
 function formatEventTime(iso: string | undefined): string {
-  if (!iso) return "—";
+  if (!iso) return "â€”";
   const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
 }
@@ -461,7 +461,7 @@ function MountsTab({ detail }: { detail: ContainerDetailData }) {
                   <td className="px-3 py-2 font-mono text-xs">{mount.destination}</td>
                   <td className="px-3 py-2">{mount.type}</td>
                   <td className="px-3 py-2 font-mono text-xs break-all">
-                    {mount.volumeName || mount.source || mount.tmpfsOptions || "—"}
+                    {mount.volumeName || mount.source || mount.tmpfsOptions || "â€”"}
                   </td>
                   <td className="px-3 py-2">{mount.readOnly ? "read-only" : "read-write"}</td>
                 </tr>

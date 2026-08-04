@@ -18,13 +18,40 @@ migration described in it was carried out.
 | | |
 |---|---|
 | Package | `react-router` (npm) |
-| Installed | 7.18.2, transitively via `react-router-dom` 7.18.2 |
+| Was | 7.18.2, transitively via `react-router-dom` 7.18.2 |
+| Now | **8.3.0**, imported directly |
 | Affected | `>= 7.12.0, < 8.3.0` |
-| Patched | 8.3.0 |
 | Severity | High (7.1) |
-| Status | **Not reachable.** Migration tracked separately, see [tasks/react-router-8-migration.md](tasks/react-router-8-migration.md). |
+| Status | **Resolved.** Upgraded to the patched version. It was never reachable here; the analysis below is retained as the record of why it was not an emergency. |
 
-### The vulnerable feature
+### How it was resolved
+
+Not by upgrading `react-router-dom`: that package has no v8. Its latest release
+is 7.18.2, which depends on `react-router` 7.18.2 — so following the DOM package
+can never reach the patched version. React Router consolidated in v8, and the
+DOM-specific exports now live in `react-router` itself.
+
+The migration was therefore a package swap, not a version bump:
+
+- removed `react-router-dom`, added `react-router` `^8.3.0`
+- rewrote `from "react-router-dom"` to `from "react-router"` in the ten files
+  that imported it
+
+No API changes were needed. Every symbol in use — `BrowserRouter`, `Routes`,
+`Route`, `Navigate`, `Link`, `NavLink`, `useParams`, `useLocation`, and
+`MemoryRouter` in tests — is exported from `react-router` v8 unchanged, and the
+app stays in Declarative Mode.
+
+`react-router` v8 requires `react >= 19.2.7`; 19.2.8 was already installed, so
+React itself did not move.
+
+Verified with `npm run typecheck`, `npm test` (86 passing), `npm run build`, and
+`npm audit` (**0 vulnerabilities**). The rebuilt bundle was then run through the
+Go binary and checked in a browser-equivalent fetch: `/`, a deep link
+(`/containers/<id>`), `/events`, and an unknown path all serve the SPA shell and
+reference the new bundle.
+
+### The vulnerable feature (why this was never urgent)
 
 A CSRF bypass in React Router's **RSC (React Server Components) mode**: a
 server action could execute before the request was rejected with 400. The
@@ -75,15 +102,12 @@ npm audit
 
 ### Rest of the dependency graph
 
-`npm audit` reports 2 high-severity entries, and both are this same advisory —
-once against `react-router` and once against `react-router-dom`, which is only
-flagged for depending on it. Total: `0 critical, 2 high, 0 moderate, 0 low, 0
-info`.
+Before the upgrade, `npm audit` reported 2 high-severity entries, both this same
+advisory — once against `react-router` and once against `react-router-dom`,
+which was flagged only for depending on it. No advisory applied to Data Mode,
+SPA navigation, redirect handling, or `react-router-dom` itself.
 
-No advisory in the graph applies to Data Mode, SPA navigation, redirect
-handling, or `react-router-dom` itself. `npm audit fix` cannot resolve this
-without a major-version change, which is why the migration is tracked as its own
-task rather than folded into a patch sweep.
+After the upgrade: `found 0 vulnerabilities`.
 
 ---
 
@@ -210,12 +234,38 @@ mechanism during the migration and nothing else covered it; had it broken, a
 container vanishing mid-refresh would have failed the whole sweep instead of
 producing one warning.
 
+### A pre-existing bug found while getting CI green
+
+Not caused by the migration, and recorded here because it was found by it.
+
+`TestVolumeLifecycle` in the integration suite was failing on `main` before any
+of this work — the same job, the same step, on commit `ff3ef0a`. The cause was
+in `store.deleteMissing`, which returned early whenever the catalog to keep was
+empty, on the reasoning that an empty list might have come from a failed read.
+
+That reasoning does not hold for the paths that reach it. `RefreshVolumes` and
+`RefreshNetworks` return early when the runtime read fails, so the catalog only
+arrives here after a SUCCESSFUL read, and an empty one genuinely means the host
+has none. The result was that removing a host's last volume left it in the
+inventory until the next full reconciliation.
+
+It hid for a structural reason: the same rule was applied to both catalogs, and
+networks always have `bridge`, `host`, and `none`, so a network read is never
+empty on a real daemon. Volumes have no such floor.
+
+The fix makes the difference explicit rather than uniform — `emptyMeansEmpty`
+for volumes, `emptyIsSuspect` for networks — so both catalogs get the rule that
+is true of them. `ReplaceVolumes` and `ReplaceNetworks` had no unit tests at
+all; they now have four, including a reproduction of the failure that needs no
+Docker daemon.
+
 ### Remaining limitations
 
 - **Docker-dependent gates were not run locally.** The live-Docker integration
   suite, the container image build, and the container smoke tests require a
   daemon, and none is installed on the machine this migration was performed on.
-  CI runs all three.
+  CI runs all three. The binary smoke test that does not need Docker was run
+  locally and passes.
 - **`github.com/moby/moby/client` is pre-1.0** (`v0.5.1`). Its API may still
   change between minor versions, so upgrades should be read rather than taken
   blind. This is a supported, published consumer module — the pre-1.0 version is

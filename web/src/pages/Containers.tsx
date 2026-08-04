@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+﻿import { useCallback, useMemo, useState } from "react";
+import { Link } from "react-router";
 
 import type { ContainerQuery, ContainerSummary } from "../api/inventoryTypes";
 import { useContainerPage, useFilterOptions } from "../hooks/useContainers";
@@ -270,7 +270,7 @@ function ContainerTable({
                     >
                       {column.label}
                       <span aria-hidden="true" className={active ? "" : "opacity-0"}>
-                        {query.direction === "asc" ? "▲" : "▼"}
+                        {query.direction === "asc" ? "â–²" : "â–¼"}
                       </span>
                     </button>
                   </th>

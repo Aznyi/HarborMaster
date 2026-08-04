@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+﻿import { Navigate, Route, Routes } from "react-router";
 
 import { AppShell } from "./components/AppShell";
 import { useHealth } from "./hooks/useHealth";

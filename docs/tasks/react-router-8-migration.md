@@ -1,61 +1,45 @@
 # Task: migrate React Router 7 → 8
 
-**Status:** open
-**Opened:** 2026-08-04
-**Driver:** GHSA-qwww-vcr4-c8h2 (see [../security-triage.md](../security-triage.md))
-**Priority:** low — the advisory is not reachable from this codebase. This is
-hygiene and alert-clearing, not incident response.
+**Status:** done (2026-08-04)
+**Driver:** GHSA-qwww-vcr4-c8h2 — see [../security-triage.md](../security-triage.md)
 
-## Why this is its own task
+## Outcome
 
-`react-router` 8.3.0 is the patched version, and reaching it means moving
-`react-router-dom` from `^7.6.0` to `^8`. That is a breaking major upgrade
-across every routing surface in the app, so it does not belong in a patch sweep
-and must not ride along with an unrelated change. `npm audit fix` cannot do it
-without `--force`.
+Done in one step, and it was much smaller than this task assumed.
 
-Because the vulnerable feature (RSC mode) is not used here, there is no reason
-to rush this or to accept a partly-verified upgrade.
+The assumption here was a breaking major upgrade of `react-router-dom` from 7 to
+8. That package has no v8: its latest release is 7.18.2, which depends on
+`react-router` 7.18.2, so following it can never reach the patched version.
+React Router consolidated in v8 and the DOM exports moved into `react-router`
+itself.
 
-## Scope
+So the change was a package swap, not an API migration:
 
-Routing is small and centralised, which is the main thing in this migration's
-favour:
+- removed `react-router-dom`, added `react-router` `^8.3.0`
+- rewrote `from "react-router-dom"` to `from "react-router"` in ten files
 
-- [web/src/main.tsx](../../web/src/main.tsx) — `<BrowserRouter>` mount
-- [web/src/App.tsx](../../web/src/App.tsx) — `<Routes>` / `<Route>` / `<Navigate>`
-- [web/src/components/AppShell.tsx](../../web/src/components/AppShell.tsx) — `NavLink`, `useLocation`
-- [web/src/pages/ContainerDetail.tsx](../../web/src/pages/ContainerDetail.tsx) — `Link`, `useParams`
-- [web/src/pages/Dashboard.tsx](../../web/src/pages/Dashboard.tsx), [Containers.tsx](../../web/src/pages/Containers.tsx), [Events.tsx](../../web/src/pages/Events.tsx) — `Link`
-- Tests using `MemoryRouter`: `App.test.tsx`, `pages/Events.test.tsx`,
-  `pages/Inventory.test.tsx`
+No routing code changed. Every symbol in use (`BrowserRouter`, `Routes`,
+`Route`, `Navigate`, `Link`, `NavLink`, `useParams`, `useLocation`, and
+`MemoryRouter` in tests) is exported from `react-router` v8 unchanged, and the
+app stayed in Declarative Mode — Data Mode, Framework Mode, and RSC were not
+adopted, so the advisory's blast radius is still not entered.
 
-## Steps
+## Verified
 
-1. Read the React Router 8 upgrade guide and note which v7 APIs used above were
-   removed or renamed.
-2. Decide whether v8 still ships `react-router-dom` as a separate package or
-   whether imports move to `react-router`. Update imports accordingly.
-3. Upgrade: `npm install react-router-dom@^8` in `web/`, commit the lockfile.
-4. Keep Declarative Mode. Do **not** adopt Data Mode, Framework Mode, or RSC as
-   part of this change — that is a separate design decision, and adopting RSC
-   would move this app into the advisory's blast radius for the first time.
-5. Update `MemoryRouter` usage in tests if its API changed.
-6. Verify, all from `web/`:
-   - `npm run typecheck`
-   - `npm test`
-   - `npm run build`
-   - `npm audit` — expect 0 advisories for `react-router`
-7. Confirm the embedded bundle still serves: build the binary and check the SPA
-   shell and client-side routing, including a deep link such as
-   `/containers/<id>` and the catch-all redirect to `/`.
+- `npm run typecheck`, `npm test` (86 passing), `npm run build`
+- `npm audit` — `found 0 vulnerabilities`
+- The rebuilt bundle served through the Go binary: `/`, a deep link
+  `/containers/<id>`, `/events`, and an unknown path all return the SPA shell
+  and reference the new asset bundle
+- `react-router` v8 requires `react >= 19.2.7`; 19.2.8 was already installed,
+  so React did not move
 
-## Done when
+## Worth remembering
 
-- `react-router` resolves to >= 8.3.0 in `web/package-lock.json`
-- `npm audit` is clean
-- Type-check, tests, and build all pass
-- Deep links and the catch-all redirect still work against the embedded bundle
-- Dependabot alert #6 closes on its own
-- The React Router entry in [../security-triage.md](../security-triage.md) is
-  updated to resolved
+When an advisory names a package you depend on transitively, check whether the
+package you actually declare has a release that can reach the fix. Twice in this
+repository the answer was no, and the remediation was to move to the successor
+package rather than to raise a version:
+
+- `github.com/docker/docker` → `github.com/moby/moby/{client,api}`
+- `react-router-dom` → `react-router`

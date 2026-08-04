@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 
 import { ApiError, refreshInventory } from "../api/client";
 import type { InventoryStatus } from "../api/inventoryTypes";
@@ -259,7 +259,7 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
             aria-busy={busy}
             className="rounded-lg border border-border-subtle bg-surface-raised px-4 py-2 text-sm font-medium transition-colors hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? "Refreshing…" : "Refresh inventory"}
+            {busy ? "Refreshingâ€¦" : "Refresh inventory"}
           </button>
         </div>
       </div>
@@ -268,7 +268,7 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
         <Metric label="Generation" value={status.generation === 0 ? "none yet" : String(status.generation)} />
         <Metric label="Last success" value={formatTimestamp(status.lastSuccess?.finishedAt)} />
         <Metric label="Duration" value={formatDuration(status.lastSuccess?.durationMs)} />
-        <Metric label="Checksum" value={status.checksum ? status.checksum.slice(0, 12) : "—"} mono />
+        <Metric label="Checksum" value={status.checksum ? status.checksum.slice(0, 12) : "â€”"} mono />
       </dl>
 
       {feedback.kind !== "idle" ? (
@@ -320,7 +320,7 @@ function ConnectionCards({
           <StatusBadge tone={componentTone(docker.status)} label={docker.status} />
         </div>
         <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-          <Metric label="API version" value={docker.version ?? "—"} />
+          <Metric label="API version" value={docker.version ?? "â€”"} />
           <Metric label="Runtime" value={status.runtime ?? "docker"} />
           {docker.detail ? (
             <div className="col-span-2">
@@ -569,7 +569,7 @@ function formatTimestamp(iso: string | undefined): string {
 }
 
 function formatDuration(ms: number | undefined): string {
-  if (ms === undefined) return "—";
+  if (ms === undefined) return "â€”";
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
 }
