@@ -92,6 +92,26 @@ tags:
     description: |
       Observational Docker event history and the event engine that collects it.
       Read-only: there is no endpoint that creates, edits, or deletes an event.
+  - name: Image intelligence
+    description: |
+      What registries report about the images the inventory references: resolved
+      digests, whether a newer version is published, and per-registry health.
+
+      **This is HarborMaster's only outbound network egress.** Everything else
+      talks to a local Docker socket and a local SQLite file; this feature makes
+      anonymous HTTPS GETs to registry manifest and tag-listing endpoints.
+
+      It reads. It does not pull, push, delete, prune, tag, or recreate
+      anything, and it holds no registry credentials -- a private repository is
+      reported as `unauthorized` rather than becoming a reason to handle
+      secrets. An update is REPORTED; applying one is an operator's job with
+      their own tooling.
+
+      **No parameter in this API becomes a network destination.** Registry hosts
+      are derived only from image references the inventory already holds, and
+      `POST /images/refresh` takes no target of any kind. See
+      docs/security/threat-model.md for the layered SSRF defences.
+
   - name: Policy
     description: |
       Administrator-defined rules that every container's configuration is
@@ -527,11 +547,29 @@ paths:
           schema: { type: string }
       responses:
         "200":
-          description: The image and how many containers reference it.
+          description: |
+            The image, how many containers reference it, and what registries
+            report about each of its references.
+
+            A strict SUPERSET of the pre-Phase-6 response: `image` and
+            `containerCount` are unchanged and in the same places, and `intel`
+            is additive. `intel` is a LIST because one local image can carry
+            several references -- the same content tagged twice.
+
+            `intel` is empty when the engine is disabled, or when nothing about
+            this image has been checked yet. The second case is not "no updates
+            available"; see `checkStatus` on each entry.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ImageUsage"
+                allOf:
+                  - $ref: "#/components/schemas/ImageUsage"
+                  - type: object
+                    required: [intel]
+                    properties:
+                      intel:
+                        type: array
+                        items: { $ref: "#/components/schemas/ImageIntel" }
         "404":
           $ref: "#/components/responses/NotFound"
         "405":
@@ -2124,6 +2162,196 @@ paths:
           $ref: "#/components/responses/PolicyUnavailable"
 
 
+  /api/v1/images/updates:
+    get:
+      tags: [Image intelligence]
+      summary: Which images have a newer version published
+      operationId: listImageUpdates
+      description: |
+        Returns every tracked image reference with what the registry reports
+        about it, together with the estate aggregate.
+
+        The summary travels WITH the list so a dashboard renders in one request,
+        and so `checked` is always beside `updatesAvailable`. That pairing
+        matters: an update count without "how many were actually checked"
+        invites reading a stale estate as a healthy one.
+
+        Defaults to references with an ACTIONABLE update. Pass
+        `updatesOnly=false` for everything tracked, including references that
+        are up to date, awaiting a first check, or not checkable at all.
+
+        **No parameter here becomes a network destination.** `registry` filters
+        the stored column; it is matched exactly against a host HarborMaster
+        itself derived from an image reference, and cannot introduce one.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: update
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/UpdateType" }
+        - name: status
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/CheckStatus" }
+        - name: registry
+          in: query
+          description: |
+            Restrict to one or more registry hosts, matched exactly against a
+            stored value. Validated as a host NAME; it selects among registries
+            the estate already references and cannot name a new one.
+          schema:
+            type: array
+            maxItems: 32
+            items: { type: string, maxLength: 253 }
+        - name: updatesOnly
+          in: query
+          description: Only references with an actionable update. Defaults to true.
+          schema: { type: boolean, default: true }
+        - name: inUseOnly
+          in: query
+          description: Only references a present container actually runs.
+          schema: { type: boolean }
+        - name: search
+          in: query
+          description: |
+            Matches the canonical or familiar reference. LIKE metacharacters are
+            escaped, so a term of `%` matches references literally containing a
+            percent sign rather than everything.
+          schema: { type: string, maxLength: 512 }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [update, reference, registry, status, lastChecked, containers, id]
+            default: update
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of tracked references, with the estate aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ImageIntel" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/ImageIntelSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ImageIntelUnavailable"
+
+  /api/v1/images/{id}/history:
+    get:
+      tags: [Image intelligence]
+      summary: What has changed about an image
+      operationId: getImageHistory
+      description: |
+        Observed CHANGES for every reference resolving to this local image,
+        newest first.
+
+        Only actual movements are recorded -- a digest that moved, an update
+        that appeared or was taken, a check that started or stopped failing. A
+        pass that found everything unchanged writes nothing, so an empty history
+        means the image has been stable or has not been checked, NOT that
+        nothing was looked at.
+      parameters:
+        - $ref: "#/components/parameters/ImageId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of observed changes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imageId, references, items, pagination]
+                properties:
+                  imageId: { type: string }
+                  references:
+                    type: array
+                    description: |
+                      Every tracked reference that resolved to this image, so a
+                      merged history is attributable.
+                    items: { type: string }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ImageUpdateEvent" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/AmbiguousId"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ImageIntelUnavailable"
+
+  /api/v1/images/refresh:
+    post:
+      tags: [Image intelligence]
+      summary: Request a metadata collection pass
+      operationId: refreshImageMetadata
+      description: |
+        Schedules a metadata collection pass and answers 202 immediately.
+
+        **It pulls nothing.** The pass resolves manifests and lists tags over
+        HTTPS, anonymously, and records what it learned. No image is downloaded,
+        no container is touched, and no Docker capability is involved.
+
+        **It takes no body and no target.** There is no registry, host, URL, or
+        reference parameter -- deliberately, because that is the API-layer half
+        of the SSRF defence. The pass covers whatever references the inventory
+        already holds, and any query parameter attached to the request is simply
+        not read.
+
+        Asynchronous for two reasons: a synchronous pass would hold an
+        unauthenticated request open across hundreds of registry lookups, and it
+        would hand a caller a way to generate outbound traffic on demand. The
+        request is coalesced -- calling it in a loop produces one pass, not a
+        backlog -- and it is rate limited on top of that.
+      responses:
+        "202":
+          description: The pass was scheduled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requested, engine]
+                properties:
+                  requested: { type: boolean }
+                  engine: { $ref: "#/components/schemas/ImageIntelEngineStatus" }
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ImageIntelUnavailable"
+
+
 components:
   headers:
     RequestId:
@@ -2177,6 +2405,12 @@ components:
       required: true
       description: Numeric policy violation identifier.
       schema: { type: integer, format: int64, minimum: 1 }
+    ImageId:
+      name: id
+      in: path
+      required: true
+      description: Full image ID, short ID, or an unambiguous prefix.
+      schema: { type: string, maxLength: 256 }
 
   responses:
     NotFound:
@@ -2278,6 +2512,19 @@ components:
       description: |
         Drift detection is not configured or is disabled by configuration.
         Records already collected remain readable; only evaluation stops.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    ImageIntelUnavailable:
+      description: |
+        Image intelligence is not configured or is disabled by configuration.
+
+        When disabled, HarborMaster makes NO outbound network request at all --
+        which is the setting an air-gapped deployment wants. Metadata already
+        collected remains in the database; only the lookups and these endpoints
+        stop.
       content:
         application/json:
           schema:
@@ -4587,3 +4834,262 @@ components:
         pendingEvaluations: { type: integer }
         sweepPending: { type: boolean }
         overflowed: { type: boolean }
+
+    RegistryKind:
+      type: string
+      description: |
+        Which provider serves a registry host. The distribution API is the same
+        everywhere; what differs is host defaulting, repository shape, and how an
+        anonymous pull token is obtained.
+      enum: [dockerhub, ghcr, oci, unknown]
+
+    UpdateType:
+      type: string
+      description: |
+        What kind of update is available.
+
+        `unknown` is NOT a small update. It means HarborMaster could not
+        determine whether one exists -- a calendar-style tag, a tag listing that
+        hit its budget, or a comparison the parser refused to make. It must read
+        differently from `none`, which is a positive statement that the image is
+        current.
+
+        `digest` means the SAME TAG now resolves to different content: the
+        publisher republished it. It is the only update type available for a tag
+        that carries no version, which is why "latest" never reports a version
+        change.
+      enum: [none, digest, patch, minor, major, prerelease, unknown]
+
+    CheckStatus:
+      type: string
+      description: |
+        The outcome of the most recent registry lookup.
+
+        Three of these mean there is nothing to fix:
+
+        - `unauthorized` -- the repository is private, and HarborMaster holds no
+          registry credentials by design.
+        - `notFound` -- often a locally built image that was never published.
+        - `unsupported` -- the reference names no public registry, so it can
+          never be looked up. Deliberately distinct from `failed`, so a
+          dashboard does not show a healthy estate as broken.
+      enum: [pending, ok, failed, rateLimited, unauthorized, notFound, unsupported]
+
+    ImageEventKind:
+      type: string
+      description: What changed. Only actual movements are recorded.
+      enum:
+        - discovered
+        - digestChanged
+        - updateFound
+        - updateCleared
+        - checkFailed
+        - checkRecovered
+
+    Platform:
+      type: object
+      description: |
+        The OS and architecture a manifest targets. Recorded because a
+        multi-architecture image resolves to a different digest per platform, so
+        "the digest changed" is only meaningful once the platform is fixed.
+      properties:
+        os: { type: string }
+        architecture: { type: string }
+        variant: { type: string }
+
+    ImageIntel:
+      type: object
+      description: |
+        Everything known about one image reference.
+
+        One record per REFERENCE rather than per container: a hundred containers
+        running the same image are one registry lookup, which is the difference
+        between a client a registry tolerates and one it blocks.
+
+        The conditional-request validator is deliberately absent from this
+        schema. It is a cache implementation detail with no meaning to a client,
+        and it is registry-supplied text.
+      required:
+        [id, reference, familiar, registryKind, registry, repository,
+         pinned, containerCount, updateType, checkStatus, firstSeenAt, failureCount]
+      properties:
+        id: { type: integer, format: int64 }
+        reference:
+          type: string
+          description: The canonical form, e.g. "docker.io/library/nginx:1.25".
+        familiar:
+          type: string
+          description: The short form an operator recognises, e.g. "nginx:1.25".
+        registryKind: { $ref: "#/components/schemas/RegistryKind" }
+        registry: { type: string }
+        namespace: { type: string }
+        repository: { type: string }
+        tag: { type: string }
+        localDigest:
+          type: string
+          description: The manifest digest the local daemon reports.
+        remoteDigest:
+          type: string
+          description: |
+            The digest the registry currently serves, COMPUTED from the manifest
+            bytes rather than read from a registry header.
+        pinned:
+          type: boolean
+          description: The reference names a digest, so its tag cannot move.
+        platform: { $ref: "#/components/schemas/Platform" }
+        imageId:
+          type: string
+          description: |
+            The local image, when one exists. A reference can have intelligence
+            without a local image: a container may name an image the daemon has
+            since removed.
+        containerCount: { type: integer }
+        updateType: { $ref: "#/components/schemas/UpdateType" }
+        latestTag:
+          type: string
+          description: |
+            The newer tag found by version comparison. Absent for a digest-only
+            update, which has no newer tag to name.
+        updateReason:
+          type: string
+          description: |
+            Why that verdict, from a fixed set of phrases. Never
+            registry-supplied text.
+        checkStatus: { $ref: "#/components/schemas/CheckStatus" }
+        statusDetail:
+          type: string
+          description: |
+            HarborMaster's own description of a non-OK status, from a fixed set
+            of phrases. **Never a registry-supplied string.**
+        firstSeenAt: { type: string, format: date-time }
+        lastCheckedAt: { type: string, format: date-time }
+        lastSuccessAt:
+          type: string
+          format: date-time
+          description: |
+            The most recent lookup that ANSWERED. A failed lookup moves
+            `lastCheckedAt` and leaves this alone, so the gap between them is how
+            stale the answer is.
+        nextCheckAt: { type: string, format: date-time }
+        failureCount: { type: integer }
+        publishedAt:
+          type: string
+          format: date-time
+          description: |
+            When the remote image was built, from an OCI annotation. Frequently
+            absent, and refused rather than guessed when it does not parse.
+        vendor: { type: string, maxLength: 512 }
+        source: { type: string, maxLength: 512 }
+        labels:
+          type: object
+          description: |
+            The OCI annotations that were kept -- a bounded allowlist of keys,
+            not everything the registry sent.
+          additionalProperties: { type: string }
+
+    ImageUpdateEvent:
+      type: object
+      description: |
+        One observed CHANGE. A pass that found everything unchanged writes
+        nothing, which is what keeps this a history rather than a log of checks.
+      required: [id, reference, observedAt, kind, checkStatus]
+      properties:
+        id: { type: integer, format: int64 }
+        reference: { type: string }
+        observedAt: { type: string, format: date-time }
+        kind: { $ref: "#/components/schemas/ImageEventKind" }
+        previousDigest: { type: string }
+        currentDigest: { type: string }
+        previousUpdateType: { $ref: "#/components/schemas/UpdateType" }
+        currentUpdateType: { $ref: "#/components/schemas/UpdateType" }
+        latestTag: { type: string }
+        checkStatus: { $ref: "#/components/schemas/CheckStatus" }
+        detail:
+          type: string
+          description: HarborMaster's own words, from a fixed set.
+
+    RegistryHealth:
+      type: object
+      description: |
+        One registry host's recent behaviour.
+
+        Kept per HOST because rate limits, outages, and backoff are properties of
+        an endpoint rather than of an image. It is also what lets a UI say
+        "updates are stale because this registry is rate-limiting us" instead of
+        showing a hundred individually failed images with no explanation.
+      required: [host, registryKind, images, consecutiveFailures, rateLimited]
+      properties:
+        host: { type: string }
+        registryKind: { $ref: "#/components/schemas/RegistryKind" }
+        images:
+          type: integer
+          description: How many references this host serves.
+        lastSuccessAt: { type: string, format: date-time }
+        lastFailureAt: { type: string, format: date-time }
+        consecutiveFailures: { type: integer }
+        availableAt:
+          type: string
+          format: date-time
+          description: |
+            When the host may be contacted again. Set by HarborMaster's backoff
+            and, when a registry sends one, by its own Retry-After.
+        lastDetail: { type: string }
+        rateLimited:
+          type: boolean
+          description: |
+            The most recent failure was a rate limit, which an operator should
+            read very differently from an outage.
+
+    ImageIntelSummary:
+      type: object
+      description: The dashboard aggregate.
+      properties:
+        images: { type: integer }
+        containers: { type: integer }
+        updatesAvailable: { type: integer }
+        containersAffected:
+          type: integer
+          description: |
+            Containers running an image with an update -- the number an operator
+            actually plans around.
+        byUpdateType:
+          type: object
+          additionalProperties: { type: integer }
+        byCheckStatus:
+          type: object
+          additionalProperties: { type: integer }
+        byRegistry:
+          type: object
+          description: Bounded to the twenty registries serving the most references.
+          additionalProperties: { type: integer }
+        checked:
+          type: integer
+          description: |
+            References looked up at least once. The gap between this and `images`
+            is the coverage a dashboard must not hide: an estate where nothing
+            has been checked is not an estate with no updates.
+        pending: { type: integer }
+        unsupported:
+          type: integer
+          description: |
+            References that will never be looked up, so a permanent gap in
+            coverage can be explained rather than shown as a failure.
+        lastCheckedAt: { type: string, format: date-time }
+        registries:
+          type: array
+          items: { $ref: "#/components/schemas/RegistryHealth" }
+
+    ImageIntelEngineStatus:
+      type: object
+      description: The collection scheduler's state.
+      properties:
+        enabled: { type: boolean }
+        dueNow:
+          type: integer
+          description: References past their next-check time.
+        running: { type: boolean }
+        sweepPending: { type: boolean }
+        lastSweepAt: { type: string, format: date-time }
+        lastChecked: { type: integer }
+        lastSkipped: { type: integer }
+        lastFailed: { type: integer }

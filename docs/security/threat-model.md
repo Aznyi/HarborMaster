@@ -136,6 +136,22 @@ process. Under R1 (no authentication) an attacker who can reach the port can
 also **disable a policy and hide non-compliance from the dashboard** — the
 definition and its history survive, but the report stops being trustworthy.
 
+### Outbound (initiated by HarborMaster)
+
+| Surface | Direction | Notes |
+| --- | --- | --- |
+| Registry manifest and tag-listing endpoints | **Outbound HTTPS** | Phase 6. Anonymous GETs only. **The first and only outbound egress in the product.** Destinations derive solely from image references the inventory holds |
+
+This is the boundary Phase 6 added, and it deserves stating plainly: HarborMaster
+now initiates connections to third parties it does not control, and parses their
+responses. The registry is treated as hostile input throughout — bounded before
+reading, decoded into a fixed shape, and never echoed into a log, an error, or a
+column.
+
+Turning `IMAGE_INTEL_ENABLED` off removes this surface entirely: no outbound
+request is made at all, which is the configuration an air-gapped or
+egress-restricted deployment wants.
+
 ### Not network-reachable
 
 Docker event stream (outbound), SQLite file, HMAC key file, embedded migrations.
@@ -289,6 +305,10 @@ Ordered by severity. These are accepted, not solved.
 | R11 | **Migration edits predating this version are undetectable.** Checksums are recorded from this release onward and backfilled for older rows | **Low** | Nothing can retroactively prove what an already-applied file contained; the evidence does not exist | Every edit from this version forward is detected and refuses the open |
 | R12 | **`diagnose` cannot read a database left with a hot write-ahead log by a crashed process**, because replaying it is a write and the diagnosis is read-only | **Low** | The read-only guarantee is worth more than reading in this one state; the filesystem-level findings still render | Start HarborMaster once to replay the log, then re-run; the condition is reported explicitly rather than as corruption |
 | R13 | **An integrity check that times out establishes nothing**, and startup continues | **Low** | Refusing on an *incomplete* check would turn a slow disk into an outage; a false-positive refusal is worse than a late diagnosis | Raise `DB_INTEGRITY_TIMEOUT`, or run `harbormaster diagnose`, which uses the full check with no startup pressure |
+| R18 | **HarborMaster initiates outbound connections to public registries.** An egress-restricted network may block them, and a network observer learns which images the estate runs | **Medium** | The feature cannot work without asking a registry, and the alternative — shipping a database of known images — would be worse and staler | `IMAGE_INTEL_ENABLED=false` removes the surface entirely; destinations are confined to hosts named by the inventory's own image references |
+| R19 | **A compromised or hostile registry serves HarborMaster arbitrary bytes.** It can report a false digest, a false tag list, or misleading annotations | **Medium** | Any client of a registry has this exposure, and HarborMaster's is read-only: the worst outcome is a wrong badge on a dashboard, not a changed container | Responses bounded and parsed into a fixed shape; digests COMPUTED rather than believed; annotations allowlisted, bounded and control-character free; no registry string reaches a log, an error, or a column |
+| R20 | **Update verdicts are advisory and can be wrong.** A publisher who reuses tags unconventionally, or a repository with more tags than the page budget, can produce a missed or mislabelled update | **Low** | Tag conventions are not standardised and cannot be inferred reliably; the parser is deliberately conservative and refuses more than it accepts | Missed updates are the chosen failure direction; a truncated listing reports `unknown` rather than `none`; the digest comparison is always available and always true |
+| R21 | **Anonymous rate limits are shared by egress address.** A busy host can exhaust a public registry's anonymous quota for everything behind the same address | **Low** | Authenticating would mean holding registry credentials, which is a larger risk than the one it solves | Bounded concurrency and batch size, jittered scheduling, per-host backoff, and `Retry-After` honoured; the whole feature can be disabled |
 | R15 | **Anyone who can reach the API can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Medium** | Follows from R1; the policy surface has no separate authentication because HarborMaster has none | The definition and every violation it found are retained, so the change is visible and reversible rather than destructive; loopback bind and an authenticating proxy |
 | R16 | **A policy is only as good as the configuration HarborMaster can see.** Capability rules evaluate declared `capAdd` and cannot see the daemon's default set; `networkAllowlist` evaluates attached networks and cannot distinguish `container:<id>` namespace sharing from having no network | **Medium** | The alternative is hardcoding a claim about a daemon HarborMaster has not asked, which would be confidently wrong rather than honestly narrow | Stated in each rule's catalogue description, in the violation's reason, and in the editor; the network rule fails closed on an empty attachment set |
 | R17 | **Compliance reflects the last inventory refresh, not the live host.** A container changed between refreshes is reported against stale configuration until the next pass | **Low** | Evaluating against the daemon on demand would put a Docker call behind an unauthenticated endpoint | A pass runs after every successful refresh and after a targeted refresh commits; the inventory generation is recorded on every violation |

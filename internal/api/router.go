@@ -46,6 +46,12 @@ type Server struct {
 	// against, so one configured value governs both what the API accepts and
 	// what the engine can be asked to evaluate.
 	policyCfg config.Policy
+
+	// imageIntel answers the image update endpoints, and imageCollector
+	// schedules a metadata collection pass. Both nil in a deployment with image
+	// intelligence disabled, which yields a 503 rather than a broken route.
+	imageIntel     ImageIntelReader
+	imageCollector ImageIntelCollector
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -137,6 +143,15 @@ type Options struct {
 	// PolicyConfig supplies the definition and note bounds.
 	PolicyConfig config.Policy
 
+	// ImageIntel answers the image update endpoints and ImageCollector
+	// schedules a metadata collection pass. Both nil in a deployment with image
+	// intelligence disabled, which yields a 503 rather than a broken route.
+	//
+	// Neither carries a registry destination. Nothing an API caller supplies
+	// becomes a network request: see image_intel_handlers.go.
+	ImageIntel     ImageIntelReader
+	ImageCollector ImageIntelCollector
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -180,6 +195,9 @@ func NewServer(opts Options) *Server {
 		policies:     opts.Policies,
 		policyEngine: opts.PolicyEngine,
 		policyCfg:    opts.PolicyConfig,
+
+		imageIntel:     opts.ImageIntel,
+		imageCollector: opts.ImageCollector,
 
 		now: now,
 
@@ -230,6 +248,7 @@ func (s *Server) routes() http.Handler {
 		APIPrefix + "/containers/{id}/raw": s.handleContainerRaw,
 		APIPrefix + "/images":              s.handleImages,
 		APIPrefix + "/images/{id}":         s.handleImageDetail,
+		APIPrefix + "/images/{id}/history": s.handleImageHistory,
 		APIPrefix + "/networks":            s.handleNetworks,
 		APIPrefix + "/volumes":             s.handleVolumes,
 		// Event history. The engine's status lives at /event-engine rather
@@ -352,6 +371,25 @@ func (s *Server) routes() http.Handler {
 	// request open across a thousand-container sweep.
 	mux.HandleFunc("POST "+APIPrefix+"/policy/evaluate", s.handlePolicyEvaluate)
 	mux.HandleFunc(APIPrefix+"/policy/evaluate", s.handleMethodNotAllowed("POST"))
+
+	// Image intelligence.
+	//
+	// Three reads and one write, and the write SCHEDULES a metadata collection
+	// pass -- it pulls nothing, changes no container, and takes no target of any
+	// kind. There is deliberately no endpoint that applies an update, and no
+	// parameter anywhere in this feature that becomes a network destination.
+	//
+	// GET ONLY, with no bare companion, for the same ServeMux reason as
+	// /events/stream: a bare "/images/updates" would match every method on that
+	// literal while "GET /images/{id}" matches GET on every segment -- neither
+	// contains the other, so registering both would panic at startup. A non-GET
+	// request to /images/updates still gets an honest 405 from the bare
+	// "/images/{id}" handler registered above.
+	mux.HandleFunc("GET "+APIPrefix+"/images/updates", s.handleImageUpdates)
+
+	// POST /images/refresh is strictly more specific than the bare
+	// "/images/{id}" pattern, so this pair resolves without ambiguity.
+	mux.HandleFunc("POST "+APIPrefix+"/images/refresh", s.handleImageRefresh)
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

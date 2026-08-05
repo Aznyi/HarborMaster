@@ -75,6 +75,12 @@ type DB struct {
 	// while staying compliant, and comply while never having drifted.
 	Policies *PolicyRepository
 
+	// ImageIntel holds what registries report about the images the inventory
+	// references: digests, update availability, and per-host health. It reads
+	// registries over HTTPS and stores what it learned; nothing behind it can
+	// pull, push, or remove an image.
+	ImageIntel *ImageIntelRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -279,6 +285,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		DockerEvents: &DockerEventRepository{db: sqlDB},
 		Drift:        &DriftRepository{db: sqlDB},
 		Policies:     &PolicyRepository{db: sqlDB},
+		ImageIntel:   &ImageIntelRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

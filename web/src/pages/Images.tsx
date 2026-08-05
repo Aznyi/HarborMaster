@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 
 import { useImagePage } from "../hooks/useContainers";
 import { PageIntro } from "../components/PageIntro";
@@ -27,6 +28,11 @@ export function Images() {
         title="Images"
         description="Metadata for the images the inventoried containers run. HarborMaster observes these; it does not pull, build, or remove them."
       />
+      <p className="text-sm text-content-muted">
+        <Link to="/images/updates" className="text-accent hover:underline">
+          Check which of these have a newer version published
+        </Link>
+      </p>
       <ImageTable images={images} onPageChange={setPage} />
     </div>
   );
@@ -94,7 +100,17 @@ function ImageTable({
                   ) : (
                     <span className="text-content-muted">&lt;untagged&gt;</span>
                   )}
-                  <p className="font-mono text-xs text-content-muted">{usage.image.shortId}</p>
+                  {/*
+                    The short id is the link, so the row reaches the detail view
+                    without turning every tag into a separate destination for the
+                    same image.
+                  */}
+                  <Link
+                    to={`/images/${usage.image.id}`}
+                    className="font-mono text-xs text-accent hover:underline"
+                  >
+                    {usage.image.shortId}
+                  </Link>
                 </td>
                 <td className="px-4 py-3">
                   {usage.image.repoDigests.length > 0 ? (

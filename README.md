@@ -26,6 +26,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Docker events](#docker-events)
 - [Configuration drift](#configuration-drift)
 - [Policy engine](#policy-engine)
+- [Image intelligence](#image-intelligence)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -826,6 +827,139 @@ open for minutes and occupy the single writer at will; the request is coalesced
 through the same queue the scheduled passes use, so calling it in a loop
 produces one pass rather than a backlog.
 
+## Image intelligence
+
+HarborMaster checks each image the inventory references against its registry and
+reports whether a newer version is published.
+
+**It reads. It never fetches.** There is no pull, no push, no delete, no prune,
+and no apply — an update is reported, and acting on it is your job with your own
+tooling. An API test asserts the absence of any mutation route directly.
+
+### This is the only place HarborMaster talks to the internet
+
+Every other part of HarborMaster reads a local Docker socket and a local SQLite
+file. This one makes anonymous HTTPS GETs to registry manifest and tag-listing
+endpoints, which makes SSRF the dominant risk of the feature. The defences are
+layered, and each is independent:
+
+1. **Destinations come only from image references.** A host reaches the client
+   only through `domain.NormalizeImageRef`, which refuses IP literals, ports,
+   `localhost`, single-label names, userinfo, and anything that is not purely a
+   hostname. No config value, API parameter, or database column supplies one, and
+   `POST /images/refresh` takes no target at all.
+2. **The resolved address is checked at dial time.** The dialler inspects the
+   actual IP the socket is about to use and refuses loopback, private,
+   link-local, unique-local, carrier-grade NAT, multicast, and reserved ranges.
+   Because it runs on the socket address rather than on the name, **DNS
+   rebinding cannot get past it**.
+3. **Redirects are refused outright.** A redirect is a registry-controlled URL,
+   which is exactly the input this must not accept. Manifest and tag endpoints do
+   not redirect; blob endpoints do, and HarborMaster never fetches a blob.
+4. **No proxy.** Proxy environment variables are ignored, so the destination is
+   always the registry itself — a proxy would necessarily be an internal address,
+   which defence 2 exists to refuse.
+5. **HTTPS only, verified**, with a TLS 1.2 floor and no setting that disables
+   any of it.
+
+An architecture test confines `net/http` and `crypto/tls` to the packages that
+may have them, so a second HTTP client built elsewhere — which would have none of
+these defences — fails the build.
+
+### It holds no credentials
+
+Every lookup is anonymous. HarborMaster reads no Docker config, no keychain, and
+no credential helper, and accepts none through configuration. A private
+repository reports `unauthorized`: an honest statement that the answer is
+unavailable, rather than a reason to start handling your registry passwords. The
+bearer tokens it negotiates for *public* repositories are pull-scoped, held in
+memory for minutes, and never written to the database or a log.
+
+### A tag is not a version
+
+Most tags are not semantic versions, and treating them as though they were
+produces confident nonsense. So parsing is conservative and **refuses more than
+it accepts**:
+
+- **Channel tags carry no version.** `latest`, `stable`, `main`, `edge` and the
+  rest are never version-compared. Without that rule, a repository that also
+  publishes `2.0` would report "a major update is available" for every container
+  tracking `latest` — which is backwards, since `latest` is usually already the
+  newest thing.
+- **Comparability is narrow.** Two tags compare only within the same family: the
+  same `v` prefix, the same number of components, and the same variant suffix.
+  `1.25` and `1.25.3` do not compare — `1.25` is a floating tag that already
+  points at the newest patch, so offering `1.25.3` as its update would be advice
+  to pin something you deliberately left floating. `1.25-alpine` and `1.26` do
+  not compare either; they are different images.
+- **A calendar tag is not a major version.** `20240115` → `20240201` is reported
+  as an update of *undetermined* size, because calling it "major" would assert a
+  breaking change nobody claimed.
+
+When no version comparison is possible, the fallback is always available and
+always true: **the digest**. A tag that resolves to different content than the
+one you are running has been republished, whatever it is called.
+
+| Verdict | Meaning |
+| --- | --- |
+| `none` | The tag resolves to the image in use, and no newer tag exists in its series |
+| `digest` | The same tag now points at different content — the publisher republished it |
+| `patch` / `minor` / `major` | A newer tag exists in the same series |
+| `prerelease` | The only newer tag is a release candidate, not a release |
+| `unknown` | **HarborMaster could not determine whether an update exists** |
+
+`unknown` is not a small update — it is the absence of an answer, and the UI
+colours it accordingly. A tag listing that hit its page budget reports `unknown`
+rather than `none`, because a listing that stopped early has not established that
+no newer tag exists.
+
+### "No updates" is not "not checked"
+
+Every reference records whether it has ever been looked up. Without that,
+*no updates for this image* is ambiguous between "it is current" and "nothing has
+asked" — and telling an operator their estate is up to date when most of it was
+never examined is the worst thing this feature could do. The dashboard states
+coverage beside the update count, and a reference that can never be checked (a
+local registry, an address literal) is tracked as `unsupported` so the gap is
+explained rather than invisible.
+
+**A failed lookup never overwrites a good answer.** If a registry is unreachable,
+the previous digest and verdict remain the best knowledge available; blanking
+them would turn "we could not ask" into "no update is available", which is a
+different and false claim.
+
+### Registry health is tracked per host
+
+Rate limits and outages are properties of an endpoint, not of an image. Keeping
+health per host means a rate-limited Docker Hub backs off every Docker Hub
+reference at once — politer to the registry and faster to recover — and it is what
+lets the UI say *"updates are stale because this registry is rate-limiting us"*
+instead of showing a hundred individually failed images with no explanation.
+
+A registry's own `Retry-After` is honoured, bounded at six hours so a hostile or
+misconfigured value delays a check rather than cancelling it.
+
+### Registry support is a small interface
+
+Docker Hub, GHCR, and any registry speaking the OCI distribution API. The
+protocol is identical everywhere; what differs is host defaulting, repository
+shape, tag-listing page size, and whether listing exists at all — so that, and
+only that, is what the `Provider` interface carries. Adding a registry is adding
+a provider and registering it; nothing else in the codebase changes.
+
+### Work is bounded everywhere
+
+Concurrent requests, references per pass, tag pages, retries, response sizes,
+manifest entries, annotation count and length, and the token cache all have caps.
+The peer on the other end is a third party HarborMaster must stay welcome at, and
+a client that hammers a public registry gets everyone sharing its egress address
+rate-limited.
+
+`POST /images/refresh` is **asynchronous** and answers 202. A synchronous pass
+would let an unauthenticated caller hold a request open across hundreds of
+registry lookups and generate outbound traffic on demand; the request is
+coalesced, so calling it in a loop produces one pass rather than a backlog.
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -1059,6 +1193,13 @@ for the full list with defaults.
 | `HARBORMASTER_POLICY_MAX_VALUES_PER_RULE` | `32` | Bounds the pattern matches one rule performs |
 | `HARBORMASTER_POLICY_RETENTION_AGE` | `2160h` | How long resolved violations are kept; open ones are never pruned |
 | `HARBORMASTER_POLICY_WRITE_RATE_LIMIT` | `60`/min | Policy writes get their own budget; a write is one small transaction, not a Docker sweep |
+| `HARBORMASTER_IMAGE_INTEL_ENABLED` | `true` | Image update discovery. **`false` makes no outbound request at all** |
+| `HARBORMASTER_IMAGE_INTEL_REFRESH_INTERVAL` | `6h` | How long a successful answer stays fresh |
+| `HARBORMASTER_IMAGE_INTEL_COLLECT_INTERVAL` | `5m` | How often the due set is drained; `0` collects only on request |
+| `HARBORMASTER_IMAGE_INTEL_MAX_CONCURRENT_REQUESTS` | `4` | Simultaneous registry requests, process-wide |
+| `HARBORMASTER_IMAGE_INTEL_MAX_REFERENCES_PER_PASS` | `50` | Bounds one batch, spreading a large estate over time |
+| `HARBORMASTER_IMAGE_INTEL_MAX_TAG_PAGES` | `5` | Past it a listing is *incomplete*, never silently "up to date" |
+| `HARBORMASTER_IMAGE_INTEL_FAILURE_BACKOFF` | `15m` | Doubling, capped, jittered; a registry's `Retry-After` wins |
 | `HARBORMASTER_INVENTORY_ENABLED` | `true` | Turn the inventory engine on or off |
 | `HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP` | `true` | Collect once at boot |
 | `HARBORMASTER_INVENTORY_REFRESH_INTERVAL` | `60s` | Periodic refresh; `0` disables it |

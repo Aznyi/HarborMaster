@@ -356,27 +356,6 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleImageDetail returns one image.
-func (s *Server) handleImageDetail(w http.ResponseWriter, r *http.Request) {
-	if s.images == nil {
-		writeError(w, r, s.logger, http.StatusServiceUnavailable, CodeDisabled,
-			"inventory is not configured")
-		return
-	}
-
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(w, r, s.logger, http.StatusBadRequest, CodeInvalidRequest, "an image id is required")
-		return
-	}
-
-	usage, err := s.images.Get(r.Context(), id)
-	if err != nil {
-		s.writeLookupError(w, r, err, "image")
-		return
-	}
-	writeJSON(w, r, s.logger, http.StatusOK, usage)
-}
-
 // handleNetworks lists networks.
 func (s *Server) handleNetworks(w http.ResponseWriter, r *http.Request) {
 	if s.networks == nil {

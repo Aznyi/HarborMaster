@@ -235,6 +235,61 @@ const (
 	MaxPolicyNameBytes              = 512
 	MaxPolicyDescriptionBytes       = 8192
 	MaxPolicyNoteBytes              = 4096
+
+	// Image intelligence defaults.
+	//
+	// These are the numbers that decide how HarborMaster behaves as a CLIENT of
+	// somebody else's registry, which is the one resource it does not own. They
+	// are deliberately conservative: an update that arrives an hour late costs
+	// nothing, and a client that hammers Docker Hub gets rate-limited for
+	// everyone sharing the egress address.
+	DefaultImageIntelEnabled          = true
+	DefaultImageIntelCollectOnStartup = true
+	// DefaultImageIntelRefreshInterval is how long a successful answer stays
+	// fresh. Publishers do not ship several times an hour, and a 6-hour cadence
+	// over a thousand images is a handful of requests a minute.
+	DefaultImageIntelRefreshInterval = 6 * time.Hour
+	// DefaultImageIntelCollectInterval is how often the due set is drained. Much
+	// shorter than the refresh interval, because it processes a bounded BATCH:
+	// the pair is what spreads a large estate over time instead of bursting.
+	DefaultImageIntelCollectInterval = 5 * time.Minute
+	// DefaultImageIntelMaxConcurrentRequests bounds simultaneous registry
+	// requests across the whole process.
+	DefaultImageIntelMaxConcurrentRequests = 4
+	// DefaultImageIntelMaxReferencesPerPass bounds one batch.
+	DefaultImageIntelMaxReferencesPerPass = 50
+	// DefaultImageIntelMaxTrackedReferences bounds how many distinct references
+	// are tracked at all.
+	DefaultImageIntelMaxTrackedReferences = 10000
+	// DefaultImageIntelMaxTagPages bounds a tag listing. Past it the result is
+	// reported as INCOMPLETE rather than as "no update", because a listing that
+	// stopped early has established nothing.
+	DefaultImageIntelMaxTagPages    = 5
+	DefaultImageIntelRequestTimeout = 15 * time.Second
+	DefaultImageIntelMaxAttempts    = 3
+	DefaultImageIntelRetryBackoff   = 500 * time.Millisecond
+	// DefaultImageIntelFailureBackoff and its cap bound how quickly a failing
+	// reference or host is retried.
+	DefaultImageIntelFailureBackoff    = 15 * time.Minute
+	DefaultImageIntelMaxFailureBackoff = 24 * time.Hour
+	// DefaultImageIntelUnsupportedInterval is how often a reference that cannot
+	// be looked up is reconsidered. Long, because the answer almost never
+	// changes -- but not never, since a private repository can become public.
+	DefaultImageIntelUnsupportedInterval = 24 * time.Hour
+	DefaultImageIntelHistoryRetention    = 90 * 24 * time.Hour
+	DefaultImageIntelPruneInterval       = 6 * time.Hour
+
+	// Image intelligence bounds. The maximums on concurrency and batch size are
+	// the ones that matter: they are what stops a misconfiguration from turning
+	// HarborMaster into something a registry blocks.
+	MinImageIntelRefreshInterval    = 5 * time.Minute
+	MinImageIntelCollectInterval    = 30 * time.Second
+	MinImageIntelPruneInterval      = 1 * time.Minute
+	MaxImageIntelConcurrentRequests = 16
+	MaxImageIntelReferencesPerPass  = 500
+	MaxImageIntelTrackedReferences  = 100000
+	MaxImageIntelTagPages           = 50
+	MaxImageIntelAttempts           = 5
 	MaxPolicyWriteRateLimit         = 6000.0
 	MaxPolicyWriteRateBurst         = 1000
 
@@ -529,6 +584,67 @@ type Policy struct {
 	WriteRateBurst int
 }
 
+// ImageIntel holds settings for image intelligence and update discovery.
+//
+// This is the section that governs HarborMaster's ONLY outbound network egress.
+// Every bound here is a politeness control toward a third party as much as a
+// resource control for HarborMaster: a registry that decides HarborMaster is
+// abusive rate-limits every client sharing the egress address, not just this
+// one.
+//
+// Nothing here can configure a registry HOST. Destinations come only from image
+// references the inventory already holds, which is what keeps the SSRF surface
+// closed. There is likewise no credential setting: every lookup is anonymous by
+// design, and a private repository reports "unauthorized" rather than becoming a
+// reason to start handling secrets.
+type ImageIntel struct {
+	// Enabled turns the engine on or off. When false nothing is looked up, the
+	// endpoints report the feature disabled, and NO OUTBOUND REQUEST IS EVER
+	// MADE -- which is the setting an air-gapped deployment wants.
+	Enabled bool
+
+	// CollectOnStartup drains the due set once at boot.
+	CollectOnStartup bool
+
+	// RefreshInterval is how long a successful answer stays fresh.
+	RefreshInterval time.Duration
+	// CollectInterval is how often the due set is drained. Much shorter than
+	// RefreshInterval because each pass processes a bounded batch; the pair is
+	// what spreads a large estate over time instead of bursting.
+	CollectInterval time.Duration
+
+	// MaxConcurrentRequests bounds simultaneous registry requests across the
+	// whole process.
+	MaxConcurrentRequests int
+	// MaxReferencesPerPass bounds one batch.
+	MaxReferencesPerPass int
+	// MaxTrackedReferences bounds how many distinct references are tracked.
+	MaxTrackedReferences int
+	// MaxTagPages bounds a tag listing. Past it the result is reported as
+	// INCOMPLETE rather than as "no update available".
+	MaxTagPages int
+
+	// RequestTimeout bounds one registry request, MaxAttempts how many times a
+	// transient failure is retried within it, and RetryBackoff the base delay
+	// between those attempts.
+	RequestTimeout time.Duration
+	MaxAttempts    int
+	RetryBackoff   time.Duration
+
+	// FailureBackoff is the base delay before a failing reference or host is
+	// retried, doubling each time up to MaxFailureBackoff.
+	FailureBackoff    time.Duration
+	MaxFailureBackoff time.Duration
+	// UnsupportedInterval is how often a reference that cannot be looked up is
+	// reconsidered.
+	UnsupportedInterval time.Duration
+
+	// HistoryRetention is how long an observed change is kept, and
+	// PruneInterval how often that retention runs.
+	HistoryRetention time.Duration
+	PruneInterval    time.Duration
+}
+
 // Drift holds settings for configuration drift detection.
 //
 // Drift compares a container's CURRENT configuration against its baseline
@@ -607,6 +723,7 @@ type Config struct {
 	Snapshots   Snapshots
 	Drift       Drift
 	Policy      Policy
+	ImageIntel  ImageIntel
 }
 
 var (
@@ -861,6 +978,45 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.ImageIntel.Enabled, err = boolVar(lookup, "IMAGE_INTEL_ENABLED", DefaultImageIntelEnabled)
+	collect(err)
+	cfg.ImageIntel.CollectOnStartup, err = boolVar(lookup, "IMAGE_INTEL_COLLECT_ON_STARTUP", DefaultImageIntelCollectOnStartup)
+	collect(err)
+	cfg.ImageIntel.RefreshInterval, err = durationVar(lookup, "IMAGE_INTEL_REFRESH_INTERVAL", DefaultImageIntelRefreshInterval)
+	collect(err)
+	cfg.ImageIntel.CollectInterval, err = durationVar(lookup, "IMAGE_INTEL_COLLECT_INTERVAL", DefaultImageIntelCollectInterval)
+	collect(err)
+	cfg.ImageIntel.RequestTimeout, err = durationVar(lookup, "IMAGE_INTEL_REQUEST_TIMEOUT", DefaultImageIntelRequestTimeout)
+	collect(err)
+	cfg.ImageIntel.RetryBackoff, err = durationVar(lookup, "IMAGE_INTEL_RETRY_BACKOFF", DefaultImageIntelRetryBackoff)
+	collect(err)
+	cfg.ImageIntel.FailureBackoff, err = durationVar(lookup, "IMAGE_INTEL_FAILURE_BACKOFF", DefaultImageIntelFailureBackoff)
+	collect(err)
+	cfg.ImageIntel.MaxFailureBackoff, err = durationVar(lookup, "IMAGE_INTEL_MAX_FAILURE_BACKOFF", DefaultImageIntelMaxFailureBackoff)
+	collect(err)
+	cfg.ImageIntel.UnsupportedInterval, err = durationVar(lookup, "IMAGE_INTEL_UNSUPPORTED_INTERVAL", DefaultImageIntelUnsupportedInterval)
+	collect(err)
+	cfg.ImageIntel.HistoryRetention, err = durationVar(lookup, "IMAGE_INTEL_HISTORY_RETENTION", DefaultImageIntelHistoryRetention)
+	collect(err)
+	cfg.ImageIntel.PruneInterval, err = durationVar(lookup, "IMAGE_INTEL_PRUNE_INTERVAL", DefaultImageIntelPruneInterval)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"IMAGE_INTEL_MAX_CONCURRENT_REQUESTS", DefaultImageIntelMaxConcurrentRequests, &cfg.ImageIntel.MaxConcurrentRequests},
+		{"IMAGE_INTEL_MAX_REFERENCES_PER_PASS", DefaultImageIntelMaxReferencesPerPass, &cfg.ImageIntel.MaxReferencesPerPass},
+		{"IMAGE_INTEL_MAX_TRACKED_REFERENCES", DefaultImageIntelMaxTrackedReferences, &cfg.ImageIntel.MaxTrackedReferences},
+		{"IMAGE_INTEL_MAX_TAG_PAGES", DefaultImageIntelMaxTagPages, &cfg.ImageIntel.MaxTagPages},
+		{"IMAGE_INTEL_MAX_ATTEMPTS", DefaultImageIntelMaxAttempts, &cfg.ImageIntel.MaxAttempts},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -944,8 +1100,73 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Snapshots.validate()...)
 	errs = append(errs, c.Drift.validate()...)
 	errs = append(errs, c.Policy.validate()...)
+	errs = append(errs, c.ImageIntel.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the image intelligence settings.
+//
+// Validated even when the engine is disabled, for the same reason the drift and
+// policy settings are: a configuration error that only surfaces the day someone
+// flips the feature on is a worse failure than one caught at startup.
+func (i ImageIntel) validate() []error {
+	var errs []error
+
+	if i.RefreshInterval < MinImageIntelRefreshInterval {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_REFRESH_INTERVAL must be at least %s",
+			envPrefix, MinImageIntelRefreshInterval))
+	}
+	// Zero is the documented way to disable the collection tick, leaving the
+	// engine to run only when asked. A tiny non-zero one would poll registries
+	// continuously, which is how a client gets blocked.
+	if i.CollectInterval != 0 && i.CollectInterval < MinImageIntelCollectInterval {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_COLLECT_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinImageIntelCollectInterval))
+	}
+	if i.PruneInterval < MinImageIntelPruneInterval {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinImageIntelPruneInterval))
+	}
+	if i.RequestTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_REQUEST_TIMEOUT must be positive", envPrefix))
+	}
+	if i.RetryBackoff <= 0 {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_RETRY_BACKOFF must be positive", envPrefix))
+	}
+	if i.FailureBackoff <= 0 {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_FAILURE_BACKOFF must be positive", envPrefix))
+	}
+	if i.MaxFailureBackoff < i.FailureBackoff {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_MAX_FAILURE_BACKOFF must be at least %sIMAGE_INTEL_FAILURE_BACKOFF",
+			envPrefix, envPrefix))
+	}
+	if i.UnsupportedInterval <= 0 {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_UNSUPPORTED_INTERVAL must be positive", envPrefix))
+	}
+	// Zero keeps history forever, which is valid but unbounded. Negative is not
+	// a way to do anything.
+	if i.HistoryRetention < 0 {
+		errs = append(errs, fmt.Errorf("%sIMAGE_INTEL_HISTORY_RETENTION must not be negative", envPrefix))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"IMAGE_INTEL_MAX_CONCURRENT_REQUESTS", i.MaxConcurrentRequests, 1, MaxImageIntelConcurrentRequests},
+		{"IMAGE_INTEL_MAX_REFERENCES_PER_PASS", i.MaxReferencesPerPass, 1, MaxImageIntelReferencesPerPass},
+		{"IMAGE_INTEL_MAX_TRACKED_REFERENCES", i.MaxTrackedReferences, 1, MaxImageIntelTrackedReferences},
+		{"IMAGE_INTEL_MAX_TAG_PAGES", i.MaxTagPages, 1, MaxImageIntelTagPages},
+		{"IMAGE_INTEL_MAX_ATTEMPTS", i.MaxAttempts, 1, MaxImageIntelAttempts},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the policy settings.

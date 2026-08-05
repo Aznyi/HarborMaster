@@ -47,6 +47,9 @@ const engineModule = "github.com/moby/moby/v2"
 // adapterPackage is the only directory permitted to import the SDK.
 const adapterPackage = "internal/docker"
 
+// adapterModule is that package's import path.
+const adapterModule = "github.com/Aznyi/HarborMaster/internal/docker"
+
 // TestDeprecatedDockerModuleIsNotImported fails if the retired root module
 // reappears anywhere, including in tests.
 func TestDeprecatedDockerModuleIsNotImported(t *testing.T) {
@@ -197,6 +200,103 @@ func TestDiagnosticsAreNotReachableOverHTTP(t *testing.T) {
 			"\tthe diagnostics report host paths, free space, and schema detail, and the API is "+
 			"unauthenticated; it must stay a command that requires shell access, not an endpoint",
 			imp.file, imp.path)
+	}
+}
+
+// registryPackage is the only directory permitted to open an outbound network
+// connection.
+const registryPackage = "internal/registry"
+
+// registryModule is that package's import path.
+const registryModule = "github.com/Aznyi/HarborMaster/internal/registry"
+
+// egressPackages are the standard-library packages a caller needs in order to
+// build an HTTP client.
+//
+// net is deliberately ABSENT, and the omission is worth stating rather than
+// leaving to be discovered: net is also the standard library's address-parsing
+// package, and this check reads import declarations rather than call sites, so
+// it cannot tell net.ParseIP from net.Dial. Including it would flag
+// internal/domain's own SSRF host validation, and a test that cries wolf gets
+// suppressed.
+//
+// The check therefore covers the packages that are needed to CONSTRUCT a
+// client, which is the thing that would bypass the guarded transport. A raw
+// net.Dial to a registry would slip past it -- that is the honest limit of an
+// import-level rule, and the reason the address guard in internal/registry is
+// enforced at dial time rather than relying on this.
+var egressPackages = []string{"net/http", "crypto/tls"}
+
+// egressAllowed are the directories permitted to import them.
+//
+// internal/registry is the guarded client. internal/api and internal/healthcheck
+// serve and probe HTTP respectively -- both INBOUND or loopback, neither a path
+// to an arbitrary destination. cmd/harbormaster wires the server together.
+var egressAllowed = map[string]bool{
+	"internal/registry":    true,
+	"internal/api":         true,
+	"internal/healthcheck": true,
+	"cmd/harbormaster":     true,
+}
+
+// TestOutboundNetworkAccessIsConfinedToTheRegistryClient fails if a package
+// outside the allowed set gains the ability to open a connection.
+//
+// Phase 6 gave HarborMaster its first outbound egress, and the entire SSRF
+// defence rests on that egress going through one guarded transport: a dialler
+// that refuses non-public addresses, a redirect policy that refuses everything,
+// no proxy, and HTTPS only.
+//
+// A second HTTP client built somewhere else would have none of that, and would
+// be an easy thing to add without noticing what it bypassed. This test is what
+// makes that visible in review.
+func TestOutboundNetworkAccessIsConfinedToTheRegistryClient(t *testing.T) {
+	for _, imp := range allImports(t) {
+		dir := filepath.ToSlash(filepath.Dir(imp.rel))
+		if egressAllowed[dir] {
+			continue
+		}
+		// Tests may reach for a loopback server to exercise a handler.
+		if strings.HasSuffix(imp.file, "_test.go") {
+			continue
+		}
+
+		for _, pkg := range egressPackages {
+			if imp.path != pkg {
+				continue
+			}
+			t.Errorf("%s imports %s\n"+
+				"\tHarborMaster's only outbound egress goes through %s, whose transport refuses "+
+				"non-public addresses, refuses every redirect, ignores proxies, and requires HTTPS; "+
+				"a client built elsewhere would have none of those defences",
+				imp.file, imp.path, registryPackage)
+		}
+	}
+}
+
+// TestRegistryClientDoesNotImportTheDockerAdapter fails if the two boundaries
+// are joined.
+//
+// They answer different questions from different sources -- one reads a
+// privileged local socket, the other reads a public third party -- and the
+// blast radius of a bug in either is contained by their staying apart. A
+// registry client that could reach docker.Runtime would also be a path from a
+// hostile registry response toward the Docker socket.
+func TestRegistryClientDoesNotImportTheDockerAdapter(t *testing.T) {
+	for _, imp := range allImports(t) {
+		dir := filepath.ToSlash(filepath.Dir(imp.rel))
+
+		if dir == registryPackage && strings.HasPrefix(imp.path, adapterModule) {
+			t.Errorf("%s imports %s\n"+
+				"\tthe registry client reads an untrusted third party and must not be able to "+
+				"reach the privileged Docker socket",
+				imp.file, imp.path)
+		}
+		if dir == adapterPackage && strings.HasPrefix(imp.path, registryModule) {
+			t.Errorf("%s imports %s\n"+
+				"\tthe Docker adapter must not gain outbound network egress",
+				imp.file, imp.path)
+		}
 	}
 }
 

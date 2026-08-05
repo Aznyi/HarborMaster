@@ -8,6 +8,8 @@ import { Containers } from "./pages/Containers";
 import { Dashboard } from "./pages/Dashboard";
 import { Drift } from "./pages/Drift";
 import { Events } from "./pages/Events";
+import { ImageDetailPage } from "./pages/ImageDetail";
+import { ImageUpdates } from "./pages/ImageUpdates";
 import { Images } from "./pages/Images";
 import { ContainerPolicy } from "./pages/ContainerPolicy";
 import { Policies } from "./pages/Policies";
@@ -32,6 +34,8 @@ export function App() {
         <Route path="/containers" element={<Containers />} />
         <Route path="/containers/:id" element={<ContainerDetailPage />} />
         <Route path="/images" element={<Images />} />
+        <Route path="/images/updates" element={<ImageUpdates />} />
+        <Route path="/images/:id" element={<ImageDetailPage />} />
         <Route path="/snapshots" element={<Snapshots />} />
         <Route path="/snapshots/:id" element={<SnapshotDetailPage />} />
         <Route path="/snapshots/:id/readiness" element={<SnapshotReadinessPage />} />

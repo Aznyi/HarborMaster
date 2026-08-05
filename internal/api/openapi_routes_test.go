@@ -67,6 +67,9 @@ var routedPaths = []string{
 	APIPrefix + "/health",
 	APIPrefix + "/images",
 	APIPrefix + "/images/{id}",
+	APIPrefix + "/images/{id}/history",
+	APIPrefix + "/images/refresh",
+	APIPrefix + "/images/updates",
 	APIPrefix + "/inventory",
 	APIPrefix + "/inventory/filters",
 	APIPrefix + "/inventory/refresh",
@@ -90,6 +93,11 @@ var routedPaths = []string{
 // There is no restore, rollback, or apply path, and this is the list that would
 // have to change for one to appear. Phase 3 records configuration and validates
 // whether it could be restored; it does not restore.
+//
+// Nor is there an image PULL, delete, prune, or apply path. Phase 6 reads
+// registries to discover that a newer image exists; downloading or applying one
+// is an operator's job with their own tooling, and adding a route that did it
+// would have to be added to this literal in a diff a reviewer sees.
 //
 // Nor is there a policy ENFORCE, apply, or remediate path. Phase 5 checks
 // configuration against administrator-defined rules and reports what fails; it
@@ -139,7 +147,9 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 		// The two POST-only paths. Everything else answers GET.
 		method := http.MethodGet
 		switch pattern {
-		case APIPrefix + "/inventory/refresh", APIPrefix + "/policy/evaluate":
+		case APIPrefix + "/inventory/refresh",
+			APIPrefix + "/policy/evaluate",
+			APIPrefix + "/images/refresh":
 			method = http.MethodPost
 		}
 

@@ -47,6 +47,13 @@ import type {
   OperatorStatus,
 } from "./driftTypes";
 import type {
+  ImageDetail,
+  ImageHistoryResponse,
+  ImageRefreshAccepted,
+  ImageUpdateQuery,
+  ImageUpdatesResponse,
+} from "./imageTypes";
+import type {
   ContainerPolicy,
   PolicyDefinition,
   PolicyEvaluateAccepted,
@@ -797,4 +804,107 @@ export function evaluatePolicies(
   options?: RequestOptions,
 ): Promise<PolicyEvaluateAccepted> {
   return request<PolicyEvaluateAccepted>("/policy/evaluate", options, "POST", {});
+}
+
+/* ----------------------------------------------------- image intelligence -- */
+
+/**
+ * Image intelligence.
+ *
+ * Three reads and one write, and the write SCHEDULES a metadata collection
+ * pass. There is deliberately no function here that pulls, deletes, prunes, or
+ * applies an update — HarborMaster has no such capability and the API exposes no
+ * such endpoint.
+ *
+ * # No destination crosses this boundary
+ *
+ * None of these functions accepts a registry, a host, a URL, or a scheme, and
+ * `refreshImageMetadata` takes no argument at all. Registry destinations come
+ * only from image references the inventory already holds.
+ */
+
+/** Builds the updates list query string from closed vocabularies. */
+function buildImageUpdateQuery(query: ImageUpdateQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.search) params.set("search", query.search);
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  // Sent only when explicitly set, so the server's own default stands otherwise
+  // and the two cannot disagree about what "default" means.
+  if (query.updatesOnly !== undefined) {
+    params.set("updatesOnly", String(query.updatesOnly));
+  }
+  if (query.inUseOnly !== undefined) {
+    params.set("inUseOnly", String(query.inUseOnly));
+  }
+
+  for (const update of query.update ?? []) params.append("update", update);
+  for (const status of query.status ?? []) params.append("status", status);
+  // A registry filter narrows the stored column. It is matched exactly against
+  // a value HarborMaster itself derived, and cannot introduce a destination.
+  for (const registry of query.registry ?? []) params.append("registry", registry);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/images/updates */
+export function listImageUpdates(
+  query: ImageUpdateQuery = {},
+  options?: RequestOptions,
+): Promise<ImageUpdatesResponse> {
+  return request<ImageUpdatesResponse>(
+    `/images/updates${buildImageUpdateQuery(query)}`,
+    options,
+  );
+}
+
+/**
+ * GET /api/v1/images/{id}
+ *
+ * Returns the local image together with what the registry reports about every
+ * reference resolving to it. A strict superset of the pre-existing response.
+ */
+export function getImageDetail(
+  id: string,
+  options?: RequestOptions,
+): Promise<ImageDetail> {
+  return request<ImageDetail>(`/images/${encodeURIComponent(id)}`, options);
+}
+
+/** GET /api/v1/images/{id}/history */
+export function getImageHistory(
+  id: string,
+  page = 1,
+  pageSize = 25,
+  options?: RequestOptions,
+): Promise<ImageHistoryResponse> {
+  const params = new URLSearchParams();
+  if (page > 1) params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+
+  return request<ImageHistoryResponse>(
+    `/images/${encodeURIComponent(id)}/history?${params.toString()}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/images/refresh
+ *
+ * Schedules a metadata collection pass and returns once it is *accepted*, not
+ * once it finishes: the server answers 202 and the pass runs in the background,
+ * bounded by the same concurrency limits every scheduled pass uses.
+ *
+ * **It takes no argument, and that is deliberate.** There is no target, no
+ * registry, and no reference — the pass covers whatever the inventory already
+ * holds.
+ */
+export function refreshImageMetadata(
+  options?: RequestOptions,
+): Promise<ImageRefreshAccepted> {
+  return request<ImageRefreshAccepted>("/images/refresh", options, "POST");
 }

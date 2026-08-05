@@ -143,6 +143,44 @@ choice: two metacharacters, no construct whose cost is non-obvious, and a
 matcher short enough to reason about in full. Nothing in HarborMaster compiles a
 caller-supplied regular expression.
 
+## 3c. Image intelligence and outbound egress
+
+Phase 6 gave HarborMaster its FIRST outbound network connection. Everything
+before it read a local Docker socket and a local SQLite file; this reads a public
+third party, which changes the shape of the threat model rather than adding to
+it.
+
+The capability is narrow: anonymous HTTPS GETs against registry manifest and
+tag-listing endpoints. It cannot pull, push, delete, or prune, it holds no
+credentials, and it has no dependency on `internal/docker` in either direction.
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| Destinations come only from image references | `domain.NormalizeImageRef` refuses IP literals, ports, localhost, single-label names, userinfo, and anything that is not purely a hostname. No config value, API parameter, or column supplies a host | `internal/domain/registry.go` |
+| The resolved ADDRESS is checked at dial time | `net.Dialer.Control` refuses loopback, private, link-local, unique-local, CGNAT, multicast and reserved ranges on the socket address, so DNS rebinding cannot get past it | `internal/registry/transport.go` |
+| Redirects are refused outright | `CheckRedirect` always errors. A redirect is a registry-controlled URL; blob endpoints redirect and are never fetched | `refuseRedirect` |
+| No proxy | `Transport.Proxy` is nil, so the destination is always the registry — a proxy is an internal address the dial guard exists to refuse | `newHTTPClient` |
+| HTTPS only, verified | TLS 1.2 floor, no `InsecureSkipVerify`, no setting that disables either | `newHTTPClient` |
+| The one registry-supplied URL is validated identically | The bearer-token realm clears `domain.ContactableRegistryHost`, must be https, may carry no userinfo, and has its query replaced with HarborMaster's own pull-only scope | `tokenURL` |
+| A second HTTP client cannot appear unnoticed | An architecture test confines `net/http` and `crypto/tls` to four packages | `internal/arch` |
+| Registry text never reaches a record | Every failure maps to a fixed HarborMaster phrase; response bodies are read only to be discarded | `registry.Classify` |
+| Responses are bounded before they are read | Manifests, tag pages, and token responses have byte caps, and exceeding one is DETECTED rather than truncated | `internal/registry/client.go` |
+| Digests are computed, not believed | The manifest digest is the SHA-256 of the bytes received, rather than the `Docker-Content-Digest` header | `Client.Manifest` |
+| Publisher content is allowlisted | Annotations are limited to sixteen known keys, each bounded, UTF-8 validated, and refused if it carries a control character | `sanitiseAnnotation` |
+| Credentials never persist | Anonymous pull-scoped tokens live in a bounded in-memory cache for minutes; the schema has no column for one | `internal/registry/client.go` |
+| Work is bounded | Concurrency, batch size, tag pages, retries, and per-host backoff are all capped and configurable within limits | `internal/config` |
+
+**Three conclusions the engine refuses to draw**, each because the alternative
+would be confidently wrong:
+
+- A **channel tag** (`latest`, `stable`, `main`) is never version-compared.
+  Otherwise a repository that also publishes `2.0` would report a major update
+  for every container tracking `latest`.
+- A **truncated tag listing** yields `unknown`, not `none`. A listing that
+  stopped at its budget has not established that no newer tag exists.
+- A **failed lookup** overwrites nothing. "We could not ask" and "no update is
+  available" are different claims, and the second is the dangerous one.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |
@@ -326,3 +364,7 @@ Listing these so their absence reads as a decision rather than an oversight.
 | Permanent policy deletion | Violations reference their policy and the history must survive a withdrawal. `DELETE` archives |
 | Policy scoping / selectors | Every enabled policy applies to the whole estate. A selector language would be a second thing an unauthenticated caller could make expensive |
 | TLS termination | A reverse proxy's job |
+| Registry credentials | Every lookup is anonymous. A private repository reports `unauthorized` rather than becoming a reason to store somebody's registry password |
+| Insecure / plaintext registries | HTTPS with verification, always. A local registry is reported as unsupported and never contacted |
+| Proxy support for registry requests | A proxy is an internal address, which the dial guard exists to refuse |
+| Image pull, push, delete, or prune | Reading a registry answers a question; fetching from one is a mutation of local state |

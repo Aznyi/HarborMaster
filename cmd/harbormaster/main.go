@@ -34,6 +34,7 @@ import (
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/healthcheck"
 	"github.com/Aznyi/HarborMaster/internal/logging"
+	"github.com/Aznyi/HarborMaster/internal/registry"
 	"github.com/Aznyi/HarborMaster/internal/service"
 	"github.com/Aznyi/HarborMaster/internal/store"
 	"github.com/Aznyi/HarborMaster/internal/version"
@@ -398,6 +399,33 @@ func run() error {
 	events.AddEvaluationScheduler(drift)
 	events.AddEvaluationScheduler(policies)
 
+	// Image intelligence.
+	//
+	// The only component in HarborMaster that opens an outbound connection. It
+	// resolves manifests and lists tags over HTTPS, anonymously, and records
+	// whether a newer image exists. It cannot pull, push, delete, or prune
+	// anything, and it holds no registry credentials.
+	//
+	// Registry destinations come ONLY from image references the inventory
+	// already holds; there is no configuration setting and no API parameter that
+	// supplies a host. See internal/registry for the layered SSRF defences.
+	imageIntel := service.NewImageIntelService(service.ImageIntelOptions{
+		Store: db.ImageIntel,
+		Registry: registry.New(registry.Options{
+			Version:        build.Version,
+			RequestTimeout: cfg.ImageIntel.RequestTimeout,
+			MaxAttempts:    cfg.ImageIntel.MaxAttempts,
+			RetryBackoff:   cfg.ImageIntel.RetryBackoff,
+		}),
+		Config: cfg.ImageIntel,
+		Logger: logger,
+	})
+
+	// The reference set is re-projected after every successful refresh. That is
+	// a query and a transaction, not a burst of registry traffic: collection
+	// itself is rationed by the engine's own schedule.
+	inventory.AddRefreshObserver(imageIntel)
+
 	// A full compliance pass runs after every SUCCESSFUL INVENTORY REFRESH.
 	// The observer fires once the refresh has committed, so a pass always
 	// reads committed data -- and because every refresh path (startup,
@@ -429,7 +457,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(5)
+	background.Add(6)
 
 	go func() {
 		defer background.Done()
@@ -450,6 +478,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		policies.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		imageIntel.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -480,6 +512,9 @@ func run() error {
 		Policies:     db.Policies,
 		PolicyEngine: policies,
 		PolicyConfig: cfg.Policy,
+
+		ImageIntel:     db.ImageIntel,
+		ImageCollector: imageIntel,
 
 		Logger:         logger,
 		Config:         cfg.Server,
