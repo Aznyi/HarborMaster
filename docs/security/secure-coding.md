@@ -1,0 +1,234 @@
+# Secure Coding Standards
+
+Rules for contributing to HarborMaster. Each one exists because breaking it
+would create a specific vulnerability in *this* codebase, not because it appears
+on a generic checklist.
+
+Where a rule is enforced by a test or a linter, that is named. A rule nothing
+enforces is a rule that will eventually be broken.
+
+---
+
+## 1. Docker
+
+**1.1 Never add a mutating method to `docker.Runtime`.**
+The interface is seven read-only methods. Adding an eighth requires editing
+`internal/arch/arch_test.go` twice, which is deliberate friction.
+
+**1.2 Never import the Docker SDK outside `internal/docker`.**
+Enforced by `TestMobySDKIsConfinedToTheAdapter`. Convert to a domain type at the
+boundary instead.
+
+**1.3 Never return a raw Docker error to a caller.**
+Docker errors embed socket paths and daemon internals. Log the real error; return
+`docker.SanitizeError(err)`.
+
+**1.4 Never let a request handler drive Docker directly.**
+Handlers read HarborMaster's inventory. A read endpoint that can generate
+privileged socket traffic is a denial-of-service amplifier: one HTTP request
+becomes a full host sweep, repeatable at will.
+
+---
+
+## 2. Secrets
+
+**2.1 Never persist a secret value, in any encoding.**
+Not encrypted, not base64, not "temporarily". Store a keyed digest.
+
+**2.2 Never add a serialisable field that could hold one.**
+Digest, algorithm, and key-ID fields are `json:"-"`. Keep them that way — the tag
+is what makes accidental serialisation impossible rather than merely unlikely.
+
+**2.3 Never log a value that came from container configuration.**
+Not environment values, not log-driver options, not raw inspection payloads. Log
+names, counts, and IDs.
+
+**2.4 When classification is unknown, treat it as sensitive.**
+The cost of being wrong that way is a value an operator cannot see. The cost of
+the other way is a leaked credential, and only one of those is recoverable.
+
+**2.5 Never echo request input in an error message.**
+`invalidParam("trigger", "a known snapshot trigger")` — not the offending value.
+An error message is not a place to reflect attacker-controlled input.
+
+---
+
+## 3. SQL
+
+**3.1 Bind every value. No exceptions.**
+`fmt.Sprintf` into a query is grounds for rejecting a pull request.
+
+**3.2 Identifiers come from an allowlist that maps to compile-time constants.**
+Caller input selects *from* a fixed set; it never contributes *to* the SQL text.
+
+```go
+var snapshotSortFields = map[string]string{
+    "createdAt": "created_at",   // caller says "createdAt"
+    "id":        "id",           // the column name is ours
+}
+```
+
+**3.3 Every write that touches more than one table runs in a transaction.**
+Derived rows must never be able to drift from the document they came from.
+
+**3.4 Bound every query.** `LIMIT` on anything that could return many rows;
+batches for anything that deletes many.
+
+**3.5 Check `rows.Err()`.** Enforced by `rowserrcheck`. A partial read that looks
+like an empty result is worse than an error.
+
+---
+
+## 4. HTTP
+
+**4.1 Validate every enumerated parameter against a closed vocabulary.**
+
+**4.2 Reject, do not clamp.** Silently serving page 1 to a client that asked for
+page −3 hides a bug in the caller.
+
+**4.3 Strict JSON on every write.** `DisallowUnknownFields`, exactly one object,
+UTF-8 validated on the *raw bytes* — Go's decoder silently replaces invalid
+sequences with U+FFFD, so post-decode validation cannot detect them.
+
+**4.4 Bound every dimension** a caller controls: body size, page size,
+concurrency, wall time, output size.
+
+**4.5 Refuse, do not queue.** Return `429`/`503` with `Retry-After`.
+
+**4.6 Never trust Fetch Metadata or `Origin` as a primary control.**
+Both are absent in older browsers and trivially omitted by a non-browser client.
+Use them as an extra layer; make sure the real controls hold without them, and
+test that they do.
+
+**4.7 Errors carry a stable code and a generic message.** No stack traces, no
+wrapped internal errors, no filesystem paths.
+
+**4.8 Never echo a client-supplied request ID.**
+
+---
+
+## 5. Concurrency
+
+**5.1 Every goroutine ends on a context.** No fire-and-forget.
+
+**5.2 Every `time.NewTimer`/`NewTicker` gets `defer Stop()`.**
+
+**5.3 Every channel is created with a deliberate capacity**, and a comment when
+that capacity is a policy decision.
+
+**5.4 Never hold a mutex across a Docker call or a database write.**
+
+**5.5 A full queue drops and records; it never blocks the producer.**
+A blocked reader on the Docker event stream stalls the whole stream.
+
+**5.6 New concurrent code ships with a `-race` test.**
+
+---
+
+## 6. Frontend
+
+**6.1 No `dangerouslySetInnerHTML`.** If you think you need it, you need a
+different component.
+
+**6.2 No URL built from backend data** without an explicit scheme allowlist.
+
+**6.3 Never render a value the API should not have sent.**
+If a secret appears in a payload, that is a backend bug — but the component must
+not display it either.
+
+**6.4 No inline styles or inline scripts.** The CSP forbids both, and
+`TestContentSecurityPolicyForbidsInlineAndRemoteContent` fails if the policy is
+reopened. If you genuinely need one, use a nonce or a hash.
+
+**6.5 Handle all four resource states** — loading, ready, disconnected, error.
+"Backend unreachable" and "backend rejected the request" have different remedies.
+
+**6.6 A malformed payload must not crash a view.** Optional-chain into API data;
+render the empty state instead of throwing.
+
+---
+
+## 7. Dependencies
+
+**7.1 Justify every new direct dependency in the pull request.** What it does,
+why the standard library will not, who maintains it, what it pulls in.
+
+**7.2 No copyleft.** HarborMaster is MIT; the dependency review workflow denies
+GPL, AGPL, LGPL, and SSPL.
+
+**7.3 SHA-pin every GitHub Action.** A tag is mutable.
+
+**7.4 Run `go mod tidy` before pushing.** CI fails on a dirty `go.mod`.
+
+---
+
+## 8. Configuration
+
+**8.1 Defaults are safe.** Loopback binding, masking on, limits enabled. A
+misconfiguration should reduce functionality, not protection.
+
+**8.2 Validate configuration at startup, even for disabled features.**
+An error that only surfaces the day someone enables a feature is worse than one
+caught at boot.
+
+**8.3 Fail closed.** If a security property cannot be established, refuse to
+start. A missing HMAC key that was previously in use aborts startup rather than
+regenerating — a fresh key would make every historical digest compare unequal,
+which reads to an operator as "every secret changed at once".
+
+**8.4 Never log configuration values.** `Config.String()` reports which knobs
+exist, never what they hold. Do not add interpolation to it.
+
+---
+
+## 9. Files
+
+**9.1 Refuse symlinks when opening anything security-relevant.**
+`O_NOFOLLOW` on Unix. A symlinked key file is a redirection primitive.
+
+**9.2 Inspect the descriptor, not the path.** `f.Stat()` after opening, never
+`os.Stat(path)` then open — that leaves a TOCTOU window.
+
+**9.3 Bound every read.** `io.LimitReader`, even for a file you expect to be
+small. A mistyped path pointing at `/dev/zero` should not exhaust memory.
+
+**9.4 Write atomically.** Temp file with `O_EXCL`, `fsync`, rename, `fsync` the
+directory. A crash mid-write must not leave a truncated key.
+
+**9.5 Explicit permissions.** `0600` for secrets, `0750` for data directories.
+
+---
+
+## 10. Tests
+
+**10.1 Every security control gets a negative test.** A control with only a happy
+path is a control nobody has verified.
+
+**10.2 Sweeps beat targeted checks.** `scanDatabaseFor` walks every column of
+every table. A targeted check only tests the leak the author already imagined.
+
+**10.3 Every sweep needs a positive control.**
+`TestSecretScannerActuallyDetectsAValue` proves the scanner can find something —
+otherwise the leak test passes vacuously forever.
+
+**10.4 Pin security-relevant constants by test.** The CSP string, the runtime
+method set, the list of routed paths. Weakening them should break a test.
+
+**10.5 Test the invariant, not just the feature.**
+`TestNoRestoreEndpointExists` asserts something that does not exist and must not
+come to exist.
+
+---
+
+## Pull request checklist
+
+- [ ] No new `docker.Runtime` method
+- [ ] No Docker SDK import outside `internal/docker`
+- [ ] Every SQL value bound; every identifier from an allowlist
+- [ ] Every new input validated and bounded
+- [ ] No secret in a response, a log, or the database
+- [ ] Errors sanitised
+- [ ] Negative tests for each new control
+- [ ] `gofmt`, `go vet`, `go test -race`, `golangci-lint`, `govulncheck` clean
+- [ ] OpenAPI updated if a route or schema changed
+- [ ] Threat model reviewed if a trust boundary moved

@@ -1,0 +1,81 @@
+name: CodeQL
+
+# Static analysis for both languages in the repository.
+#
+# CodeQL is the gate the Definition of Done refers to: a pull request that
+# introduces a new alert is not merged until the alert is fixed or explicitly
+# dismissed with a reason. It runs on a schedule as well as on pull requests,
+# because a query-pack update can surface a finding in code that has not changed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, mid-week, off-hours UTC. Catches newly published queries against
+    # code that is not otherwise being touched.
+    - cron: "27 3 * * 3"
+  workflow_dispatch:
+
+# Read-only by default. The analyse job widens this for itself only.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Required to upload results to the Security tab.
+      security-events: write
+      # Required by the CodeQL action to read the workflow context.
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # Go is set up explicitly so autobuild uses the version the project
+      # targets rather than whatever the runner image ships.
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds lower-precision queries that still matter for
+          # a service fronting a privileged socket. security-and-quality would
+          # add maintainability rules; those belong to golangci-lint, not here,
+          # so the Security tab stays a list of security findings.
+          queries: security-extended
+
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
+        with:
+          category: "/language:${{ matrix.language }}"

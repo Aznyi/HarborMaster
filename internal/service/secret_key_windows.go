@@ -30,5 +30,8 @@ func openKeyFile(path string) (*os.File, error) {
 	if info.Mode()&os.ModeIrregular != 0 {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
+	// G304: the path is operator configuration, already checked above for
+	// symlinks and non-regular files.
+	//nolint:gosec // G304: configured path, link status verified.
 	return os.Open(path)
 }

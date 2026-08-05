@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 )
@@ -299,7 +300,22 @@ func (r *ContainerRepository) loadConfig(ctx context.Context, detail *domain.Con
 
 	var config persistedConfig
 	if err := json.Unmarshal([]byte(encoded), &config); err != nil {
-		return nil
+		// A corrupt config row degrades this one container rather than failing
+		// the request: the identity, state, and labels above are still worth
+		// showing, and a detail page that 500s tells an operator nothing.
+		//
+		// It is NOT swallowed silently, though. Swallowing it would render a
+		// container with a blank configuration and no explanation, which reads
+		// as "this container has no configuration" -- a materially wrong answer.
+		// The warning is what makes the difference visible in the UI.
+		detail.Warnings = append(detail.Warnings, domain.InventoryWarning{
+			ContainerID:   id,
+			ContainerName: detail.Overview.Name,
+			Code:          domain.WarningIncompleteData,
+			Message:       "stored configuration could not be decoded; showing summary data only",
+			OccurredAt:    time.Now().UTC(),
+		})
+		return nil //nolint:nilerr // deliberate degradation, recorded as a warning above
 	}
 
 	detail.State = config.State

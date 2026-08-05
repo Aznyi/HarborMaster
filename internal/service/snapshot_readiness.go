@@ -349,14 +349,14 @@ func (e *ReadinessEngine) evaluateStorage(
 	}
 
 	// Bind sources are never checked. See HostValidationProvider.
-	switch {
-	case binds == 0:
+	if binds == 0 {
 		add(domain.CheckMountSources, domain.ReadinessReady, "the container uses no bind mounts")
-	default:
-		result, _ := e.host.PathExists(ctx, "")
-		add(domain.CheckMountSources, domain.ReadinessUnverifiable, fmt.Sprintf(
-			"%d bind mount source(s) cannot be verified: %s", binds, result.Detail))
+		return
 	}
+
+	result, _ := e.host.PathExists(ctx, "")
+	add(domain.CheckMountSources, domain.ReadinessUnverifiable, fmt.Sprintf(
+		"%d bind mount source(s) cannot be verified: %s", binds, result.Detail))
 }
 
 func (e *ReadinessEngine) evaluateNetworks(

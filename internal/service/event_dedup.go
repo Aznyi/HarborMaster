@@ -76,13 +76,6 @@ func (d *dedupWindow) admit(fingerprint string, now time.Time) bool {
 	return true
 }
 
-// size reports how many fingerprints are held. Test-facing.
-func (d *dedupWindow) size() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.seen)
-}
-
 // sweepLocked drops expired entries, at most once per window.
 func (d *dedupWindow) sweepLocked(now time.Time) {
 	if !d.lastSweep.IsZero() && now.Sub(d.lastSweep) < d.window {

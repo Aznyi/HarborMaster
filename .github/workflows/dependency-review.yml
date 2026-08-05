@@ -1,0 +1,51 @@
+name: Dependency review
+
+# Blocks a pull request that introduces a vulnerable or badly-licensed
+# dependency, before it is merged rather than after it ships.
+#
+# This is the control that answers dependency confusion and typosquatting: a
+# newly added package shows up here as a diff a human reads, not as a line in a
+# lockfile nobody opens.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the action leave the summary as a PR comment.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Review
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2
+        with:
+          # Matches the Definition of Done: High and Critical block the merge.
+          fail-on-severity: high
+
+          # HarborMaster is MIT. A copyleft dependency would change the
+          # licensing of anything distributing the binary, so it is refused
+          # here rather than discovered at release time.
+          deny-licenses: >-
+            GPL-1.0-or-later,
+            GPL-2.0-or-later,
+            GPL-3.0-or-later,
+            AGPL-1.0-or-later,
+            AGPL-3.0-or-later,
+            LGPL-2.0-or-later,
+            LGPL-3.0-or-later,
+            SSPL-1.0
+
+          comment-summary-in-pr: on-failure

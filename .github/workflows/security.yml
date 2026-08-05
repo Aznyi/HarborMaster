@@ -1,0 +1,207 @@
+name: Security
+
+# The scanning that is not CodeQL: known vulnerabilities in dependencies, in the
+# container image, and in the source tree; plus the linters that catch the
+# security-relevant mistakes a compiler does not.
+#
+# Every job here is a release gate. See docs/engineering/definition-of-done.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Daily. A dependency advisory published today should not wait for the next
+    # commit to be noticed.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "22"
+
+jobs:
+  # --------------------------------------------------------------- Go deps --
+  govulncheck:
+    name: Go vulnerabilities (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # govulncheck is reachability-aware: it reports only advisories whose
+      # vulnerable symbols this code actually calls, so a finding here is a real
+      # exposure rather than a version-range match.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan
+        run: govulncheck ./...
+
+  # --------------------------------------------------------------- Go lint --
+  golangci-lint:
+    name: Go lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@0a35821d5c230e903fcfe077583637dea1b27b47 # v9.0.0
+        with:
+          version: v2.6.2
+          # The config lives in .golangci.yml so the same rules run locally.
+          args: --timeout=6m
+
+  # ------------------------------------------------------- filesystem scan --
+  trivy-fs:
+    name: Filesystem and config scan (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # Covers dependency manifests AND infrastructure config: the Dockerfile
+      # and the Compose files are scanned for misconfiguration here, which is
+      # the check that would notice a dropped `no-new-privileges` or a
+      # reintroduced root user.
+      - name: Scan repository
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0" # Reporting job; the gate below fails the build.
+
+      - name: Upload results
+        uses: github/codeql-action/upload-sarif@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      # Separate from the SARIF upload so the Security tab keeps the full
+      # picture (including MEDIUM) while the build only fails on what the
+      # Definition of Done actually blocks on.
+      - name: Fail on High or Critical
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ------------------------------------------------------------ image scan --
+  trivy-image:
+    name: Container image scan (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Build image
+        run: docker build -t harbormaster:scan .
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: harbormaster:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      - name: Upload results
+        uses: github/codeql-action/upload-sarif@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # ignore-unfixed: a distroless base with an unfixed advisory is not
+      # something this repository can act on, and failing on it would train
+      # everyone to ignore the job.
+      - name: Fail on fixable High or Critical
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: harbormaster:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ----------------------------------------------------------- npm audit ----
+  npm-audit:
+    name: Frontend dependencies (npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # Production dependencies are what ships in the bundle, so they are the
+      # gate. Dev dependencies are reported but do not fail the build: a build
+      # tool advisory matters, but it does not reach an operator's browser.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit all dependencies (report only)
+        run: npm audit || true
+
+  # ------------------------------------------------- secret scan of history --
+  gitleaks:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # Full history: a secret committed and later removed is still a secret
+          # that leaked, and shallow clones would miss it.
+          fetch-depth: 0
+
+      - name: Scan
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

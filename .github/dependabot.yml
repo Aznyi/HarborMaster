@@ -1,0 +1,99 @@
+version: 2
+
+# Dependabot keeps HarborMaster's supply chain current.
+#
+# Four ecosystems, because a vulnerable dependency can enter through any of
+# them: Go modules, npm, GitHub Actions, and the container base images.
+#
+# The `github-actions` and `docker` ecosystems matter more than they look.
+# Actions are pinned to commit SHAs in this repository, which is the right
+# security posture but means they never update on their own -- Dependabot is
+# what stops a pinned action rotting on a version with a known flaw. Likewise
+# for base images: a pinned digest is only safe while it is a *current* digest.
+
+updates:
+  # ------------------------------------------------------------------ Go --
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "deps"
+    groups:
+      # One PR for the routine patch churn, separate PRs for anything larger.
+      # A grouped patch bump is easy to review; a grouped major bump is not.
+      go-patch:
+        patterns: ["*"]
+        update-types: ["patch"]
+    ignore:
+      # The Moby SDK is deliberately held at a reviewed version: it is the one
+      # dependency that talks to the privileged socket, and its updates get read
+      # rather than merged. Minor and patch updates still open PRs.
+      - dependency-name: "github.com/moby/moby/client"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "github.com/moby/moby/api"
+        update-types: ["version-update:semver-major"]
+
+  # ----------------------------------------------------------------- npm --
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "deps(web)"
+    groups:
+      # Dev tooling churns constantly and ships nothing to a browser, so it is
+      # grouped into one reviewable PR.
+      dev-tooling:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+      # Runtime dependencies reach an operator's browser. Patch updates group;
+      # anything larger arrives on its own.
+      runtime-patch:
+        dependency-type: production
+        update-types: ["patch"]
+
+  # ------------------------------------------------------- GitHub Actions --
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+      - security
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # ------------------------------------------------------- base images ----
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+      - security
+    commit-message:
+      prefix: "docker"

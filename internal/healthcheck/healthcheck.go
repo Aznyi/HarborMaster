@@ -155,7 +155,9 @@ func components(r healthReport) string {
 
 // emit writes one diagnostic line and returns the exit code.
 func emit(out io.Writer, code int, message string) int {
-	fmt.Fprintf(out, "healthcheck: %s\n", message)
+	// The exit code is the real signal; a failed diagnostic write must not
+	// change it.
+	_, _ = fmt.Fprintf(out, "healthcheck: %s\n", message)
 	return code
 }
 

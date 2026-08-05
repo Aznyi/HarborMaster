@@ -1,0 +1,157 @@
+# golangci-lint configuration.
+#
+# Committed so the same rules run locally and in CI: a lint gate that only
+# exists in CI trains people to push and see what breaks.
+#
+#   make lint     (or)     golangci-lint run
+#
+# The selection is deliberately security-weighted. HarborMaster fronts a
+# privileged Docker socket, so the linters that matter most are the ones that
+# catch unchecked errors, unbounded resources, and unsafe constructs -- not the
+# ones that argue about naming.
+
+version: "2"
+
+run:
+  timeout: 6m
+  # Build-tagged files still get linted; a security bug in the integration
+  # suite is still a security bug in this repository.
+  build-tags:
+    - integration
+
+linters:
+  default: none
+  enable:
+    # --- correctness ------------------------------------------------------
+    - errcheck # unchecked errors, including ignored Close() failures
+    - govet # the standard vet suite
+    - staticcheck # correctness, simplification, and style analyses
+    - ineffassign # assignments that are never used
+    - unused # dead code
+
+    # --- security ---------------------------------------------------------
+    - gosec # the security-focused analyser
+    - bodyclose # unclosed HTTP response bodies leak connections
+    - noctx # HTTP requests built without a context cannot be cancelled
+    - rowserrcheck # sql.Rows.Err() left unchecked hides a partial read
+    - sqlclosecheck # unclosed sql.Rows holds a connection on a single-writer DB
+
+    # --- resource discipline ---------------------------------------------
+    - contextcheck # context not propagated where it should be
+    - errorlint # errors compared with == instead of errors.Is
+    - nilerr # returning nil after a non-nil error
+    - makezero # append to a slice created with a non-zero length
+
+    # --- readability that prevents bugs ----------------------------------
+    - misspell
+    - unconvert # redundant conversions
+    - wastedassign
+
+  # NOTE ON NESTING. In golangci-lint v2 `settings` and `exclusions` belong
+  # under `linters`, not at the top level. A misplaced block is accepted and
+  # silently ignored, which looks exactly like the rules passing -- verify a
+  # config change by running the linter, never by reading it.
+  settings:
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is enabled and better at it.
+        - G104
+      config:
+        # The default is 0600; HarborMaster writes its database directory 0750
+        # and its key file 0600, both deliberately.
+        G302: "0640"
+        G306: "0640"
+
+    govet:
+      enable-all: true
+      disable:
+        # Field alignment is a memory-layout micro-optimisation that would churn
+        # every struct in the domain package for no measurable gain.
+        - fieldalignment
+        # `if err := f(); err != nil` inside a closure shadows an outer err by
+        # construction, and that is the idiomatic form. Scoping the error to the
+        # statement is what makes it impossible to read a stale one.
+        - shadow
+
+    staticcheck:
+      checks:
+        - all
+        # ST1000: package comments are present where they matter; this rule
+        # would demand one on every internal package including trivial ones.
+        - -ST1000
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        # Rollback after a successful Commit is an idiomatic no-op, written as
+        # `_ = tx.Rollback()` at every call site so the intent is explicit.
+        - (*database/sql.Tx).Rollback
+
+  exclusions:
+    rules:
+      # Test files legitimately do what production code must not: build SQL from
+      # schema-derived identifiers when sweeping every table for a leaked
+      # secret, hold a deliberately weak credential as a fixture, and chmod a
+      # file to 0644 to prove the key loader warns about it.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - noctx
+          - bodyclose
+          - contextcheck
+          - rowserrcheck
+          - sqlclosecheck
+
+      # Detached contexts, deliberately.
+      #
+      # Shutdown and disconnect recording must NOT inherit the context that is
+      # being cancelled -- that is the whole point. Recording "the daemon went
+      # away" with the context that died alongside it would drop the record
+      # exactly when it matters most. Each site carries a comment saying so.
+      - path: cmd/harbormaster/main\.go
+        linters:
+          - contextcheck
+      - path: internal/service/events\.go
+        linters:
+          - contextcheck
+      - path: internal/api/middleware\.go
+        linters:
+          - contextcheck
+
+      # G202 across the store package: every instance audited, all false
+      # positives.
+      #
+      # These queries concatenate ONLY four things:
+      #
+      #   1. literal SQL fragments written in the source;
+      #   2. column and table names that are compile-time constants, or are
+      #      looked up from a fixed map with a fallback (never caller text);
+      #   3. a sort direction from a two-valued branch;
+      #   4. runs of "?" placeholders generated from a slice length.
+      #
+      # Every caller-supplied VALUE is bound. The allowlist lookup is the
+      # injection boundary, and it is tested directly:
+      # TestSnapshotSortFieldAllowlist rejects `spec_json`, `id) --`, and a
+      # semicolon-bearing column name, and TestFilterValuesAreBoundNotInterpolated
+      # fires `' OR '1'='1` and `'; DROP TABLE snapshots; --` through the filter
+      # and asserts the table survives.
+      #
+      # This exclusion is scoped to internal/store deliberately. If SQL
+      # construction ever appears elsewhere, gosec should flag it and someone
+      # should have to justify it here.
+      - path: internal/store/
+        linters:
+          - gosec
+        text: "G202"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  # Report everything; a capped report hides the tail of a large finding set.
+  max-issues-per-linter: 0
+  max-same-issues: 0

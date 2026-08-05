@@ -258,6 +258,10 @@ func generateKeyFile(path string) (SecretKey, error) {
 	encoded := []byte(hex.EncodeToString(key))
 
 	temp := path + ".tmp"
+	// G304: the path is operator configuration, not request input. It reaches
+	// here only from SecretKeyOptions, which is populated from the environment
+	// at startup. O_EXCL is what makes the write safe, not the path.
+	//nolint:gosec // G304: configured path, opened O_EXCL.
 	file, err := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
@@ -305,6 +309,9 @@ func syncDir(dir string) {
 	if dir == "" {
 		return
 	}
+	// G304: the directory is derived from the configured key path. Opened
+	// read-only, solely to fsync the directory entry.
+	//nolint:gosec // G304: configured path, opened read-only for fsync.
 	handle, err := os.Open(dir)
 	if err != nil {
 		return

@@ -271,8 +271,8 @@ func normalizeProcess(config *container.Config) domain.Process {
 	process := domain.Process{
 		Hostname:   config.Hostname,
 		Domainname: config.Domainname,
-		Entrypoint: []string(config.Entrypoint),
-		Command:    []string(config.Cmd),
+		Entrypoint: config.Entrypoint,
+		Command:    config.Cmd,
 		User:       config.User,
 		WorkingDir: config.WorkingDir,
 		StopSignal: config.StopSignal,
@@ -585,8 +585,8 @@ func normalizeSecurity(base container.InspectResponse, hostConfig *container.Hos
 	security := domain.Security{
 		Privileged:        hostConfig.Privileged,
 		ReadonlyRootfs:    hostConfig.ReadonlyRootfs,
-		CapAdd:            []string(hostConfig.CapAdd),
-		CapDrop:           []string(hostConfig.CapDrop),
+		CapAdd:            hostConfig.CapAdd,
+		CapDrop:           hostConfig.CapDrop,
 		SecurityOpt:       append([]string(nil), hostConfig.SecurityOpt...),
 		DeviceCgroupRules: append([]string(nil), hostConfig.DeviceCgroupRules...),
 		IPCMode:           string(hostConfig.IpcMode),

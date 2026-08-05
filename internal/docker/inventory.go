@@ -83,7 +83,7 @@ func (c *Client) ListContainers(ctx context.Context) ([]domain.ContainerSummary,
 	// containers would miss exactly the ones an operator is looking for.
 	listed, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 
 	out := make([]domain.ContainerSummary, 0, len(listed.Items))
@@ -112,7 +112,7 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (*Inspection, 
 		if cerrdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrContainerVanished, domain.ShortenID(id))
 		}
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 
 	return c.normalizeInspection(inspected.Container, inspected.Raw), nil
@@ -128,7 +128,7 @@ func (c *Client) InspectImage(ctx context.Context, id string) (*domain.Image, er
 		if cerrdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrImageUnavailable, domain.ShortenID(id))
 		}
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 
 	image := normalizeImage(inspected.InspectResponse)
@@ -142,7 +142,7 @@ func (c *Client) ListNetworks(ctx context.Context) ([]domain.Network, error) {
 
 	listed, err := c.api.NetworkList(ctx, client.NetworkListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 
 	out := make([]domain.Network, 0, len(listed.Items))
@@ -162,7 +162,7 @@ func (c *Client) ListVolumes(ctx context.Context) ([]domain.Volume, error) {
 
 	listed, err := c.api.VolumeList(ctx, client.VolumeListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 
 	// Items are values in the moby client; the v28 SDK returned pointers, and

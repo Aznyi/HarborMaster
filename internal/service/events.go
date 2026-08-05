@@ -185,6 +185,14 @@ func defaultJitter(delay time.Duration) time.Duration {
 		return 0
 	}
 	half := delay / 2
+	// math/rand/v2 is correct here, not a weakness. This jitter exists to
+	// desynchronise reconnect storms across HarborMaster instances that lost the
+	// same daemon at the same moment; it is a scheduling decision, not a secret.
+	// crypto/rand would add a syscall per reconnect and buy nothing: an attacker
+	// who can predict the jitter learns when a client retries, which is already
+	// observable from the connection itself.
+	//
+	//nolint:gosec // G404: scheduling jitter, not a security decision.
 	return half + time.Duration(rand.Int64N(int64(half)+1))
 }
 

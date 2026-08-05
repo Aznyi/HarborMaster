@@ -112,7 +112,9 @@ func healthcheckCommand() int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `HarborMaster - safety-first container lifecycle manager.
+	// Usage text to stdout. A write failure here means the stream is gone,
+	// which is not something a help message can or should recover from.
+	_, _ = fmt.Fprint(w, `HarborMaster - safety-first container lifecycle manager.
 
 Usage:
   harbormaster [serve]     Run the API server and serve the web interface (default)

@@ -303,7 +303,11 @@ func TestHMACIsKeyedNotPlainHash(t *testing.T) {
 	if a.HMAC("hunter2") == b.HMAC("hunter2") {
 		t.Error("two different keys produced the same digest; the digest is not keyed")
 	}
-	if a.HMAC("hunter2") != a.HMAC("hunter2") {
+	// Stored in variables rather than compared inline: identical expressions
+	// either side of != read as a tautology to a static analyser, and the
+	// determinism this asserts is worth keeping legible.
+	first, second := a.HMAC("hunter2"), a.HMAC("hunter2")
+	if first != second {
 		t.Error("the same key and value produced different digests")
 	}
 }

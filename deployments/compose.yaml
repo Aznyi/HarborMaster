@@ -90,6 +90,22 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # Resource ceilings.
+    #
+    # HarborMaster is unauthenticated, so anyone who can reach the port can make
+    # it work: list containers, compare snapshots, open event streams. Every one
+    # of those paths is individually bounded in the application, but a ceiling
+    # here is what turns "a bug or an attacker made it allocate" from a host
+    # problem into a container problem. The process is one Go binary and one
+    # SQLite file; it does not legitimately need more than this.
+    #
+    # Raise mem_limit if you run HarborMaster against a host with many thousands
+    # of containers and see OOM kills in `docker events`.
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    cpus: 1.5
+
     # The health check is baked into the image (`harbormaster healthcheck`), so
     # there is nothing to define here. It exits 0 for both healthy and degraded:
     # an unreachable Docker socket is a state to report, not a restart loop.

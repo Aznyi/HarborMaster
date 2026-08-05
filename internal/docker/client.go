@@ -89,27 +89,31 @@ func New(opts Options) (*Client, error) {
 		opts.Masker = domain.NewDefaultMasker()
 	}
 
-	// WithAPIVersionNegotiation lets HarborMaster talk to older daemons instead
-	// of failing on a version mismatch.
-	api, err := client.NewClientWithOpts(
+	// client.New, not the deprecated NewClientWithOpts: the SDK marks the latter
+	// "will be removed in the next release", and a constructor that vanishes on
+	// a routine dependency bump is not something the one package holding the
+	// privileged socket should depend on.
+	//
+	// WithAPIVersionNegotiation is likewise gone: negotiation is the default in
+	// this SDK version and the option is now a no-op. HarborMaster still talks
+	// to older daemons; it simply no longer asks for behaviour it already gets.
+	api, err := client.New(
 		client.WithHost(opts.Host),
-		client.WithAPIVersionNegotiation(),
 		client.WithTimeout(opts.Timeout),
 	)
 	if err != nil {
 		// The endpoint is configuration, so it is kept out of the message.
-		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
+		return nil, errors.New("create docker client: invalid engine endpoint")
 	}
 
 	// See Client.streamAPI: the event stream needs a client with no request
 	// timeout. Its lifetime is bounded by the caller's context instead.
-	streamAPI, err := client.NewClientWithOpts(
+	streamAPI, err := client.New(
 		client.WithHost(opts.Host),
-		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		_ = api.Close()
-		return nil, fmt.Errorf("create docker client: invalid engine endpoint")
+		return nil, errors.New("create docker client: invalid engine endpoint")
 	}
 
 	return &Client{api: api, streamAPI: streamAPI, timeout: opts.Timeout, masker: opts.Masker}, nil
@@ -129,7 +133,17 @@ func (c *Client) Ping(ctx context.Context) (Info, error) {
 	// per Ping would re-negotiate on a liveness probe that runs on a timer.
 	ping, err := c.api.Ping(ctx, client.PingOptions{})
 	if err != nil {
-		return Info{}, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		// BOTH errors are wrapped with %w, deliberately.
+		//
+		// With `%v` on the second the chain stopped at ErrUnreachable, which
+		// silently broke SanitizeError: its context.DeadlineExceeded and
+		// context.Canceled branches could never match, so every timeout was
+		// reported as a flat "unreachable". Wrapping restores those branches.
+		//
+		// This does not widen disclosure. The rendered text is identical either
+		// way, and SanitizeError -- not the error's own message -- is what
+		// callers put in a response.
+		return Info{}, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	return Info{APIVersion: ping.APIVersion, OSType: ping.OSType}, nil
 }

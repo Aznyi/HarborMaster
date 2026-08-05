@@ -38,10 +38,19 @@ coverage.txt
 /CLAUDE.md
 /CLAUDE.local.md
 
-# Working notes: design docs, implementation plans, and triage write-ups.
-# Kept locally, not published. Previously tracked files under here were
-# untracked with `git rm --cached`, which leaves them in existing history.
-/docs/
+# Working notes only.
+#
+# HarborMaster is open source: contributors and operators are meant to receive
+# the security documentation, the threat model, the architecture notes, and the
+# engineering standards. What they are NOT meant to receive is development
+# scratch work -- implementation plans, design iterations, and drafts, which are
+# useful while building a phase and misleading afterwards.
+#
+# So the ignore is scoped to the scratch directories, not to docs/ as a whole.
+/docs/design/
+/docs/plans/
+/docs/tmp/
+/docs/drafts/
 
 # Editors and OS
 .vscode/
