@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	"github.com/Aznyi/HarborMaster/internal/logging"
 )
 
 type contextKey string
@@ -75,11 +77,24 @@ func withRecovery(logger *slog.Logger) middleware {
 					// credential field would then serialise that field into the
 					// log. Formatting to a string keeps the record to what the
 					// value chooses to print.
+					//
+					// The panic value is then SANITISED, because a handler that
+					// panics with a message built from its input -- panic("bad
+					// id: " + id) is the ordinary way to write it -- turns
+					// request data into a log field by a route no taint
+					// analysis of this file would show.
+					//
+					// The stack trace is NOT sanitised, deliberately. It is
+					// multi-line by nature and its newlines are what make it
+					// readable; escaping them would produce one 4KB line, and
+					// the length bound would truncate the frames that matter.
+					// It carries no request data either: Go renders arguments
+					// as hex words, never as strings.
 					logger.ErrorContext(r.Context(), "panic recovered",
-						slog.String("method", r.Method),
-						slog.String("path", r.URL.Path),
+						logging.SafeAttr("method", r.Method),
+						logging.SafeAttr("path", r.URL.Path),
 						slog.String("requestId", RequestIDFrom(r.Context())),
-						slog.String("panic", fmt.Sprintf("%v", recovered)),
+						logging.SafeAttr("panic", fmt.Sprintf("%v", recovered)),
 						slog.String("stack", stackTrace()))
 					writeError(w, r, logger, http.StatusInternalServerError, CodeInternal, "internal error")
 				}
@@ -94,6 +109,23 @@ func withRecovery(logger *slog.Logger) middleware {
 // Only method, path, status, duration and request ID are recorded. Headers,
 // query values and bodies are omitted wholesale rather than filtered, because
 // any of them can carry a token.
+//
+// r.URL.Path is the PATH ONLY -- net/url has already split the query string
+// and the fragment off, so neither can reach the record through this field.
+// That is worth stating because it is the property that makes logging the path
+// safe at all: the query string is where an API's secrets travel when someone
+// puts them there.
+//
+// Both request-derived fields go through SafeAttr. The path is the obvious
+// one. The method is included because "the server would have rejected an
+// invalid method before this ran" is a statement about net/http's parser
+// rather than about this code, and a control on a value should not depend on
+// the continued behaviour of a component that is free to change.
+//
+// requestId is NOT sanitised, and that is not an oversight: withRequestID
+// generates it from crypto/rand and hex-encodes it, deliberately ignoring the
+// client's X-Request-ID header. Its alphabet is [0-9a-f]. Sanitising it would
+// imply a doubt the code does not have; a test pins the alphabet instead.
 func withAccessLog(logger *slog.Logger) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,8 +135,8 @@ func withAccessLog(logger *slog.Logger) middleware {
 			next.ServeHTTP(rec, r)
 
 			logger.InfoContext(r.Context(), "http request",
-				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				logging.SafeAttr("method", r.Method),
+				logging.SafeAttr("path", r.URL.Path),
 				slog.Int("status", rec.status),
 				slog.Int64("bytes", rec.written),
 				slog.Int64("durationMs", time.Since(start).Milliseconds()),

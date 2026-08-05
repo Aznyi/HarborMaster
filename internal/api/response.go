@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+
+	"github.com/Aznyi/HarborMaster/internal/logging"
 )
 
 // ErrorCode is a stable identifier clients can branch on. The prose in
@@ -90,8 +92,12 @@ type ErrorResponse struct {
 func writeJSON(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
+		// The path is request-derived and goes through SafeAttr. The error is
+		// not: it comes from marshalling a value this package constructed, so
+		// it names Go types and struct fields rather than anything a caller
+		// sent.
 		logger.ErrorContext(r.Context(), "encode response failed",
-			slog.String("path", r.URL.Path),
+			logging.SafeAttr("path", r.URL.Path),
 			slog.String("error", err.Error()))
 		writeError(w, r, logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return

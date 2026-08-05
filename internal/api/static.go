@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/Aznyi/HarborMaster/internal/logging"
 )
 
 // staticHandler serves the compiled single-page frontend from an fs.FS.
@@ -70,8 +72,23 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A directory or a client-side route: hand the SPA its entry point.
 		h.serveIndex(w, r)
 	default:
+		// BOTH fields here are request-derived, and the second one is easy to
+		// miss.
+		//
+		// `name` comes from r.URL.Path by way of path.Clean, which normalises
+		// "." and ".." and collapses slashes -- and does nothing whatsoever
+		// about control characters. A request for /x%0Ainjected arrives with a
+		// real newline in r.URL.Path and keeps it through Clean, so CodeQL's
+		// taint path for this line is genuine rather than a modelling
+		// artefact.
+		//
+		// The ERROR carries the same string a second time: fs.Stat fails with
+		// an *fs.PathError, whose Error method renders as "stat <name>: ...".
+		// Sanitising only the path field would leave the identical attacker
+		// input reaching the record through the error.
 		h.logger.ErrorContext(r.Context(), "read embedded asset failed",
-			slog.String("path", name), slog.String("error", err.Error()))
+			logging.SafeAttr("path", name),
+			logging.SafeAttr("error", err.Error()))
 		writeError(w, r, h.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 	}
 }
