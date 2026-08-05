@@ -25,6 +25,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Inventory](#inventory)
 - [Docker events](#docker-events)
 - [Configuration drift](#configuration-drift)
+- [Policy engine](#policy-engine)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -683,6 +684,148 @@ scheduler, for the same reason. Drift also gets its **own** diff-engine
 instance, so a background sweep cannot exhaust the concurrency slots the
 unauthenticated comparison endpoint depends on.
 
+## Policy engine
+
+HarborMaster checks every container's configuration against
+**administrator-defined policies** and records each rule it fails.
+
+**A policy is a question, not an instruction.** HarborMaster asks whether a
+container complies; it has no capability to change one so that it does. There is
+no enforce, apply, or remediate endpoint, and an API test asserts the absence
+directly rather than trusting that nobody added one.
+
+### Policy is not drift
+
+Drift asks *did this container change from its baseline?* A policy asks *does
+this container comply with an organisational rule?* They are independent, and
+both answers are worth having:
+
+- A container can **drift into a still-compliant configuration** — somebody
+  bumped an image tag, and the new tag is still on the allowlist.
+- A container that has **never moved can be non-compliant** from the day it was
+  created, because the rule arrived afterwards.
+
+Nothing in the policy engine reads a snapshot, and nothing in the drift engine
+reads a policy.
+
+### Strongly typed rules, not a language
+
+A policy is a list of rules from a **closed catalogue of sixteen types**. There
+is no expression language, no template, no script, and no user-supplied code
+path of any kind. Every rule's semantics are fixed at compile time in
+`internal/domain/policy_rules.go`; an administrator supplies a rule type and a
+bounded parameter list, and nothing they write is ever interpreted.
+
+That shape is the point. A policy is administrator-supplied input to an
+**unauthenticated API**, and an interpreter would make that input executable.
+
+| Rule | What it checks |
+| --- | --- |
+| `privilegedForbidden` | `privileged == false` |
+| `readOnlyRootFilesystemRequired` | `readOnlyRootFilesystem == true` |
+| `imageAllowlist` / `imageDenylist` | The image reference against glob patterns |
+| `requiredLabels` / `forbiddenLabels` | Label **keys** against glob patterns |
+| `requiredEnv` / `forbiddenEnv` | Environment variable **names** — never values |
+| `requiredCapabilities` / `forbiddenCapabilities` | Declared `capAdd` |
+| `memoryLimitRequired` / `cpuLimitRequired` | A real cap, not a reservation or a weight |
+| `restartPolicyAllowlist` | The restart policy against a closed vocabulary |
+| `networkAllowlist` | Every attached network |
+| `userNotRoot` | A declared non-root user |
+| `healthCheckRequired` | A configured, enabled health check |
+
+Two of those are narrower than their names suggest, and the editor says so
+rather than implying otherwise:
+
+- **Capabilities** are evaluated against the **declared** configuration.
+  HarborMaster cannot see the daemon's default capability set, so a capability
+  granted by default is invisible to it. Hardcoding Docker's default list would
+  be a claim about a daemon HarborMaster has not asked.
+- **`networkAllowlist`** evaluates the container's **attached networks**, which
+  is how Docker surfaces the network mode: host mode appears as `host`,
+  isolation as `none`. A container attached to no network of its own shares
+  another container's namespace, which never satisfies an allowlist — the
+  fail-closed direction.
+
+### Severity follows the rule, not the container
+
+A rule may override its policy's default severity; an omitted override
+inherits. `privileged` is critical because the containment boundary is gone,
+whoever set it.
+
+### Patterns cannot be made expensive
+
+Glob patterns accept `*` and `?` and nothing else — no character classes, no
+alternation, and no regular expressions anywhere. `MatchGlob` is **iterative**
+and remembers exactly one backtrack point, so it never recurses and has no
+exponential path: that is the failure mode the phrase "regex DoS" names. Its
+worst case is bounded by the pattern and subject length caps, and a pattern that
+exceeds either is **refused at write time** rather than trimmed at match time,
+so an expensive pattern never reaches the database.
+
+### Environment rules evaluate names only
+
+The evaluation input is a `PolicyTarget`, projected from the container detail.
+It carries variable **names** and **has no field capable of holding a value**.
+"Policies never read a secret" is therefore a property of the type rather than a
+discipline every future rule author has to remember, and a test asserts it over
+every string the projected target holds.
+
+### "Compliant" is not "never checked"
+
+Every pass is recorded, including one that found nothing. Without that,
+*no violations for this container* is ambiguous between "it complies with every
+rule" and "no pass has ever reached it" — and telling an operator their estate
+is compliant when most of it was never examined is the worst thing a compliance
+dashboard can do. The container view and the summary both report the
+distinction.
+
+**An incomplete pass resolves nothing.** A pass that could not apply every
+policy has not established that the rules it skipped now pass; it established
+that it stopped applying them. Resolving on that basis would silently clear real
+non-compliance.
+
+### Acknowledgement does not suppress
+
+`active` and `resolved` are **engine-owned** facts about whether the rule still
+fails. `acknowledged` and `exempted` are **operator-owned** statements of
+intent, and are the only two `PATCH /api/v1/policy-violations/{id}` accepts.
+
+Neither stops the checking. An acknowledged violation is re-evaluated on every
+pass, keeps its last-seen timestamp current, and **resolves automatically** the
+moment the container complies. An acknowledgement that stopped the checking
+would turn the compliance report into a list of things somebody once clicked.
+
+### Withdrawing a policy keeps its history
+
+`DELETE /api/v1/policies/{id}` **archives**. A violation references its policy,
+and the history has to survive the rule being withdrawn: an auditor asking what
+the estate was failing last quarter must not get a different answer because
+somebody tidied up this quarter.
+
+So the definition is retained and marked archived, it stops being evaluated, and
+its open violations resolve in the same transaction — the truthful record of a
+rule that no longer applies. The schema enforces the same thing through
+`ON DELETE RESTRICT`, so a hand-written `DELETE` against the database cannot
+orphan the history either. There is no endpoint that permanently removes a
+policy.
+
+### Evaluation is batched and bounded
+
+A pass runs after **every successful inventory refresh**, after a targeted
+refresh of one container commits, on a periodic sweep, and on request through
+`POST /api/v1/policy/evaluate`.
+
+The sweep loads the active policy set **once** and applies it to every
+container, so a thousand containers cost one policy query rather than a
+thousand. Containers are processed sequentially and in pages: parallelism would
+queue at the single database writer anyway while multiplying peak memory.
+
+`POST /policy/evaluate` is **asynchronous** and answers 202. A synchronous
+evaluation of a large estate would let an unauthenticated caller hold a request
+open for minutes and occupy the single writer at will; the request is coalesced
+through the same queue the scheduled passes use, so calling it in a loop
+produces one pass rather than a backlog.
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -908,6 +1051,14 @@ for the full list with defaults.
 | `HARBORMASTER_DRIFT_SWEEP_INTERVAL` | `30m` | Periodic full sweep; `0` disables it |
 | `HARBORMASTER_DRIFT_MAX_RECORDS_PER_CONTAINER` | `500` | Past it an evaluation is *incomplete*, never silently truncated |
 | `HARBORMASTER_DRIFT_RETENTION_AGE` | `720h` | How long resolved records are kept; open records are never pruned |
+| `HARBORMASTER_POLICY_ENABLED` | `true` | Turn the policy engine on or off |
+| `HARBORMASTER_POLICY_SWEEP_INTERVAL` | `15m` | Periodic full compliance pass; `0` disables it |
+| `HARBORMASTER_POLICY_MAX_POLICIES` | `200` | Active policies one pass may load |
+| `HARBORMASTER_POLICY_MAX_VIOLATIONS_PER_CONTAINER` | `500` | Past it a pass is *incomplete*, never silently truncated |
+| `HARBORMASTER_POLICY_MAX_RULES_PER_POLICY` | `32` | Bounds what one policy can cost to evaluate |
+| `HARBORMASTER_POLICY_MAX_VALUES_PER_RULE` | `32` | Bounds the pattern matches one rule performs |
+| `HARBORMASTER_POLICY_RETENTION_AGE` | `2160h` | How long resolved violations are kept; open ones are never pruned |
+| `HARBORMASTER_POLICY_WRITE_RATE_LIMIT` | `60`/min | Policy writes get their own budget; a write is one small transaction, not a Docker sweep |
 | `HARBORMASTER_INVENTORY_ENABLED` | `true` | Turn the inventory engine on or off |
 | `HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP` | `true` | Collect once at boot |
 | `HARBORMASTER_INVENTORY_REFRESH_INTERVAL` | `60s` | Periodic refresh; `0` disables it |

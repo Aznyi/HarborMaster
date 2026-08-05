@@ -46,6 +46,18 @@ import type {
   DriftSummary,
   OperatorStatus,
 } from "./driftTypes";
+import type {
+  ContainerPolicy,
+  PolicyDefinition,
+  PolicyEvaluateAccepted,
+  PolicyOperatorStatus,
+  PolicyQuery,
+  PolicyRequest,
+  PolicyRuleCatalogue,
+  PolicySummary,
+  PolicyViolation,
+  PolicyViolationQuery,
+} from "./policyTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -89,15 +101,18 @@ export interface RequestOptions {
 }
 
 /**
- * Performs a GET and decodes the JSON body.
+ * Performs a request and decodes the JSON body.
  *
  * The caller's signal and the internal timeout are combined, so either can
  * abort the request.
+ *
+ * A 204 resolves to `undefined`, because a No Content response has no body to
+ * decode. `DELETE /policies/{id}` is the one endpoint that answers this way.
  */
 async function request<T>(
   path: string,
   options: RequestOptions = {},
-  method: "GET" | "POST" | "PATCH" = "GET",
+  method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
   body?: unknown,
 ): Promise<T> {
   const { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
@@ -144,6 +159,11 @@ async function request<T>(
   if (!response.ok) {
     throw await toApiError(response, requestId);
   }
+
+  // No Content. Returning undefined rather than attempting a decode, which
+  // would fail and be reported as a malformed response for a request that in
+  // fact succeeded.
+  if (response.status === 204) return undefined as T;
 
   try {
     return (await response.json()) as T;
@@ -572,4 +592,209 @@ export function updateDriftStatus(
     status,
     ...(note ? { note } : {}),
   });
+}
+
+/* ---------------------------------------------------------------- policy -- */
+
+/**
+ * The policy engine.
+ *
+ * Reads plus the create/update/withdraw surface. Every write acts on
+ * HARBORMASTER'S OWN ROWS: a policy is a rule that configuration is CHECKED
+ * AGAINST, never one that is applied to Docker. There is deliberately no
+ * function here that enforces, remediates, or applies anything, because the API
+ * exposes no such endpoint and HarborMaster has no such capability.
+ */
+
+/** Builds the policy list query string. */
+function buildPolicyQuery(query: PolicyQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.search) params.set("search", query.search);
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  if (query.enabled !== undefined) params.set("enabled", String(query.enabled));
+  if (query.includeArchived !== undefined) {
+    params.set("includeArchived", String(query.includeArchived));
+  }
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** Builds the violation list query string from closed vocabularies. */
+function buildViolationQuery(query: PolicyViolationQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.containerId) params.set("containerId", query.containerId);
+  if (query.policyId) params.set("policyId", query.policyId);
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  // Sent only when explicitly set, so the server's own default stands
+  // otherwise and the two cannot disagree about what "default" means.
+  if (query.openOnly !== undefined) params.set("openOnly", String(query.openOnly));
+
+  for (const rule of query.rule ?? []) params.append("rule", rule);
+  for (const severity of query.severity ?? []) params.append("severity", severity);
+  for (const status of query.status ?? []) params.append("status", status);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/policies */
+export function listPolicies(
+  query: PolicyQuery = {},
+  options?: RequestOptions,
+): Promise<ListResponse<PolicyDefinition>> {
+  return request<ListResponse<PolicyDefinition>>(
+    `/policies${buildPolicyQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/policies/{id} */
+export function getPolicy(
+  policyId: string,
+  options?: RequestOptions,
+): Promise<PolicyDefinition> {
+  return request<PolicyDefinition>(
+    `/policies/${encodeURIComponent(policyId)}`,
+    options,
+  );
+}
+
+/**
+ * GET /api/v1/policy-rules
+ *
+ * The rule catalogue the editor is built from. Fetched rather than hardcoded:
+ * a second copy in the frontend would eventually offer a rule the backend
+ * rejects, and the operator would find out only after filling in the form.
+ */
+export function getPolicyRules(
+  options?: RequestOptions,
+): Promise<PolicyRuleCatalogue> {
+  return request<PolicyRuleCatalogue>("/policy-rules", options);
+}
+
+/**
+ * POST /api/v1/policies
+ *
+ * There is no `policyId` in the request type. The identifier is generated by
+ * the server and is immutable; a body that cannot express the change is a
+ * stronger guarantee than a check that rejects it.
+ */
+export function createPolicy(
+  body: PolicyRequest,
+  options?: RequestOptions,
+): Promise<PolicyDefinition> {
+  return request<PolicyDefinition>("/policies", options, "POST", body);
+}
+
+/** PATCH /api/v1/policies/{id} — a partial update; omitted fields are left alone. */
+export function updatePolicy(
+  policyId: string,
+  body: PolicyRequest,
+  options?: RequestOptions,
+): Promise<PolicyDefinition> {
+  return request<PolicyDefinition>(
+    `/policies/${encodeURIComponent(policyId)}`,
+    options,
+    "PATCH",
+    body,
+  );
+}
+
+/**
+ * DELETE /api/v1/policies/{id}
+ *
+ * **Archives rather than destroys.** A violation references its policy and the
+ * history has to survive the rule being withdrawn, so the definition is
+ * retained, marked archived, and its open violations resolve. Answers 204.
+ */
+export function archivePolicy(
+  policyId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/policies/${encodeURIComponent(policyId)}`,
+    options,
+    "DELETE",
+  );
+}
+
+/** GET /api/v1/policy-violations */
+export function listPolicyViolations(
+  query: PolicyViolationQuery = {},
+  options?: RequestOptions,
+): Promise<ListResponse<PolicyViolation>> {
+  return request<ListResponse<PolicyViolation>>(
+    `/policy-violations${buildViolationQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/policy-violations/{id} */
+export function getPolicyViolation(
+  id: number,
+  options?: RequestOptions,
+): Promise<PolicyViolation> {
+  return request<PolicyViolation>(`/policy-violations/${id}`, options);
+}
+
+/** GET /api/v1/policy-summary */
+export function getPolicySummary(options?: RequestOptions): Promise<PolicySummary> {
+  return request<PolicySummary>("/policy-summary", options);
+}
+
+/** GET /api/v1/policy-violations/container/{id} */
+export function getContainerPolicy(
+  containerId: string,
+  query: PolicyViolationQuery = {},
+  options?: RequestOptions,
+): Promise<ContainerPolicy> {
+  return request<ContainerPolicy>(
+    `/policy-violations/container/${encodeURIComponent(containerId)}${buildViolationQuery(query)}`,
+    options,
+  );
+}
+
+/**
+ * PATCH /api/v1/policy-violations/{id}
+ *
+ * Moves a violation's status. **This changes nothing outside HarborMaster's own
+ * database**, and it does NOT suppress re-evaluation: the next pass still
+ * applies the rule and still resolves the violation once the container
+ * complies.
+ *
+ * The status type is `PolicyOperatorStatus`, not `PolicyViolationStatus`:
+ * `active` and `resolved` are engine-owned and the server rejects them.
+ */
+export function updateViolationStatus(
+  id: number,
+  status: PolicyOperatorStatus,
+  note?: string,
+  options?: RequestOptions,
+): Promise<PolicyViolation> {
+  return request<PolicyViolation>(`/policy-violations/${id}`, options, "PATCH", {
+    status,
+    ...(note ? { note } : {}),
+  });
+}
+
+/**
+ * POST /api/v1/policy/evaluate
+ *
+ * Requests a compliance pass and returns once it is *accepted*, not once it
+ * finishes: the server schedules it through the same coalescing queue its own
+ * passes use and answers 202. Poll the summary and watch `lastEvaluatedAt`.
+ */
+export function evaluatePolicies(
+  options?: RequestOptions,
+): Promise<PolicyEvaluateAccepted> {
+  return request<PolicyEvaluateAccepted>("/policy/evaluate", options, "POST", {});
 }

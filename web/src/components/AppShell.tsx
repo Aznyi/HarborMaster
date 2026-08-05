@@ -18,6 +18,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Images", path: "/images" },
   { label: "Snapshots", path: "/snapshots" },
   { label: "Drift", path: "/drift" },
+  { label: "Compliance", path: "/compliance" },
+  { label: "Policies", path: "/policies" },
   { label: "Events", path: "/events" },
   { label: "Settings", path: "/settings" },
 ] as const;

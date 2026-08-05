@@ -185,6 +185,59 @@ const (
 	MaxDriftRecordsPerContainer = 5000
 	MaxDriftNoteBytes           = 4096
 
+	// Policy engine defaults.
+	//
+	// The sweep interval is shorter than drift's because a compliance pass is
+	// much cheaper: it reads the container rows the inventory already holds and
+	// applies rules in memory, where drift decodes one snapshot document per
+	// container. It is also the pass an operator most expects to be current.
+	DefaultPolicyEnabled               = true
+	DefaultPolicyEvaluateOnEvents      = true
+	DefaultPolicyEvaluationDebounce    = 5 * time.Second
+	DefaultPolicyMaxPendingEvaluations = 256
+	DefaultPolicySweepInterval         = 15 * time.Minute
+	DefaultPolicySweepOnStartup        = true
+	DefaultPolicyEvaluationTimeout     = 10 * time.Second
+	// DefaultPolicyMaxPolicies bounds the active set the engine loads once per
+	// sweep. Far above any real deployment; it exists so an unauthenticated
+	// caller cannot make each pass arbitrarily expensive by creating policies.
+	DefaultPolicyMaxPolicies = 200
+	// DefaultPolicyMaxViolationsPerContainer bounds one container's failures.
+	// Past it the pass is marked INCOMPLETE rather than truncated silently,
+	// because an incomplete pass resolves nothing.
+	DefaultPolicyMaxViolationsPerContainer = 500
+	DefaultPolicyMaxRulesPerPolicy         = 32
+	DefaultPolicyMaxValuesPerRule          = 32
+	DefaultPolicyMaxNameBytes              = 120
+	DefaultPolicyMaxDescriptionBytes       = 1000
+	// The policy write endpoints get their OWN rate limit, deliberately more
+	// permissive than the shared one. See config.Policy.WriteRateLimit for why.
+	DefaultPolicyWriteRateLimit = 60.0 // requests per minute
+	DefaultPolicyWriteRateBurst = 20
+
+	DefaultPolicyRetentionAge  = 90 * 24 * time.Hour
+	DefaultPolicyPruneInterval = 6 * time.Hour
+	DefaultPolicyMaxNoteBytes  = 500
+
+	// Policy bounds. The minimums exist for the same reason drift's do: a tiny
+	// value would spin a worker or hammer the database, and is far more likely
+	// a typo than an intention. The maximums bound what one evaluation can
+	// cost, since a policy is administrator-supplied input to an
+	// unauthenticated API.
+	MinPolicyEvaluationDebounce     = 100 * time.Millisecond
+	MinPolicySweepInterval          = 1 * time.Minute
+	MinPolicyPruneInterval          = 1 * time.Minute
+	MaxPolicyPendingEvaluations     = 4096
+	MaxPolicyCount                  = 2000
+	MaxPolicyViolationsPerContainer = 5000
+	MaxPolicyRulesPerPolicy         = 64
+	MaxPolicyValuesPerRule          = 128
+	MaxPolicyNameBytes              = 512
+	MaxPolicyDescriptionBytes       = 8192
+	MaxPolicyNoteBytes              = 4096
+	MaxPolicyWriteRateLimit         = 6000.0
+	MaxPolicyWriteRateBurst         = 1000
+
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
 	// orchestrator's own timeout is worse than useless, because the runtime
@@ -395,12 +448,96 @@ type Snapshots struct {
 	MaxReasonBytes int
 }
 
+// Policy holds settings for the policy engine.
+//
+// A policy is an administrator-defined rule that a container's configuration is
+// checked AGAINST. It is never applied, enforced, or pushed to Docker: the
+// engine reads HarborMaster's own inventory, and nothing in this section grants
+// any ability to change a container.
+//
+// The bounds here are security controls rather than tuning knobs. Policy
+// definitions arrive from an unauthenticated API, so the number of policies,
+// the rules in each, and the values in each rule all have to be capped, or a
+// caller could make every compliance pass arbitrarily expensive.
+type Policy struct {
+	// Enabled turns the engine on or off. When false nothing is evaluated, the
+	// endpoints report the feature disabled, and no violations are written.
+	Enabled bool
+
+	// EvaluateOnEvents schedules an evaluation when a targeted refresh of one
+	// container commits. Off does not mean stale: a full pass still runs after
+	// every successful inventory refresh and on the periodic sweep.
+	EvaluateOnEvents bool
+	// EvaluationDebounce coalesces the burst one lifecycle transition produces
+	// into a single evaluation per container.
+	EvaluationDebounce time.Duration
+	// MaxPendingEvaluations caps the coalescing queue. Past it the engine
+	// escalates to a full sweep, which covers every pending container and
+	// costs less than tracking them individually.
+	MaxPendingEvaluations int
+
+	// SweepInterval is the periodic full pass, and the safety net for whatever
+	// the refresh notifications missed. Zero disables it.
+	SweepInterval time.Duration
+	// SweepOnStartup evaluates the estate once at boot, so a HarborMaster that
+	// was down while containers changed reports compliance without waiting for
+	// the first interval.
+	SweepOnStartup bool
+
+	// EvaluationTimeout bounds one container's pass.
+	EvaluationTimeout time.Duration
+	// MaxPolicies bounds the active set one pass loads. Past it the remainder
+	// are not evaluated and a warning is logged.
+	MaxPolicies int
+	// MaxViolationsPerContainer bounds how many failures one pass may record.
+	// Past it the pass is marked INCOMPLETE rather than truncated silently,
+	// because an incomplete pass has not established that the rules it never
+	// applied now pass.
+	MaxViolationsPerContainer int
+
+	// The definition bounds. These are what the API validates a submitted
+	// policy against, and what bounds the cost of evaluating one.
+	MaxRulesPerPolicy   int
+	MaxValuesPerRule    int
+	MaxNameBytes        int
+	MaxDescriptionBytes int
+
+	// RetentionAge is how long a RESOLVED violation is kept. Open violations
+	// are never pruned: an unreviewed failure does not become less true with
+	// age. Zero keeps resolved history forever.
+	RetentionAge time.Duration
+	// PruneInterval is how often that retention runs.
+	PruneInterval time.Duration
+	// MaxNoteBytes bounds the operator's annotation on a status change.
+	MaxNoteBytes int
+
+	// WriteRateLimit (requests per minute) and WriteRateBurst bound the policy
+	// write endpoints.
+	//
+	// Separate from the snapshot and refresh limiter, and more permissive,
+	// because a rate limit should be proportional to what the request costs. A
+	// snapshot capture or an inventory refresh drives a Docker sweep; a policy
+	// write is one small transaction on HarborMaster's own table. Sharing one
+	// bucket would mean either throttling the cheap operation absurdly -- an
+	// operator building a five-rule policy set would hit 429 -- or
+	// under-protecting the expensive one.
+	//
+	// POST /policy/evaluate shares this bucket: the request itself is cheap,
+	// and what bounds the actual work is the coalescing queue behind it rather
+	// than the rate limit.
+	WriteRateLimit float64
+	WriteRateBurst int
+}
+
 // Drift holds settings for configuration drift detection.
 //
 // Drift compares a container's CURRENT configuration against its baseline
 // snapshot and records the differences. It reads HarborMaster's own inventory
 // and its own snapshots; it never calls Docker, and nothing in this section
 // grants any ability to change a container or to put one back.
+//
+// Distinct from Policy above: drift measures change from a baseline, a policy
+// measures compliance with a rule.
 type Drift struct {
 	// Enabled turns detection on or off. When false nothing is evaluated, the
 	// endpoints report the feature disabled, and no records are written.
@@ -469,6 +606,7 @@ type Config struct {
 	Events      Events
 	Snapshots   Snapshots
 	Drift       Drift
+	Policy      Policy
 }
 
 var (
@@ -684,6 +822,45 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Policy.Enabled, err = boolVar(lookup, "POLICY_ENABLED", DefaultPolicyEnabled)
+	collect(err)
+	cfg.Policy.EvaluateOnEvents, err = boolVar(lookup, "POLICY_EVALUATE_ON_EVENTS", DefaultPolicyEvaluateOnEvents)
+	collect(err)
+	cfg.Policy.SweepOnStartup, err = boolVar(lookup, "POLICY_SWEEP_ON_STARTUP", DefaultPolicySweepOnStartup)
+	collect(err)
+	cfg.Policy.EvaluationDebounce, err = durationVar(lookup, "POLICY_EVALUATION_DEBOUNCE", DefaultPolicyEvaluationDebounce)
+	collect(err)
+	cfg.Policy.SweepInterval, err = durationVar(lookup, "POLICY_SWEEP_INTERVAL", DefaultPolicySweepInterval)
+	collect(err)
+	cfg.Policy.EvaluationTimeout, err = durationVar(lookup, "POLICY_EVALUATION_TIMEOUT", DefaultPolicyEvaluationTimeout)
+	collect(err)
+	cfg.Policy.RetentionAge, err = durationVar(lookup, "POLICY_RETENTION_AGE", DefaultPolicyRetentionAge)
+	collect(err)
+	cfg.Policy.PruneInterval, err = durationVar(lookup, "POLICY_PRUNE_INTERVAL", DefaultPolicyPruneInterval)
+	collect(err)
+	cfg.Policy.WriteRateLimit, err = floatVar(lookup, "POLICY_WRITE_RATE_LIMIT", DefaultPolicyWriteRateLimit)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"POLICY_MAX_PENDING_EVALUATIONS", DefaultPolicyMaxPendingEvaluations, &cfg.Policy.MaxPendingEvaluations},
+		{"POLICY_MAX_POLICIES", DefaultPolicyMaxPolicies, &cfg.Policy.MaxPolicies},
+		{"POLICY_MAX_VIOLATIONS_PER_CONTAINER", DefaultPolicyMaxViolationsPerContainer, &cfg.Policy.MaxViolationsPerContainer},
+		{"POLICY_MAX_RULES_PER_POLICY", DefaultPolicyMaxRulesPerPolicy, &cfg.Policy.MaxRulesPerPolicy},
+		{"POLICY_MAX_VALUES_PER_RULE", DefaultPolicyMaxValuesPerRule, &cfg.Policy.MaxValuesPerRule},
+		{"POLICY_MAX_NAME_BYTES", DefaultPolicyMaxNameBytes, &cfg.Policy.MaxNameBytes},
+		{"POLICY_MAX_DESCRIPTION_BYTES", DefaultPolicyMaxDescriptionBytes, &cfg.Policy.MaxDescriptionBytes},
+		{"POLICY_MAX_NOTE_BYTES", DefaultPolicyMaxNoteBytes, &cfg.Policy.MaxNoteBytes},
+		{"POLICY_WRITE_RATE_BURST", DefaultPolicyWriteRateBurst, &cfg.Policy.WriteRateBurst},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -766,8 +943,69 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Events.validate()...)
 	errs = append(errs, c.Snapshots.validate()...)
 	errs = append(errs, c.Drift.validate()...)
+	errs = append(errs, c.Policy.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the policy settings.
+//
+// Validated even when the engine is disabled, for the same reason the drift
+// settings are: a configuration error that only surfaces the day someone flips
+// the feature on is a worse failure than one caught at startup.
+func (p Policy) validate() []error {
+	var errs []error
+
+	if p.EvaluationDebounce < MinPolicyEvaluationDebounce {
+		errs = append(errs, fmt.Errorf("%sPOLICY_EVALUATION_DEBOUNCE must be at least %s",
+			envPrefix, MinPolicyEvaluationDebounce))
+	}
+	// Zero is the documented way to disable the periodic sweep. A tiny
+	// non-zero one would re-evaluate the estate continuously.
+	if p.SweepInterval != 0 && p.SweepInterval < MinPolicySweepInterval {
+		errs = append(errs, fmt.Errorf("%sPOLICY_SWEEP_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinPolicySweepInterval))
+	}
+	if p.EvaluationTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sPOLICY_EVALUATION_TIMEOUT must be positive", envPrefix))
+	}
+	if p.PruneInterval < MinPolicyPruneInterval {
+		errs = append(errs, fmt.Errorf("%sPOLICY_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPolicyPruneInterval))
+	}
+	// Zero disables resolved-violation pruning, which is valid but unbounded.
+	// Negative is not a way to do anything.
+	if p.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sPOLICY_RETENTION_AGE must not be negative", envPrefix))
+	}
+	// A non-positive rate would mean "no writes at all", which is a way to
+	// disable the feature by accident rather than a way to configure it.
+	if p.WriteRateLimit <= 0 || p.WriteRateLimit > MaxPolicyWriteRateLimit {
+		errs = append(errs, fmt.Errorf("%sPOLICY_WRITE_RATE_LIMIT must be between 0 (exclusive) and %.0f",
+			envPrefix, MaxPolicyWriteRateLimit))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"POLICY_MAX_PENDING_EVALUATIONS", p.MaxPendingEvaluations, 1, MaxPolicyPendingEvaluations},
+		{"POLICY_MAX_POLICIES", p.MaxPolicies, 1, MaxPolicyCount},
+		{"POLICY_MAX_VIOLATIONS_PER_CONTAINER", p.MaxViolationsPerContainer, 1, MaxPolicyViolationsPerContainer},
+		{"POLICY_MAX_RULES_PER_POLICY", p.MaxRulesPerPolicy, 1, MaxPolicyRulesPerPolicy},
+		{"POLICY_MAX_VALUES_PER_RULE", p.MaxValuesPerRule, 1, MaxPolicyValuesPerRule},
+		{"POLICY_MAX_NAME_BYTES", p.MaxNameBytes, 1, MaxPolicyNameBytes},
+		{"POLICY_MAX_DESCRIPTION_BYTES", p.MaxDescriptionBytes, 1, MaxPolicyDescriptionBytes},
+		{"POLICY_MAX_NOTE_BYTES", p.MaxNoteBytes, 1, MaxPolicyNoteBytes},
+		{"POLICY_WRITE_RATE_BURST", p.WriteRateBurst, 1, MaxPolicyWriteRateBurst},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the drift settings.

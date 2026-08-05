@@ -36,6 +36,16 @@ type Server struct {
 	drift DriftReader
 	// driftCfg carries the note length bound for the PATCH endpoint.
 	driftCfg config.Drift
+
+	// policies answers the policy endpoints, and policyEngine schedules the
+	// manual pass. Both nil in a deployment with the policy engine disabled,
+	// which yields a 503 rather than a broken route.
+	policies     PolicyStore
+	policyEngine PolicyEvaluator
+	// policyCfg carries the definition and note bounds the API validates
+	// against, so one configured value governs both what the API accepts and
+	// what the engine can be asked to evaluate.
+	policyCfg config.Policy
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -48,9 +58,13 @@ type Server struct {
 	cfg    config.Server
 	// snapshotCfg carries the write-endpoint and diff limits.
 	snapshotCfg config.Snapshots
-	// writeLimiter bounds the two POST endpoints. Per process, not per client:
-	// there is no authentication and therefore no trustworthy client identity.
+	// writeLimiter bounds the snapshot and refresh POST endpoints. Per process,
+	// not per client: there is no authentication and therefore no trustworthy
+	// client identity.
 	writeLimiter *rateLimiter
+	// policyLimiter bounds the policy write endpoints, on its own more
+	// permissive budget. See guardPolicyWrite for why the two differ.
+	policyLimiter *rateLimiter
 
 	assets  fs.FS
 	handler http.Handler
@@ -110,6 +124,19 @@ type Options struct {
 	// DriftConfig supplies the note length bound for the PATCH endpoint.
 	DriftConfig config.Drift
 
+	// Policies answers the policy endpoints and PolicyEngine schedules the
+	// manual pass. Both nil in a deployment with the policy engine disabled,
+	// which yields a 503 rather than a broken route.
+	//
+	// This is the first capability in the router that CREATES, UPDATES and
+	// WITHDRAWS a record on request. It acts only on HarborMaster's own rows:
+	// a policy is a rule configuration is checked against, never one that is
+	// applied to Docker.
+	Policies     PolicyStore
+	PolicyEngine PolicyEvaluator
+	// PolicyConfig supplies the definition and note bounds.
+	PolicyConfig config.Policy
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -149,7 +176,12 @@ func NewServer(opts Options) *Server {
 
 		drift:    opts.Drift,
 		driftCfg: opts.DriftConfig,
-		now:      now,
+
+		policies:     opts.Policies,
+		policyEngine: opts.PolicyEngine,
+		policyCfg:    opts.PolicyConfig,
+
+		now: now,
 
 		logger:      logger,
 		cfg:         opts.Config,
@@ -160,6 +192,11 @@ func NewServer(opts Options) *Server {
 	s.writeLimiter = newRateLimiter(
 		opts.SnapshotConfig.WriteRateLimit,
 		opts.SnapshotConfig.WriteRateBurst,
+		nil,
+	)
+	s.policyLimiter = newRateLimiter(
+		opts.PolicyConfig.WriteRateLimit,
+		opts.PolicyConfig.WriteRateBurst,
 		nil,
 	)
 
@@ -269,6 +306,52 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+APIPrefix+"/drift/{id}", s.handleDriftDetail)
 	mux.HandleFunc("PATCH "+APIPrefix+"/drift/{id}", s.handleDriftPatch)
 	mux.HandleFunc(APIPrefix+"/drift/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH"))
+
+	// The policy engine.
+	//
+	// The first routes in HarborMaster that create, update and withdraw a
+	// record on request. Every one of them acts on HARBORMASTER'S OWN ROWS: a
+	// policy is a rule that configuration is CHECKED AGAINST, never one that is
+	// applied to Docker. There is no enforce, no remediate, and no apply route,
+	// and nothing here can reach the daemon.
+	mux.HandleFunc("GET "+APIPrefix+"/policies", s.handlePolicies)
+	mux.HandleFunc("POST "+APIPrefix+"/policies", s.handlePolicyCreate)
+	mux.HandleFunc(APIPrefix+"/policies", s.handleMethodNotAllowed("GET, HEAD, POST"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/policies/{id}", s.handlePolicyDetail)
+	mux.HandleFunc("PATCH "+APIPrefix+"/policies/{id}", s.handlePolicyUpdate)
+	// DELETE ARCHIVES. A violation references its policy and the history must
+	// survive the rule being withdrawn, so the row is retained and its open
+	// violations resolve. See policy_handlers.go.
+	mux.HandleFunc("DELETE "+APIPrefix+"/policies/{id}", s.handlePolicyDelete)
+	mux.HandleFunc(APIPrefix+"/policies/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH, DELETE"))
+
+	// The rule catalogue, so the policy editor is built from the same source of
+	// truth the validator uses.
+	mux.HandleFunc("GET "+APIPrefix+"/policy-rules", s.handlePolicyRules)
+	mux.HandleFunc(APIPrefix+"/policy-rules", s.handleMethodNotAllowed("GET, HEAD"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/policy-summary", s.handlePolicySummary)
+	mux.HandleFunc(APIPrefix+"/policy-summary", s.handleMethodNotAllowed("GET, HEAD"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/policy-violations", s.handlePolicyViolations)
+	mux.HandleFunc(APIPrefix+"/policy-violations", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// Three segments, so this never overlaps the two-segment
+	// /policy-violations/{id} below.
+	mux.HandleFunc("GET "+APIPrefix+"/policy-violations/container/{id}", s.handlePolicyByContainer)
+	mux.HandleFunc(APIPrefix+"/policy-violations/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/policy-violations/{id}", s.handlePolicyViolationDetail)
+	mux.HandleFunc("PATCH "+APIPrefix+"/policy-violations/{id}", s.handlePolicyViolationPatch)
+	mux.HandleFunc(APIPrefix+"/policy-violations/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH"))
+
+	// The manual pass. ASYNCHRONOUS: it schedules work through the same
+	// coalescing queue the scheduled passes use, so calling it in a loop
+	// produces one pass rather than a backlog, and no caller can hold a
+	// request open across a thousand-container sweep.
+	mux.HandleFunc("POST "+APIPrefix+"/policy/evaluate", s.handlePolicyEvaluate)
+	mux.HandleFunc(APIPrefix+"/policy/evaluate", s.handleMethodNotAllowed("POST"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

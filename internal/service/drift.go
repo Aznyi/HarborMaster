@@ -116,7 +116,7 @@ type DriftService struct {
 
 	// queue coalesces per-container evaluation requests. See drift_worker.go
 	// for why drift has its own rather than joining the refresh scheduler.
-	queue *driftQueue
+	queue *evaluationQueue
 
 	// diffs is the drift engine's OWN diff engine instance.
 	//
@@ -180,7 +180,7 @@ func NewDriftService(opts DriftOptions) *DriftService {
 		inventory:  opts.Inventory,
 		spec:       opts.SpecBuilder,
 		diffs:      NewDiffEngine(diffCfg),
-		queue:      newDriftQueue(cfg.EvaluationDebounce, cfg.MaxPendingEvaluations, now),
+		queue:      newEvaluationQueue(cfg.EvaluationDebounce, cfg.MaxPendingEvaluations, now),
 		cfg:        cfg,
 		logger:     logger,
 		now:        now,

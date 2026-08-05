@@ -112,13 +112,29 @@ largest residual risk in the product.
 
 | Surface | Methods | Notes |
 | --- | --- | --- |
-| 21 REST endpoints under `/api/v1` | GET, plus 2 POST | Full list in `api/openapi.yaml` |
+| 33 REST endpoints under `/api/v1` | Mostly GET | Full list in `api/openapi.yaml` |
 | `POST /api/v1/inventory/refresh` | POST | Drives a full Docker sweep |
 | `POST /api/v1/snapshots` | POST | Writes to the database |
 | `PATCH /api/v1/drift/{id}` | PATCH | Moves a drift record's status. Cannot reach Docker, a container, or a snapshot; cannot set `active` or `resolved` |
 | 4 drift read endpoints | GET | Drift records, summary, and per-container view |
+| `POST` / `PATCH` / `DELETE /api/v1/policies` | POST, PATCH, DELETE | **The first create/update/delete surface.** Acts on HarborMaster's own rows only. `DELETE` archives rather than destroys, and the schema refuses a delete that would orphan violation history |
+| `PATCH /api/v1/policy-violations/{id}` | PATCH | Moves a violation's status; cannot set `active` or `resolved`, and does not suppress re-evaluation |
+| `POST /api/v1/policy/evaluate` | POST | Schedules a compliance pass and answers 202. Coalesced through the same queue the scheduled passes use, so a loop produces one pass; rate limited on top |
+| 5 policy read endpoints | GET | Definitions, the rule catalogue, violations, summary, per-container view |
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
+
+**The policy write surface is the notable change in this phase**, so it is worth
+being explicit about what an anonymous caller can do with it: create, edit, and
+withdraw HarborMaster's own compliance rules, and ask for a compliance pass. It
+cannot change a container, cannot reach the Docker socket, cannot destroy
+violation history, and cannot supply anything that is interpreted as code. The
+bounds on policy size, rule count, value count, and pattern shape are what stop
+it being used to make evaluation expensive; the per-process rate limit and the
+asynchronous evaluate endpoint are what stop it being used to occupy the
+process. Under R1 (no authentication) an attacker who can reach the port can
+also **disable a policy and hide non-compliance from the dashboard** — the
+definition and its history survive, but the report stops being trustworthy.
 
 ### Not network-reachable
 
@@ -273,6 +289,9 @@ Ordered by severity. These are accepted, not solved.
 | R11 | **Migration edits predating this version are undetectable.** Checksums are recorded from this release onward and backfilled for older rows | **Low** | Nothing can retroactively prove what an already-applied file contained; the evidence does not exist | Every edit from this version forward is detected and refuses the open |
 | R12 | **`diagnose` cannot read a database left with a hot write-ahead log by a crashed process**, because replaying it is a write and the diagnosis is read-only | **Low** | The read-only guarantee is worth more than reading in this one state; the filesystem-level findings still render | Start HarborMaster once to replay the log, then re-run; the condition is reported explicitly rather than as corruption |
 | R13 | **An integrity check that times out establishes nothing**, and startup continues | **Low** | Refusing on an *incomplete* check would turn a slow disk into an outage; a false-positive refusal is worse than a late diagnosis | Raise `DB_INTEGRITY_TIMEOUT`, or run `harbormaster diagnose`, which uses the full check with no startup pressure |
+| R15 | **Anyone who can reach the API can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Medium** | Follows from R1; the policy surface has no separate authentication because HarborMaster has none | The definition and every violation it found are retained, so the change is visible and reversible rather than destructive; loopback bind and an authenticating proxy |
+| R16 | **A policy is only as good as the configuration HarborMaster can see.** Capability rules evaluate declared `capAdd` and cannot see the daemon's default set; `networkAllowlist` evaluates attached networks and cannot distinguish `container:<id>` namespace sharing from having no network | **Medium** | The alternative is hardcoding a claim about a daemon HarborMaster has not asked, which would be confidently wrong rather than honestly narrow | Stated in each rule's catalogue description, in the violation's reason, and in the editor; the network rule fails closed on an empty attachment set |
+| R17 | **Compliance reflects the last inventory refresh, not the live host.** A container changed between refreshes is reported against stale configuration until the next pass | **Low** | Evaluating against the daemon on demand would put a Docker call behind an unauthenticated endpoint | A pass runs after every successful refresh and after a targeted refresh commits; the inventory generation is recorded on every violation |
 | R14 | **A wedged background task can be abandoned at shutdown** once the grace period elapses | **Low** | An unbounded wait is not recoverable; an abandoned SQLite transaction is rolled back by the database | Logged at error level with what was abandoned; raise `SHUTDOWN_TIMEOUT` |
 
 ---

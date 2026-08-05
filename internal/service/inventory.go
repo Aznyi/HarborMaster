@@ -63,6 +63,12 @@ type InventoryService struct {
 	// targeted.go for why it does not serialise against a full refresh.
 	targeted targetedState
 
+	// observers are notified once a full refresh has COMMITTED. Guarded by mu
+	// alongside the refresh state: the slice is written once during startup
+	// wiring, but a status read and a refresh can race with that write, and a
+	// data race is not something to leave to convention.
+	observers []RefreshObserver
+
 	// suppressPeriodic disables this service's own refresh ticker because
 	// another component owns periodic full reconciliation. Phase 2.5's event
 	// engine sets it: two independent full-refresh timers would double the load
@@ -122,6 +128,50 @@ func NewInventoryService(opts InventoryOptions) *InventoryService {
 		suppressPeriodic: opts.SuppressPeriodic,
 		shutdownGrace:    grace,
 		now:              now,
+	}
+}
+
+// RefreshObserver is notified once a full refresh has COMMITTED.
+//
+// Committed, not started and not finished-collecting. An observer that ran
+// before the write would read the generation the refresh is about to replace,
+// which for a compliance or drift pass means comparing against data that is
+// always one generation stale.
+//
+// Implementations MUST NOT BLOCK. The notification runs on the refresh
+// goroutine, so an observer that waits on work turns into a stalled refresh
+// loop. Both current observers only enqueue.
+type RefreshObserver interface {
+	InventoryRefreshed(generation int64)
+}
+
+// AddRefreshObserver registers an observer of committed refreshes.
+//
+// Called during startup wiring. It is an adder rather than a constructor
+// option because the observers need the inventory service themselves, and the
+// two would otherwise form a construction cycle.
+func (s *InventoryService) AddRefreshObserver(observer RefreshObserver) {
+	if observer == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observers = append(s.observers, observer)
+}
+
+// notifyRefreshed tells every observer that a refresh has committed.
+//
+// The slice is COPIED under the lock and the calls are made outside it, so an
+// observer can never re-enter the inventory service and deadlock against the
+// refresh state it is holding.
+func (s *InventoryService) notifyRefreshed(generation int64) {
+	s.mu.RLock()
+	observers := make([]RefreshObserver, len(s.observers))
+	copy(observers, s.observers)
+	s.mu.RUnlock()
+
+	for _, observer := range observers {
+		observer.InventoryRefreshed(generation)
 	}
 }
 
@@ -410,6 +460,11 @@ func (s *InventoryService) execute(ctx context.Context, trigger domain.RefreshTr
 		s.logger.Error("could not persist inventory refresh", slog.String("error", err.Error()))
 		return record, err
 	}
+
+	// Observers are notified only now, after the commit succeeded. Everything
+	// downstream -- policy compliance, and anything added later -- therefore
+	// reads data that is actually in the database.
+	s.notifyRefreshed(persisted.Generation)
 
 	s.logger.Info("inventory refresh complete",
 		slog.String("trigger", string(trigger)),

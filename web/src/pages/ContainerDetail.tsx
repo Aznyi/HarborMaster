@@ -11,6 +11,12 @@ import { useApiResource } from "../hooks/useApiResource";
 import { useContainerDetail } from "../hooks/useContainers";
 import { useDockerEventPage } from "../hooks/useDockerEvents";
 import { useSnapshots } from "../hooks/useSnapshots";
+import { useContainerPolicy } from "../hooks/usePolicies";
+import {
+  PolicySeverityBadge,
+  PolicyStatusBadge,
+} from "../components/PolicyBadges";
+import { RULE_LABELS } from "../api/policyTypes";
 import { EventResultBadge } from "../components/EventBadges";
 import { ReadinessBadge, TriggerBadge } from "../components/SnapshotBadges";
 import {
@@ -27,6 +33,7 @@ import {
 } from "../components/InventoryBadges";
 import {
   DisconnectedState,
+  EmptyState,
   ErrorState,
   LoadingState,
 } from "../components/States";
@@ -43,6 +50,7 @@ const TABS = [
   "Labels",
   "Compose",
   "Snapshots",
+  "Policy",
   "Events",
   "Raw inspection",
 ] as const;
@@ -133,6 +141,7 @@ export function ContainerDetailPage() {
         {tab === "Labels" && <LabelsTab detail={container} />}
         {tab === "Compose" && <ComposeTab detail={container} />}
         {tab === "Snapshots" && <SnapshotsTab id={container.overview.id} />}
+        {tab === "Policy" && <PolicyTab id={container.overview.id} />}
         {tab === "Events" && <EventsTab id={container.overview.id} />}
         {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
       </div>
@@ -881,4 +890,111 @@ function nonZero(value: number | undefined): string | undefined {
 
 function optionalNumber(value: number | undefined): string | undefined {
   return value === undefined ? undefined : String(value);
+}
+
+/** How many violations the container detail lists before deferring to the page. */
+const RECENT_VIOLATION_LIMIT = 10;
+
+/**
+ * This container's compliance.
+ *
+ * Read-only, like every other tab. There is no remediation control and no
+ * enforce button: a policy is a rule configuration is CHECKED AGAINST, and
+ * HarborMaster has no capability to change a container to satisfy one.
+ *
+ * The banner is the point of the tab. "No violations" and "never evaluated"
+ * look identical in a list and mean opposite things, so the evaluation is
+ * reported explicitly rather than inferred from an empty result.
+ */
+function PolicyTab({ id }: { id: string }) {
+  const query = useMemo(
+    () => ({ pageSize: RECENT_VIOLATION_LIMIT, page: 1, openOnly: true }),
+    [],
+  );
+  const state = useContainerPolicy(id, query);
+
+  if (state.status === "loading") {
+    return <LoadingState label="Loading compliance" />;
+  }
+  if (state.status === "disconnected") {
+    return <DisconnectedState onRetry={state.refresh} />;
+  }
+  if (state.error) {
+    return <ErrorState error={state.error} onRetry={state.refresh} />;
+  }
+
+  const violations = state.data?.violations ?? [];
+  const evaluation = state.data?.evaluation;
+
+  return (
+    <div className="space-y-4">
+      {!evaluation ? (
+        <p
+          role="status"
+          className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm text-content-muted"
+        >
+          This container has never been evaluated against any policy, so an
+          empty list here means <strong>not checked</strong> rather than{" "}
+          <strong>compliant</strong>.
+        </p>
+      ) : (
+        <p className="text-xs text-content-muted">
+          Last evaluated{" "}
+          <time dateTime={evaluation.evaluatedAt}>
+            {new Date(evaluation.evaluatedAt).toLocaleString()}
+          </time>{" "}
+          against {evaluation.policiesEvaluated}{" "}
+          {evaluation.policiesEvaluated === 1 ? "policy" : "policies"}
+          {evaluation.complete
+            ? "."
+            : " — the pass could not apply every policy, so this list may be incomplete."}
+        </p>
+      )}
+
+      {violations.length === 0 ? (
+        <EmptyState
+          title={
+            evaluation
+              ? "Compliant with every enabled policy"
+              : "Not evaluated"
+          }
+          description={
+            evaluation
+              ? "Every rule this container was checked against passed."
+              : "Compliance is evaluated in the background after each inventory refresh."
+          }
+        />
+      ) : (
+        <ul className="space-y-2">
+          {violations.map((violation) => (
+            <li
+              key={violation.id}
+              className="rounded-lg border border-border-subtle bg-surface p-3"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <PolicySeverityBadge severity={violation.severity} />
+                <PolicyStatusBadge status={violation.status} />
+                <span className="text-sm text-content">
+                  {RULE_LABELS[violation.ruleType] ?? violation.ruleType}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-content-muted">
+                {violation.policyName}
+                {violation.reason ? ` — ${violation.reason}` : ""}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="text-sm">
+        <Link
+          to={`/policy/container/${id}`}
+          className="text-accent hover:underline"
+        >
+          Full compliance history
+        </Link>
+      </p>
+    </div>
+  );
 }

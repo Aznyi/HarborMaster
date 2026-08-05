@@ -71,6 +71,14 @@ var routedPaths = []string{
 	APIPrefix + "/inventory/filters",
 	APIPrefix + "/inventory/refresh",
 	APIPrefix + "/networks",
+	APIPrefix + "/policies",
+	APIPrefix + "/policies/{id}",
+	APIPrefix + "/policy-rules",
+	APIPrefix + "/policy-summary",
+	APIPrefix + "/policy-violations",
+	APIPrefix + "/policy-violations/container/{id}",
+	APIPrefix + "/policy-violations/{id}",
+	APIPrefix + "/policy/evaluate",
 	APIPrefix + "/snapshots",
 	APIPrefix + "/snapshots/{id}",
 	APIPrefix + "/snapshots/{id}/diff",
@@ -82,6 +90,11 @@ var routedPaths = []string{
 // There is no restore, rollback, or apply path, and this is the list that would
 // have to change for one to appear. Phase 3 records configuration and validates
 // whether it could be restored; it does not restore.
+//
+// Nor is there a policy ENFORCE, apply, or remediate path. Phase 5 checks
+// configuration against administrator-defined rules and reports what fails; it
+// does not change a container to satisfy one, and adding a route that did would
+// have to be added to this literal in a diff a reviewer sees.
 
 func TestOpenAPIDocumentsExactlyTheRoutedPaths(t *testing.T) {
 	documented := documentedPaths(t)
@@ -123,8 +136,10 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 		// Substitute a concrete value for the wildcard so the request routes.
 		target := strings.ReplaceAll(pattern, "{id}", "1")
 
+		// The two POST-only paths. Everything else answers GET.
 		method := http.MethodGet
-		if pattern == APIPrefix+"/inventory/refresh" {
+		switch pattern {
+		case APIPrefix + "/inventory/refresh", APIPrefix + "/policy/evaluate":
 			method = http.MethodPost
 		}
 

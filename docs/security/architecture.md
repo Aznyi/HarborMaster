@@ -104,6 +104,45 @@ a positive control proves no value reaches storage.
 cosmetic one: ranking the field instead of the movement would rank an operator
 *fixing* a container as critical, and a dashboard that cries wolf gets ignored.
 
+## 3b. Policy engine
+
+A policy is an administrator-defined rule that a container's configuration is
+**checked against**. It is never applied, enforced, or pushed to the daemon:
+there is no enforcement path, no remediation, and no call into
+`docker.Runtime` anywhere behind it.
+
+This is the first phase to add a create/update/delete surface, so what that
+surface reaches matters. Every policy write acts on **HarborMaster's own rows**.
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| No interpreter | Rules are a closed catalogue of 16 typed checks whose semantics are fixed at compile time; nothing an administrator writes is evaluated as code | `internal/domain/policy_rules.go` |
+| Secrets unreachable by construction | Rules run against `PolicyTarget`, which carries env NAMES and has no field able to hold a value | `NewPolicyTarget` |
+| No pattern can be made expensive | Iterative matcher with one backtrack point (no recursion, so no exponential path); pattern length, wildcard count and subject length all capped; over-budget patterns refused at write time | `internal/domain/policy_glob.go` |
+| Definition cost is bounded | Rules per policy, values per rule, active policies per pass, and violations per container are all configured caps validated on write | `internal/config/config.go` |
+| Identifiers are unguessable and immutable | `pol_` + 80 bits from `crypto/rand`; never accepted from a caller; `PolicyUpdate` has no field for it | `domain.NewPolicyID` |
+| An incomplete pass resolves nothing | `resolveCompliantViolations` returns early when `Complete` is false | `internal/store/policy_repository.go` |
+| Compliance cannot be asserted from ignorance | `CHECK (compliant = 0 OR (complete = 1 AND violation_count = 0))` | `migrations/0006_policy.sql` |
+| Table growth is bounded | `UNIQUE (container_id, policy_id, rule_type)`; repeats upsert | `migrations/0006_policy.sql` |
+| Engine/operator status split | `PATCH` validates against `OperatorPolicyStatuses`, which excludes `active` and `resolved` | `internal/api/policy_handlers.go` |
+| History survives a withdrawal | `DELETE` archives; `ON DELETE RESTRICT` refuses a delete that would orphan violations | `migrations/0006_policy.sql` |
+| No unauthenticated caller can drive a sweep synchronously | `POST /policy/evaluate` schedules and answers 202; coalesced by the shared evaluation queue and rate limited | `internal/api/policy_handlers.go` |
+| No N+1 | The sweep loads the active set once and applies it to every container | `internal/service/policy.go` |
+
+**Two rules are narrower than their names, and say so.** Capability rules
+evaluate the *declared* `capAdd` — HarborMaster cannot see the daemon's default
+capability set, and hardcoding Docker's default list would be a claim about a
+daemon it has not asked. `networkAllowlist` evaluates *attached networks*,
+which is how Docker surfaces the network mode; a container attached to no
+network of its own shares another's namespace and fails an allowlist, which is
+the fail-closed direction.
+
+**Why no regular expressions.** Go's `regexp` is RE2 and has no catastrophic
+backtracking, so ReDoS would not arise there either. Globs are still the better
+choice: two metacharacters, no construct whose cost is non-obvious, and a
+matcher short enough to reason about in full. Nothing in HarborMaster compiles a
+caller-supplied regular expression.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |
@@ -282,5 +321,8 @@ Listing these so their absence reads as a decision rather than an oversight.
 | Template or plugin execution | Same |
 | User-controlled file access | Same |
 | Host filesystem inspection | Interface exists, answers `unverifiable` |
-| Expression languages in the API | An interpreter on an unauthenticated endpoint is a DoS and injection surface |
+| Expression languages in the API | An interpreter on an unauthenticated endpoint is a DoS and injection surface. Policies are typed structs from a closed catalogue for exactly this reason |
+| Policy enforcement | HarborMaster checks configuration against a rule; changing a container to satisfy one would be a Docker mutation |
+| Permanent policy deletion | Violations reference their policy and the history must survive a withdrawal. `DELETE` archives |
+| Policy scoping / selectors | Every enabled policy applies to the whole estate. A selector language would be a second thing an unauthenticated caller could make expensive |
 | TLS termination | A reverse proxy's job |

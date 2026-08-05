@@ -368,10 +368,42 @@ func run() error {
 		Logger: logger,
 	})
 
-	// The event engine schedules a drift evaluation once a refresh has
+	// The policy engine.
+	//
+	// A policy is an administrator-defined rule that a container's
+	// configuration is CHECKED AGAINST. It is never applied, enforced, or
+	// pushed to the daemon: the engine reads the inventory HarborMaster has
+	// already persisted, applies rules in memory, and writes the failures to
+	// its own tables.
+	//
+	// Independent of drift above, not layered on it. Drift measures change
+	// from a baseline; a policy measures compliance with a rule. A container
+	// can drift into a still-compliant configuration, and one that has never
+	// moved can be non-compliant from the day it was created because the rule
+	// arrived later.
+	policies := service.NewPolicyService(service.PolicyOptions{
+		Definitions: db.Policies,
+		Containers:  db.Containers,
+		Violations:  db.Policies,
+		Pruner:      db.Policies,
+		Inventory:   db.Inventory,
+		Config:      cfg.Policy,
+		Logger:      logger,
+	})
+
+	// The event engine schedules an evaluation once a TARGETED refresh has
 	// COMMITTED, never on the raw event: evaluating before the inventory is
-	// written would compare the baseline against data one generation stale.
-	events.SetDriftScheduler(drift)
+	// written would read data one generation stale. Drift and policy are
+	// separate consumers of the same signal.
+	events.AddEvaluationScheduler(drift)
+	events.AddEvaluationScheduler(policies)
+
+	// A full compliance pass runs after every SUCCESSFUL INVENTORY REFRESH.
+	// The observer fires once the refresh has committed, so a pass always
+	// reads committed data -- and because every refresh path (startup,
+	// periodic, manual, and the event engine's reconciliation) funnels through
+	// that commit, one hook covers all four.
+	inventory.AddRefreshObserver(policies)
 
 	// SHUTDOWN ORDER, and why it is what it is.
 	//
@@ -397,7 +429,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(4)
+	background.Add(5)
 
 	go func() {
 		defer background.Done()
@@ -414,6 +446,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		drift.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		policies.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -440,6 +476,10 @@ func run() error {
 
 		Drift:       db.Drift,
 		DriftConfig: cfg.Drift,
+
+		Policies:     db.Policies,
+		PolicyEngine: policies,
+		PolicyConfig: cfg.Policy,
 
 		Logger:         logger,
 		Config:         cfg.Server,

@@ -357,11 +357,31 @@ func (l *rateLimiter) allow() (bool, time.Duration) {
 // Returns an error the caller renders; a nil return means the request may
 // proceed.
 func (s *Server) guardWrite(r *http.Request) error {
+	return s.guardWriteWith(r, s.writeLimiter)
+}
+
+// guardPolicyWrite is guardWrite against the POLICY limiter.
+//
+// A separate bucket, and deliberately a more permissive one. A rate limit
+// should be proportional to what the request costs: a snapshot capture or an
+// inventory refresh drives a Docker sweep, while a policy write is one small
+// transaction on HarborMaster's own table. Sharing one bucket would mean either
+// throttling the cheap operation absurdly -- an operator building a five-rule
+// policy set would hit 429 -- or under-protecting the expensive one.
+//
+// POST /policy/evaluate uses this bucket too. The request is cheap; what bounds
+// the work it schedules is the coalescing queue behind it, not this limiter.
+func (s *Server) guardPolicyWrite(r *http.Request) error {
+	return s.guardWriteWith(r, s.policyLimiter)
+}
+
+// guardWriteWith applies the checks against a specific bucket.
+func (s *Server) guardWriteWith(r *http.Request, limiter *rateLimiter) error {
 	if err := checkFetchMetadata(r); err != nil {
 		return err
 	}
-	if s.writeLimiter != nil {
-		if allowed, retryAfter := s.writeLimiter.allow(); !allowed {
+	if limiter != nil {
+		if allowed, retryAfter := limiter.allow(); !allowed {
 			return writeGuardError{
 				status:     http.StatusTooManyRequests,
 				code:       CodeConflict,

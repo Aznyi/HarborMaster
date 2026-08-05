@@ -71,11 +71,11 @@ type EventService struct {
 	// abandoned mid-write. See GraceContext.
 	shutdownGrace time.Duration
 
-	// drift is notified once a refresh has COMMITTED, never on the raw event.
-	// Evaluating before the inventory is written would compare the baseline
-	// against data one generation stale -- every time. Nil when drift
-	// detection is disabled, in which case nothing is scheduled.
-	drift DriftScheduler
+	// evaluators are notified once a targeted refresh has COMMITTED, never on
+	// the raw event. Evaluating before the inventory is written would read data
+	// one generation stale -- every time. Empty when both the drift engine and
+	// the policy engine are disabled, in which case nothing is scheduled.
+	evaluators []EvaluationScheduler
 
 	// now and jitter are injectable so timing behaviour is deterministic in
 	// tests. Backoff tests must not depend on real elapsed time.
@@ -233,26 +233,35 @@ func (s *EventService) Subscribe() (*StreamSubscription, error) {
 // configuration.
 var ErrEventsDisabled = errors.New("event engine is disabled")
 
-// DriftScheduler is the drift capability the event engine notifies.
+// EvaluationScheduler is the capability the event engine notifies once a
+// refresh has committed.
 //
 // Deliberately narrow: the event engine can ASK for an evaluation and nothing
-// else. It cannot read drift, change a record, or block on the work. Both
+// else. It cannot read a result, change a record, or block on the work. Both
 // methods are non-blocking by contract, because the event engine's worker must
 // never wait on a downstream consumer -- that is how a slow consumer turns
 // into a stalled Docker event stream.
-type DriftScheduler interface {
+//
+// Both the drift engine and the policy engine implement it. They are separate
+// consumers of the same signal rather than one calling the other: drift
+// measures change from a baseline, a policy measures compliance with a rule,
+// and neither result is derivable from the other.
+type EvaluationScheduler interface {
 	RequestEvaluation(containerID string)
 	RequestSweep()
 }
 
-// SetDriftScheduler wires drift evaluation to refresh completion.
+// AddEvaluationScheduler wires an engine to refresh completion.
 //
-// Called once during startup wiring, before Run. It is a setter rather than a
-// constructor option because the drift service needs the inventory service,
-// which needs the event engine's suppression flag -- the three would otherwise
-// form a construction cycle.
-func (s *EventService) SetDriftScheduler(scheduler DriftScheduler) {
-	s.drift = scheduler
+// Called during startup wiring, before Run. It is an adder rather than a
+// constructor option because the engines need the inventory service, which
+// needs the event engine's suppression flag -- the three would otherwise form a
+// construction cycle.
+func (s *EventService) AddEvaluationScheduler(scheduler EvaluationScheduler) {
+	if scheduler == nil {
+		return
+	}
+	s.evaluators = append(s.evaluators, scheduler)
 }
 
 // Run drives the whole engine until ctx is cancelled.
@@ -805,7 +814,7 @@ func (s *EventService) runTargeted(ctx context.Context, keys []refreshKey) {
 			// the inventory this refresh just wrote rather than the one it
 			// replaced. Non-blocking: the drift queue coalesces and never
 			// makes this worker wait.
-			s.scheduleDrift(key)
+			s.scheduleEvaluation(key)
 			continue
 		}
 
@@ -829,21 +838,23 @@ func (s *EventService) runTargeted(ctx context.Context, keys []refreshKey) {
 	}
 }
 
-// scheduleDrift asks for a drift evaluation of whatever a targeted refresh
-// just rewrote.
+// scheduleEvaluation asks the drift and policy engines to re-examine whatever
+// a targeted refresh just rewrote.
 //
 // Only the refresh kinds that change a CONTAINER's configuration schedule
 // anything. An image, network or volume refresh rewrites catalogue rows, not a
 // container's spec, so evaluating on those would re-compare every container
 // against an unchanged baseline for no reason -- and on a busy host that is
 // the difference between a handful of evaluations and a continuous sweep.
-func (s *EventService) scheduleDrift(key refreshKey) {
-	if s.drift == nil {
+func (s *EventService) scheduleEvaluation(key refreshKey) {
+	if len(s.evaluators) == 0 {
 		return
 	}
 	switch key.kind {
 	case domain.RefreshContainer:
-		s.drift.RequestEvaluation(key.target)
+		for _, evaluator := range s.evaluators {
+			evaluator.RequestEvaluation(key.target)
+		}
 	case domain.RefreshContainerAbsent:
 		// A container that has gone has no current configuration to compare.
 		// Its records stay as they were: they describe what was true while it
@@ -903,8 +914,8 @@ func (s *EventService) runReconciliation(ctx context.Context, trigger domain.Ref
 		// have moved. Requested rather than run here: drift evaluation is the
 		// drift worker's job, and doing it on this goroutine would make the
 		// event engine wait on a comparison per container.
-		if s.drift != nil {
-			s.drift.RequestSweep()
+		for _, evaluator := range s.evaluators {
+			evaluator.RequestSweep()
 		}
 		s.logger.Info("event-driven reconciliation complete",
 			slog.String("trigger", string(trigger)))

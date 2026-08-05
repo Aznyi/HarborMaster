@@ -9,6 +9,9 @@ import { Dashboard } from "./pages/Dashboard";
 import { Drift } from "./pages/Drift";
 import { Events } from "./pages/Events";
 import { Images } from "./pages/Images";
+import { ContainerPolicy } from "./pages/ContainerPolicy";
+import { Policies } from "./pages/Policies";
+import { PolicyViolations } from "./pages/PolicyViolations";
 import { Settings } from "./pages/Settings";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
@@ -34,6 +37,9 @@ export function App() {
         <Route path="/snapshots/:id/readiness" element={<SnapshotReadinessPage />} />
         <Route path="/drift" element={<Drift />} />
         <Route path="/drift/container/:id" element={<ContainerDrift />} />
+        <Route path="/policies" element={<Policies />} />
+        <Route path="/compliance" element={<PolicyViolations />} />
+        <Route path="/policy/container/:id" element={<ContainerPolicy />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

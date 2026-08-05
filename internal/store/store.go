@@ -69,6 +69,12 @@ type DB struct {
 	// them: a snapshot is immutable evidence and must have one home.
 	Drift *DriftRepository
 
+	// Policies holds administrator-defined compliance rules and the violations
+	// they produce. Distinct from Drift above: drift measures change from a
+	// baseline, a policy measures compliance with a rule. A container can drift
+	// while staying compliant, and comply while never having drifted.
+	Policies *PolicyRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -272,6 +278,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 
 		DockerEvents: &DockerEventRepository{db: sqlDB},
 		Drift:        &DriftRepository{db: sqlDB},
+		Policies:     &PolicyRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,
