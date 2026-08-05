@@ -91,6 +91,20 @@ func (h *staticHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
+
+	// gosec's taint analysis flags this as XSS (G705) because `index` reaches
+	// the response body from a file read. It is a false positive, and the
+	// reason is structural rather than a judgement call: the path is the
+	// LITERAL "index.html", and h.assets is an embed.FS compiled into the
+	// binary. The bytes are build output. No request, no Docker payload, and
+	// no database row can influence what is read here or reach this response.
+	//
+	// The genuine XSS surface for a SPA is what the app renders at runtime,
+	// and that is guarded separately: React escapes by default, nothing uses
+	// dangerouslySetInnerHTML, and the CSP set by withSecurityHeaders forbids
+	// inline script.
+	//
+	//nolint:gosec // G705: embedded build output at a literal path; no request data reaches it.
 	if _, err := w.Write(index); err != nil {
 		h.logger.DebugContext(r.Context(), "write index.html failed", slog.String("error", err.Error()))
 	}

@@ -5,6 +5,22 @@ name: Security
 # security-relevant mistakes a compiler does not.
 #
 # Every job here is a release gate. See docs/engineering/definition-of-done.md.
+#
+# A NOTE ON THE TRIVY PIN, because the obvious "revert to the older, known-good
+# SHA" is the wrong move here.
+#
+# aquasecurity/trivy-action carries a DEFAULT Trivy version inside it, and
+# v0.33.1's default was Trivy v0.65.0. Upstream subsequently withdrew that
+# release: the tag returns 404 and it no longer appears in the release list at
+# all. The action's install script resolves the version, downloads the tarball,
+# gets a 404, and exits 1 having printed nothing about why -- so the job fails
+# with a bare "Process completed with exit code 1" and no clue.
+#
+# Pinning an action by SHA pins the action, not the artifact the action fetches
+# at runtime. That distinction is the whole failure. Anything here that
+# downloads a release at runtime can break without a commit on our side, so
+# when one of these jobs fails at its INSTALL step, check whether the artifact
+# still exists before assuming the workflow is at fault.
 
 on:
   push:
@@ -88,7 +104,7 @@ jobs:
       # the check that would notice a dropped `no-new-privileges` or a
       # reintroduced root user.
       - name: Scan repository
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln,misconfig,secret
@@ -97,9 +113,13 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           exit-code: "0" # Reporting job; the gate below fails the build.
 
+      # Guarded on the file rather than `always()`. When the scan step itself
+      # fails, `always()` runs this too and it reports "Path does not exist:
+      # trivy-fs.sarif" -- a second, louder error that describes a symptom and
+      # buries the actual failure above it.
       - name: Upload results
-        uses: github/codeql-action/upload-sarif@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
-        if: always()
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.32.2
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -108,7 +128,7 @@ jobs:
       # picture (including MEDIUM) while the build only fails on what the
       # Definition of Done actually blocks on.
       - name: Fail on High or Critical
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -132,7 +152,7 @@ jobs:
         run: docker build -t harbormaster:scan .
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: harbormaster:scan
           format: sarif
@@ -141,8 +161,8 @@ jobs:
           exit-code: "0"
 
       - name: Upload results
-        uses: github/codeql-action/upload-sarif@c3d42c5d08633d8b33635fbd94b000a0e2585b3c # v3.31.4
-        if: always()
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.32.2
+        if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -151,7 +171,7 @@ jobs:
       # something this repository can act on, and failing on it would train
       # everyone to ignore the job.
       - name: Fail on fixable High or Critical
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: harbormaster:scan
           format: table
