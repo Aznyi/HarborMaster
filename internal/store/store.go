@@ -64,6 +64,11 @@ type DB struct {
 	// this records what the Docker daemon reported.
 	DockerEvents *DockerEventRepository
 
+	// Drift holds the differences between a container's baseline snapshot and
+	// its current configuration. It references snapshots rather than copying
+	// them: a snapshot is immutable evidence and must have one home.
+	Drift *DriftRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -266,6 +271,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Volumes:    &VolumeRepository{db: sqlDB},
 
 		DockerEvents: &DockerEventRepository{db: sqlDB},
+		Drift:        &DriftRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

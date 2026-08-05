@@ -153,6 +153,38 @@ const (
 	MaxSnapshotPruneBatch      = 10000
 	MaxSnapshotReasonBytes     = 4096
 
+	// Drift detection defaults.
+	//
+	// DefaultDriftSweepInterval is deliberately much longer than the event
+	// debounce: with events driving evaluation, the sweep is a safety net for
+	// what the stream missed rather than the primary mechanism. It is also the
+	// most expensive periodic job HarborMaster runs, because it decodes one
+	// snapshot document per container.
+	DefaultDriftEnabled               = true
+	DefaultDriftEvaluateOnEvents      = true
+	DefaultDriftEvaluationDebounce    = 5 * time.Second
+	DefaultDriftMaxPendingEvaluations = 256
+	DefaultDriftSweepInterval         = 30 * time.Minute
+	DefaultDriftSweepOnStartup        = true
+	DefaultDriftEvaluationTimeout     = 10 * time.Second
+	// DefaultDriftMaxRecordsPerContainer is generous: a container that really
+	// differs in 500 fields has been rebuilt, and the operator needs to see
+	// that rather than a truncated list.
+	DefaultDriftMaxRecordsPerContainer = 500
+	DefaultDriftRetentionAge           = 30 * 24 * time.Hour
+	DefaultDriftPruneInterval          = 6 * time.Hour
+	DefaultDriftMaxNoteBytes           = 500
+
+	// Drift bounds. The minimums exist for the same reason the event engine's
+	// do: a tiny value would spin a worker or hammer the database, and is far
+	// more likely a typo than an intention.
+	MinDriftEvaluationDebounce  = 100 * time.Millisecond
+	MinDriftSweepInterval       = 1 * time.Minute
+	MinDriftPruneInterval       = 1 * time.Minute
+	MaxDriftPendingEvaluations  = 4096
+	MaxDriftRecordsPerContainer = 5000
+	MaxDriftNoteBytes           = 4096
+
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
 	// orchestrator's own timeout is worse than useless, because the runtime
@@ -363,6 +395,55 @@ type Snapshots struct {
 	MaxReasonBytes int
 }
 
+// Drift holds settings for configuration drift detection.
+//
+// Drift compares a container's CURRENT configuration against its baseline
+// snapshot and records the differences. It reads HarborMaster's own inventory
+// and its own snapshots; it never calls Docker, and nothing in this section
+// grants any ability to change a container or to put one back.
+type Drift struct {
+	// Enabled turns detection on or off. When false nothing is evaluated, the
+	// endpoints report the feature disabled, and no records are written.
+	Enabled bool
+
+	// EvaluateOnEvents schedules an evaluation when the event engine sees a
+	// container change. Off does not mean stale: the periodic sweep still
+	// runs, just at its own cadence.
+	EvaluateOnEvents bool
+	// EvaluationDebounce coalesces the burst one lifecycle transition produces
+	// into a single evaluation per container.
+	EvaluationDebounce time.Duration
+	// MaxPendingEvaluations caps the coalescing queue. Past it the engine
+	// escalates to a full sweep, which covers every pending container and
+	// costs less than tracking them individually.
+	MaxPendingEvaluations int
+
+	// SweepInterval is the periodic full sweep, and the safety net for
+	// whatever the event stream missed. Zero disables it.
+	SweepInterval time.Duration
+	// SweepOnStartup evaluates the estate once at boot, so a HarborMaster that
+	// was down while containers changed reports drift without waiting for the
+	// first interval.
+	SweepOnStartup bool
+
+	// EvaluationTimeout bounds one container's comparison.
+	EvaluationTimeout time.Duration
+	// MaxRecordsPerContainer bounds how many differences one evaluation may
+	// record. Past it the comparison is marked INCOMPLETE rather than
+	// truncated silently, because a truncated comparison has not established
+	// that the fields it never reached still match.
+	MaxRecordsPerContainer int
+
+	// RetentionAge is how long a RESOLVED record is kept. Open records are
+	// never pruned: an unreviewed difference does not become less true with
+	// age. Zero keeps resolved history forever.
+	RetentionAge time.Duration
+	// PruneInterval is how often that retention runs.
+	PruneInterval time.Duration
+	// MaxNoteBytes bounds the operator's annotation on a status change.
+	MaxNoteBytes int
+}
+
 // Healthcheck holds settings for the `harbormaster healthcheck` command.
 type Healthcheck struct {
 	// Timeout bounds the whole probe, connection included.
@@ -387,6 +468,7 @@ type Config struct {
 	Inventory   Inventory
 	Events      Events
 	Snapshots   Snapshots
+	Drift       Drift
 }
 
 var (
@@ -571,6 +653,37 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Drift.Enabled, err = boolVar(lookup, "DRIFT_ENABLED", DefaultDriftEnabled)
+	collect(err)
+	cfg.Drift.EvaluateOnEvents, err = boolVar(lookup, "DRIFT_EVALUATE_ON_EVENTS", DefaultDriftEvaluateOnEvents)
+	collect(err)
+	cfg.Drift.SweepOnStartup, err = boolVar(lookup, "DRIFT_SWEEP_ON_STARTUP", DefaultDriftSweepOnStartup)
+	collect(err)
+	cfg.Drift.EvaluationDebounce, err = durationVar(lookup, "DRIFT_EVALUATION_DEBOUNCE", DefaultDriftEvaluationDebounce)
+	collect(err)
+	cfg.Drift.SweepInterval, err = durationVar(lookup, "DRIFT_SWEEP_INTERVAL", DefaultDriftSweepInterval)
+	collect(err)
+	cfg.Drift.EvaluationTimeout, err = durationVar(lookup, "DRIFT_EVALUATION_TIMEOUT", DefaultDriftEvaluationTimeout)
+	collect(err)
+	cfg.Drift.RetentionAge, err = durationVar(lookup, "DRIFT_RETENTION_AGE", DefaultDriftRetentionAge)
+	collect(err)
+	cfg.Drift.PruneInterval, err = durationVar(lookup, "DRIFT_PRUNE_INTERVAL", DefaultDriftPruneInterval)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"DRIFT_MAX_PENDING_EVALUATIONS", DefaultDriftMaxPendingEvaluations, &cfg.Drift.MaxPendingEvaluations},
+		{"DRIFT_MAX_RECORDS_PER_CONTAINER", DefaultDriftMaxRecordsPerContainer, &cfg.Drift.MaxRecordsPerContainer},
+		{"DRIFT_MAX_NOTE_BYTES", DefaultDriftMaxNoteBytes, &cfg.Drift.MaxNoteBytes},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -652,8 +765,57 @@ func (c Config) Validate() error {
 
 	errs = append(errs, c.Events.validate()...)
 	errs = append(errs, c.Snapshots.validate()...)
+	errs = append(errs, c.Drift.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the drift settings.
+//
+// Validated even when drift is disabled, for the same reason the event and
+// snapshot settings are: a configuration error that only surfaces the day
+// someone flips the feature on is a worse failure than one caught at startup.
+func (d Drift) validate() []error {
+	var errs []error
+
+	if d.EvaluationDebounce < MinDriftEvaluationDebounce {
+		errs = append(errs, fmt.Errorf("%sDRIFT_EVALUATION_DEBOUNCE must be at least %s",
+			envPrefix, MinDriftEvaluationDebounce))
+	}
+	// Zero is the documented way to disable the periodic sweep. A tiny
+	// non-zero one would re-read every container continuously.
+	if d.SweepInterval != 0 && d.SweepInterval < MinDriftSweepInterval {
+		errs = append(errs, fmt.Errorf("%sDRIFT_SWEEP_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinDriftSweepInterval))
+	}
+	if d.EvaluationTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sDRIFT_EVALUATION_TIMEOUT must be positive", envPrefix))
+	}
+	if d.PruneInterval < MinDriftPruneInterval {
+		errs = append(errs, fmt.Errorf("%sDRIFT_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinDriftPruneInterval))
+	}
+	// Zero disables resolved-record pruning, which is valid but unbounded.
+	// Negative is not a way to do anything.
+	if d.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sDRIFT_RETENTION_AGE must not be negative", envPrefix))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"DRIFT_MAX_PENDING_EVALUATIONS", d.MaxPendingEvaluations, 1, MaxDriftPendingEvaluations},
+		{"DRIFT_MAX_RECORDS_PER_CONTAINER", d.MaxRecordsPerContainer, 1, MaxDriftRecordsPerContainer},
+		{"DRIFT_MAX_NOTE_BYTES", d.MaxNoteBytes, 1, MaxDriftNoteBytes},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the snapshot settings.

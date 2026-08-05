@@ -115,6 +115,8 @@ largest residual risk in the product.
 | 21 REST endpoints under `/api/v1` | GET, plus 2 POST | Full list in `api/openapi.yaml` |
 | `POST /api/v1/inventory/refresh` | POST | Drives a full Docker sweep |
 | `POST /api/v1/snapshots` | POST | Writes to the database |
+| `PATCH /api/v1/drift/{id}` | PATCH | Moves a drift record's status. Cannot reach Docker, a container, or a snapshot; cannot set `active` or `resolved` |
+| 4 drift read endpoints | GET | Drift records, summary, and per-container view |
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
 
@@ -195,6 +197,15 @@ well-meaning "show the diagnosis in the UI" change.
 | **D**enial of service | A startup integrity check that never finishes | `DB_INTEGRITY_TIMEOUT`; an incomplete check is reported, not treated as damage, and does not refuse startup | Low |
 | **D**enial of service | Shutdown held open by detached background work | One `SHUTDOWN_TIMEOUT` budget; `GraceContext` bounds every detached task | Low |
 | **D**enial of service | A long outage requesting the daemon's whole event ring on reconnect | Resume window clamped to one hour | Low |
+| **I**nfo disclosure | A secret value reaching a drift record | Diff engine withholds it, the model has no field, the repository blanks it in and out, and a CHECK constraint refuses the row; whole-database sweep test with a positive control | Low |
+| **I**nfo disclosure | A key rotation reported as "every secret changed" | Digests under different keys report `unverifiable`, never `modified` | Low |
+| **T**ampering | An operator marking real drift resolved | `active` and `resolved` are engine-owned; PATCH validates against the operator vocabulary only | Low |
+| **T**ampering | A caller reaching a field other than status through PATCH | Strict decode with unknown fields rejected; the body has exactly two fields | Low |
+| **I**ntegrity | A truncated comparison silently clearing real drift | An incomplete evaluation resolves nothing and is surfaced in the summary | Low |
+| **I**ntegrity | "Never evaluated" read as "no drift" | Evaluations recorded separately from records; the summary reports `containersEvaluated` | Low |
+| **D**enial of service | An event storm growing the drift table | Identity is `(container, snapshot, category, field)`; repeats upsert rather than insert | Low |
+| **D**enial of service | A drift sweep starving the unauthenticated diff endpoint | Drift owns a separate DiffEngine instance | Low |
+| **D**enial of service | An unbounded `IN` clause from repeated filter parameters | 32 values per parameter, rejected above | Low |
 
 ### TB4 — CI/CD to registry
 

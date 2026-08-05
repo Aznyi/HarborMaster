@@ -24,6 +24,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Container image](#container-image)
 - [Inventory](#inventory)
 - [Docker events](#docker-events)
+- [Configuration drift](#configuration-drift)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -596,6 +597,92 @@ widens the `inventory_refreshes` trigger constraint to accept `reconcile`.
 not be conflated: that one is HarborMaster's audit log of its **own** actions,
 this one records what the **Docker daemon** reported.
 
+## Configuration drift
+
+HarborMaster compares each container's **current** configuration against its
+**baseline snapshot** and records every field that differs.
+
+**Drift is an observation.** HarborMaster reports that something moved and has
+no capability to move it back — no remediation, no rollback, no apply, and no
+route behind any of this that reaches the Docker socket.
+
+### It reuses the diff engine rather than reimplementing it
+
+Detection runs the same comparison as `GET /snapshots/{id}/diff?against=current`
+and then **classifies** the result. Nothing in the drift engine compares
+anything itself. A second comparison implementation would eventually disagree
+with the first, and the first is the one whose determinism the snapshot
+checksum depends on.
+
+The baseline is the container's most recent snapshot — already the one
+retention never prunes, described as the restore baseline. Drift needs no
+baseline *selection* mechanism as a result, which also means no caller-supplied
+snapshot id in the evaluation path.
+
+### Severity follows the blast radius, not the field
+
+Ranking answers one question: *how much worse is the host now?* **Direction
+decides it.**
+
+| | |
+|---|---|
+| **Critical** | A lost containment boundary — privileged enabled, read-only rootfs disabled, a capability added, a security option removed, a host namespace shared. Also an image **digest** change: the container is running code nobody recorded. |
+| **High** | A wider attack surface or a removed safety net — a new image reference, health check removed, bind mount added, port published, a mount that lost `ro`. |
+| **Medium** | Changed behaviour that could matter — environment, restart policy, a removed memory limit, network membership. |
+| **Low** | Bookkeeping — labels, CPU limits, health-check timings, Compose metadata. |
+
+`privileged` moving false→true is critical; true→false is the operator fixing
+something and ranks low. A capability **added** is critical; one dropped is not.
+Ranking the field rather than the movement would fill a dashboard with critical
+alerts for improvements, and a dashboard that cries wolf gets ignored — which
+costs more than having no dashboard.
+
+### Secrets
+
+A secret-backed field reports **that** it changed, never what to. The diff
+engine withholds the values, the record has nowhere to put them, the repository
+blanks them again, and a `CHECK` constraint refuses a row that carries one.
+Four layers, because a leaked credential cannot be un-leaked.
+
+Digests produced under **different HMAC keys** report `unverifiable` rather than
+`modified`. Saying "modified" after a key rotation would tell an operator every
+secret changed at once — a false alarm indistinguishable from a breach.
+
+### Two distinctions the UI depends on
+
+**"No drift" is not "never checked."** Every evaluation is recorded, including
+one that found nothing, so the dashboard can say *"12 of 40 containers
+evaluated"* rather than implying the other 28 are clean. A container with no
+baseline is recorded as **incomplete with a reason**, not as clean.
+
+**An incomplete evaluation resolves nothing.** A comparison that hit its size
+budget never established that the fields it did not reach still match, so
+resolving on that basis would silently clear real drift.
+
+### Status: who owns which value
+
+`active` and `resolved` are **engine-owned** facts about whether the difference
+still exists. `acknowledged`, `ignored`, and `expected` are **operator-owned**
+intent, and are the only three `PATCH /api/v1/drift/{id}` accepts.
+
+An operator therefore cannot mark something resolved. Resolution is something
+the world does, not something a person asserts, and allowing the assertion
+would turn the drift list into a to-do list that lies. An operator's status
+*survives* re-evaluation; only a resolved record that reappears returns to
+active.
+
+### Event integration
+
+An event schedules an inventory refresh; the refresh commits; **the commit**
+schedules a drift evaluation. Inventory reconciliation stays authoritative and
+drift is always computed from committed data.
+
+The evaluation queue is coalesced per container, hard-capped, and escalates to
+a full sweep on overflow — the same discipline as the event engine's refresh
+scheduler, for the same reason. Drift also gets its **own** diff-engine
+instance, so a background sweep cannot exhaust the concurrency slots the
+unauthenticated comparison endpoint depends on.
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -815,6 +902,12 @@ for the full list with defaults.
 | `HARBORMASTER_DB_INTEGRITY_CHECK` | `quick` | Startup validation: `off`, `quick`, or `full` |
 | `HARBORMASTER_DB_INTEGRITY_TIMEOUT` | `30s` | Bound on that check; past it the result is *incomplete*, not *damaged* |
 | `HARBORMASTER_DB_REQUIRE_WAL` | `false` | Refuse to start when write-ahead logging could not be enabled |
+| `HARBORMASTER_DRIFT_ENABLED` | `true` | Turn drift detection on or off |
+| `HARBORMASTER_DRIFT_EVALUATE_ON_EVENTS` | `true` | Evaluate after an event-driven refresh **commits** |
+| `HARBORMASTER_DRIFT_EVALUATION_DEBOUNCE` | `5s` | Coalesce a lifecycle burst into one evaluation |
+| `HARBORMASTER_DRIFT_SWEEP_INTERVAL` | `30m` | Periodic full sweep; `0` disables it |
+| `HARBORMASTER_DRIFT_MAX_RECORDS_PER_CONTAINER` | `500` | Past it an evaluation is *incomplete*, never silently truncated |
+| `HARBORMASTER_DRIFT_RETENTION_AGE` | `720h` | How long resolved records are kept; open records are never pruned |
 | `HARBORMASTER_INVENTORY_ENABLED` | `true` | Turn the inventory engine on or off |
 | `HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP` | `true` | Collect once at boot |
 | `HARBORMASTER_INVENTORY_REFRESH_INTERVAL` | `60s` | Periodic refresh; `0` disables it |

@@ -3,8 +3,10 @@
 import { AppShell } from "./components/AppShell";
 import { useHealth } from "./hooks/useHealth";
 import { ContainerDetailPage } from "./pages/ContainerDetail";
+import { ContainerDrift } from "./pages/ContainerDrift";
 import { Containers } from "./pages/Containers";
 import { Dashboard } from "./pages/Dashboard";
+import { Drift } from "./pages/Drift";
 import { Events } from "./pages/Events";
 import { Images } from "./pages/Images";
 import { Settings } from "./pages/Settings";
@@ -30,6 +32,8 @@ export function App() {
         <Route path="/snapshots" element={<Snapshots />} />
         <Route path="/snapshots/:id" element={<SnapshotDetailPage />} />
         <Route path="/snapshots/:id/readiness" element={<SnapshotReadinessPage />} />
+        <Route path="/drift" element={<Drift />} />
+        <Route path="/drift/container/:id" element={<ContainerDrift />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

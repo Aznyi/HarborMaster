@@ -77,6 +77,33 @@ value is a secret, the answer to "is this safe to store" is no. Being wrong in
 that direction costs an operator a value they cannot see; being wrong the other
 way leaks a credential.
 
+## 3a. Configuration drift
+
+Drift compares a container's current configuration against its baseline
+snapshot. It is an **observation**: there is no remediation path, no rollback,
+and no call into `docker.Runtime` anywhere behind it.
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| One comparison implementation | Drift runs `DiffEngine` and classifies its output; it compares nothing itself | `internal/service/drift.go` |
+| No baseline selection surface | Baseline is the newest snapshot, resolved server-side; no caller-supplied id in the evaluation path | `internal/store/snapshot_repository.go` |
+| Background cannot starve foreground | Drift owns a **separate** `DiffEngine` instance, so a sweep cannot exhaust the HTTP diff endpoint's slots | `NewDriftService` |
+| An incomplete comparison resolves nothing | `resolveVanishedDrift` returns early when `Complete` is false | `internal/store/drift_repository.go` |
+| Bounded under an event storm | Per-container coalescing, hard cap, overflow → sweep | `internal/service/drift_worker.go` |
+| Table growth is bounded | `UNIQUE (container_id, snapshot_id, category, field)`; repeats upsert | `migrations/0005_drift.sql` |
+| Engine/operator status split | `PATCH` validates against `OperatorDriftStatuses`, which excludes `active` and `resolved` | `internal/api/drift_handlers.go` |
+| No snapshot data duplicated | A drift row references its baseline by id and copies nothing from it | `migrations/0005_drift.sql` |
+
+**Secrets, four layers again.** The diff engine withholds a sensitive value;
+`DriftRecord` never carries one; the repository blanks it a third time on the
+way in *and* on the way out; and a `CHECK (sensitive = 0 OR (previous_value =
+'' AND current_value = ''))` refuses the row. A whole-database sweep test with
+a positive control proves no value reaches storage.
+
+**Severity is direction-aware**, which is a security property rather than a
+cosmetic one: ranking the field instead of the movement would rank an operator
+*fixing* a container as critical, and a dashboard that cries wolf gets ignored.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |
@@ -120,7 +147,12 @@ dimension is bounded, and the bound is configuration rather than a magic number.
 | Diff concurrency | 4, refused with `429` — never queued |
 | Diff wall time | 5s, `context.WithTimeout` |
 | Diff output | 1 000 entries, 5 000 compared per group, 4 KiB per value |
-| Write endpoints | Token bucket, per process |
+| Write endpoints | Token bucket, per process; `PATCH /drift/{id}` included |
+| Drift evaluation queue | `DRIFT_MAX_PENDING_EVALUATIONS`; overflow escalates to a sweep rather than growing |
+| Drift records per container | `DRIFT_MAX_RECORDS_PER_CONTAINER`; past it the evaluation is *incomplete*, never silently truncated |
+| Drift evaluation wall time | `DRIFT_EVALUATION_TIMEOUT` per container; the sweep derives its own bound from it |
+| Drift filter values | 32 per repeatable parameter, so one request cannot build an unbounded `IN` clause |
+| Drift history | Resolved records pruned by age; **open records never are** |
 | Snapshot growth | `(container_id, checksum)` unique index; retention by count and age |
 | Database writer | `MaxOpenConns(1)`; prune in bounded batches |
 | Cross-process lock wait | `DB_BUSY_TIMEOUT`, 100ms–5m, no "wait forever" |

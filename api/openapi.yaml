@@ -109,6 +109,29 @@ tags:
       only fields that change after capture are the denormalised readiness
       summary, and the only thing that removes a snapshot is the configured
       retention policy.
+  - name: Drift
+    description: |
+      Configuration drift: the differences between a container's baseline
+      snapshot and its configuration now.
+
+      Drift is an OBSERVATION. HarborMaster reports that something moved and
+      has no capability to move it back — there is no remediation, rollback,
+      or apply endpoint here, and no route that reaches the Docker socket.
+
+      The baseline is the container's most recent snapshot, which is also the
+      one retention never prunes. Detection reuses the same comparison engine
+      as `/snapshots/{id}/diff`, so drift and a manual comparison can never
+      disagree.
+
+      **Secret-backed fields report that they changed, never what to.** A
+      sensitive environment variable or log option carries `sensitive: true`
+      with both values empty.
+
+      The only write is a STATUS transition on HarborMaster's own record, and
+      it is limited to `acknowledged`, `ignored`, and `expected`. `active` and
+      `resolved` are engine-owned: an operator cannot declare a difference
+      resolved, because resolution is something the world does rather than
+      something a person asserts.
 
 paths:
   /api/v1/health:
@@ -1275,6 +1298,269 @@ paths:
         "503":
           $ref: "#/components/responses/SnapshotsUnavailable"
 
+  /api/v1/drift:
+    get:
+      tags: [Drift]
+      summary: List configuration drift
+      operationId: listDrift
+      description: |
+        Returns drift records: one per field that differs between a container's
+        baseline snapshot and its current configuration.
+
+        Defaults to OPEN records only (everything except `resolved`), because a
+        list dominated by resolved history buries what still stands. Passing an
+        explicit `status` filter turns that default off.
+
+        Sensitive fields report `sensitive: true` with both values empty.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: containerId
+          in: query
+          description: Restrict to one container, matched exactly.
+          schema: { type: string, maxLength: 128 }
+        - name: snapshotId
+          in: query
+          description: Restrict to drift measured against one baseline.
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: category
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DriftCategory" }
+        - name: severity
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DriftSeverity" }
+        - name: status
+          in: query
+          description: |
+            Repeatable, or comma-separated. Supplying this disables the
+            open-only default.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DriftStatus" }
+        - name: openOnly
+          in: query
+          description: Exclude resolved records. Defaults to true.
+          schema: { type: boolean, default: true }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [detectedAt, lastSeenAt, id, container, category, field, status, severity]
+            default: detectedAt
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of drift records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DriftRecord" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/DriftUnavailable"
+
+  /api/v1/drift/summary:
+    get:
+      tags: [Drift]
+      summary: Drift summary for the dashboard
+      operationId: getDriftSummary
+      description: |
+        Aggregate counts by severity, status, and category, plus how many
+        containers hold open drift and how many have been evaluated at all.
+
+        `containersEvaluated` matters: without it, "no drift" is ambiguous
+        between a clean estate and one that was never checked. `incomplete`
+        reports that at least one container's most recent evaluation could not
+        examine everything, so the counts are a floor rather than a total.
+
+        Computed by aggregate queries whose cost is proportional to the number
+        of distinct severities and categories, not to the number of records.
+      responses:
+        "200":
+          description: The summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/DriftUnavailable"
+
+  /api/v1/drift/container/{id}:
+    get:
+      tags: [Drift]
+      summary: Drift for one container
+      operationId: getContainerDrift
+      description: |
+        One container's drift records, together with the EVALUATION that
+        produced them.
+
+        The evaluation is included so a client can tell "no drift" from "never
+        checked" without a second request. It is absent when the container has
+        never been evaluated.
+      parameters:
+        - $ref: "#/components/parameters/ContainerId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: openOnly
+          in: query
+          schema: { type: boolean, default: true }
+        - name: severity
+          in: query
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DriftSeverity" }
+      responses:
+        "200":
+          description: The container's drift.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [containerId, records, pagination]
+                properties:
+                  containerId: { type: string }
+                  records:
+                    type: array
+                    items: { $ref: "#/components/schemas/DriftRecord" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  evaluation: { $ref: "#/components/schemas/DriftEvaluation" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The id prefix matched more than one container.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/DriftUnavailable"
+
+  /api/v1/drift/{id}:
+    get:
+      tags: [Drift]
+      summary: Get one drift record
+      operationId: getDriftRecord
+      parameters:
+        - $ref: "#/components/parameters/DriftId"
+      responses:
+        "200":
+          description: The drift record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DriftRecord" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/DriftUnavailable"
+    patch:
+      tags: [Drift]
+      summary: Change a drift record's status
+      operationId: updateDriftStatus
+      description: |
+        Moves a drift record's status. **This is the only write in the drift
+        API, and it changes nothing outside HarborMaster's own database.** No
+        container, image, or snapshot is touched.
+
+        Allowed transitions are `acknowledged`, `ignored`, and `expected`.
+        `active` and `resolved` are rejected: they are engine-owned facts about
+        whether the difference still exists, and letting a caller assert
+        "resolved" would make the drift list stop describing reality.
+
+        An operator's status SURVIVES re-evaluation. Only a record that had
+        been resolved returns to `active`, and only because the difference came
+        back.
+
+        Guarded like the POST endpoints: `application/json` required, unknown
+        fields rejected, body size capped, and a per-process rate limit.
+      parameters:
+        - $ref: "#/components/parameters/DriftId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum: [acknowledged, ignored, expected]
+                note:
+                  type: string
+                  description: |
+                    Operator annotation. Bounded in BYTES, validated as UTF-8,
+                    and refused if it contains control characters.
+                  maxLength: 500
+      responses:
+        "200":
+          description: The updated record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DriftRecord" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          description: The request body exceeded the configured limit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "415":
+          description: Content-Type was not application/json.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: The write rate limit was exceeded.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/DriftUnavailable"
+
 components:
   headers:
     RequestId:
@@ -1306,6 +1592,12 @@ components:
       in: path
       required: true
       description: Numeric snapshot identifier.
+      schema: { type: integer, format: int64, minimum: 1 }
+    DriftId:
+      name: id
+      in: path
+      required: true
+      description: Numeric drift record identifier.
       schema: { type: integer, format: int64, minimum: 1 }
 
   responses:
@@ -1399,6 +1691,15 @@ components:
 
     SnapshotsUnavailable:
       description: Snapshots are not configured or are disabled by configuration.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    DriftUnavailable:
+      description: |
+        Drift detection is not configured or is disabled by configuration.
+        Records already collected remain readable; only evaluation stops.
       content:
         application/json:
           schema:
@@ -3113,3 +3414,201 @@ components:
         unchangedCount: { type: integer }
         truncated: { type: boolean }
         truncationReason: { type: string }
+
+    DriftCategory:
+      type: string
+      description: |
+        The part of the configuration that moved. Finer-grained than the diff
+        engine's groups, because "metadata" there covers image identity, the
+        process, the restart policy, the health check, and logging — five
+        things an operator filters on separately.
+      enum:
+        [
+          security,
+          image,
+          mounts,
+          ports,
+          networks,
+          process,
+          health,
+          environment,
+          resources,
+          restart,
+          logging,
+          labels,
+          compose,
+          metadata,
+        ]
+
+    DriftSeverity:
+      type: string
+      description: |
+        How much worse the host is now — not how large the change was.
+
+        DIRECTION decides the rank. `privileged` moving false→true is
+        `critical`; true→false is the operator fixing something and is `low`. A
+        capability added is `critical`; one dropped is not. Ranking the field
+        rather than the movement would fill a dashboard with critical alerts
+        for improvements.
+
+        - `critical` — a lost containment boundary, or an image digest change.
+        - `high` — a wider attack surface or a removed safety net.
+        - `medium` — changed behaviour that could matter.
+        - `low` — bookkeeping.
+      enum: [critical, high, medium, low]
+
+    DriftStatus:
+      type: string
+      description: |
+        `active` and `resolved` are ENGINE-owned facts about whether the
+        difference still exists. `acknowledged`, `ignored`, and `expected` are
+        OPERATOR-owned statements of intent, and are the only three a PATCH may
+        set.
+      enum: [active, resolved, acknowledged, ignored, expected]
+
+    DriftRecord:
+      type: object
+      description: |
+        One field that differs between a container's baseline snapshot and its
+        current configuration.
+
+        `previousValue` and `currentValue` are ALWAYS absent when `sensitive`
+        is true. What changed is reported through `kind`, derived from a keyed
+        digest comparison; the values themselves are never stored and never
+        served.
+      required:
+        [
+          id,
+          containerId,
+          containerName,
+          snapshotId,
+          detectedAt,
+          lastSeenAt,
+          inventoryGeneration,
+          category,
+          field,
+          kind,
+          severity,
+          status,
+        ]
+      properties:
+        id: { type: integer, format: int64 }
+        containerId: { type: string }
+        containerName: { type: string }
+        snapshotId:
+          type: integer
+          format: int64
+          description: The baseline this was measured against.
+        detectedAt:
+          type: string
+          format: date-time
+          description: |
+            When the difference was FIRST seen. It does not move when a later
+            evaluation sees it again, so the age of a record is the age of the
+            drift.
+        lastSeenAt: { type: string, format: date-time }
+        resolvedAt: { type: string, format: date-time }
+        inventoryGeneration:
+          type: integer
+          format: int64
+          description: The inventory generation the comparison read.
+        category: { $ref: "#/components/schemas/DriftCategory" }
+        field:
+          type: string
+          description: |
+            The comparison key, such as `privileged` or `image.digest`.
+            Engine-generated; never caller text.
+        kind: { type: string, enum: [added, removed, modified, unverifiable] }
+        severity: { $ref: "#/components/schemas/DriftSeverity" }
+        previousValue:
+          type: string
+          description: Absent when `sensitive` is true.
+        currentValue:
+          type: string
+          description: Absent when `sensitive` is true.
+        sensitive:
+          type: boolean
+          description: |
+            The field is secret-backed. Both values are withheld; only the fact
+            of the change is reported.
+        status: { $ref: "#/components/schemas/DriftStatus" }
+        reason:
+          type: string
+          description: |
+            Why it is ranked as it is, from a fixed set of engine phrases.
+            Never an error string and never a value.
+        note:
+          type: string
+          description: Operator annotation from a status change.
+        statusChangedAt: { type: string, format: date-time }
+
+    DriftEvaluation:
+      type: object
+      description: |
+        One container's most recent comparison ATTEMPT.
+
+        Recorded separately from the records because an evaluation that found
+        nothing is still a fact: it is what distinguishes "matches its
+        baseline" from "never checked".
+      required: [containerId, evaluatedAt, driftCount, complete]
+      properties:
+        containerId: { type: string }
+        containerName: { type: string }
+        snapshotId:
+          type: integer
+          format: int64
+          description: Zero when the container has no baseline snapshot.
+        evaluatedAt: { type: string, format: date-time }
+        inventoryGeneration: { type: integer, format: int64 }
+        driftCount: { type: integer }
+        complete:
+          type: boolean
+          description: |
+            False when the comparison could not examine everything — a
+            truncated diff, or no baseline. `driftCount` is then a floor rather
+            than a total, and nothing is resolved on the strength of it.
+        reason: { type: string }
+
+    DriftSummary:
+      type: object
+      description: |
+        Dashboard aggregate. Severity and category counts describe OPEN drift
+        only: including resolved history would make "3 critical" mean "3
+        critical at some point since installation".
+      required:
+        [
+          total,
+          open,
+          bySeverity,
+          byStatus,
+          byCategory,
+          containersWithDrift,
+          containersEvaluated,
+          incomplete,
+        ]
+      properties:
+        total: { type: integer }
+        open:
+          type: integer
+          description: Every record that is not resolved.
+        bySeverity:
+          type: object
+          additionalProperties: { type: integer }
+        byStatus:
+          type: object
+          additionalProperties: { type: integer }
+        byCategory:
+          type: object
+          additionalProperties: { type: integer }
+        containersWithDrift: { type: integer }
+        containersEvaluated:
+          type: integer
+          description: |
+            Containers a comparison has been ATTEMPTED for. Without this,
+            "12 containers have drift" implies the rest were checked and clean.
+        lastEvaluatedAt: { type: string, format: date-time }
+        incomplete:
+          type: boolean
+          description: |
+            At least one container's most recent evaluation could not examine
+            everything, so these counts are a floor.

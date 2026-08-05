@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/config"
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -29,6 +30,15 @@ type Server struct {
 	capture   SnapshotCapturer
 	diffs     SnapshotDiffer
 	readiness SnapshotReadinessEvaluator
+
+	// drift answers the drift endpoints. Nil in a deployment with drift
+	// detection disabled, which yields a 503 rather than a broken route.
+	drift DriftReader
+	// driftCfg carries the note length bound for the PATCH endpoint.
+	driftCfg config.Drift
+	// now is injectable so a status change's timestamp is deterministic in
+	// tests.
+	now func() time.Time
 	// snapshotSpecBuilder renders a container's CURRENT configuration as a
 	// canonical document, in memory, for a diff against the present. It never
 	// persists anything: a GET must not create a durable record.
@@ -93,6 +103,17 @@ type Options struct {
 	Config config.Server
 	// SnapshotConfig supplies the write-endpoint and diff limits.
 	SnapshotConfig config.Snapshots
+
+	// Drift answers the drift endpoints. Nil in a deployment with drift
+	// detection disabled, which yields a 503 rather than a broken route.
+	Drift DriftReader
+	// DriftConfig supplies the note length bound for the PATCH endpoint.
+	DriftConfig config.Drift
+
+	// Now is injectable so a status change's timestamp is deterministic in
+	// tests. Nil uses the wall clock.
+	Now func() time.Time
+
 	// Assets is the compiled frontend. A nil FS yields an API-only server.
 	Assets fs.FS
 }
@@ -102,6 +123,10 @@ func NewServer(opts Options) *Server {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	now := opts.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
 	}
 
 	s := &Server{
@@ -121,6 +146,10 @@ func NewServer(opts Options) *Server {
 		diffs:               opts.Diffs,
 		readiness:           opts.Readiness,
 		snapshotSpecBuilder: opts.SnapshotSpecBuilder,
+
+		drift:    opts.Drift,
+		driftCfg: opts.DriftConfig,
+		now:      now,
 
 		logger:      logger,
 		cfg:         opts.Config,
@@ -214,6 +243,32 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+APIPrefix+"/snapshots", s.handleSnapshots)
 	mux.HandleFunc("POST "+APIPrefix+"/snapshots", s.handleSnapshotCreate)
 	mux.HandleFunc(APIPrefix+"/snapshots", s.handleMethodNotAllowed("GET, HEAD, POST"))
+
+	// Configuration drift.
+	//
+	// Four reads and one write. The write moves a record's STATUS on
+	// HarborMaster's own row; there is no route here that reaches Docker, and
+	// deliberately no evaluate, delete, or remediate endpoint. Drift is
+	// evaluated by the background engine on its own schedule, so an
+	// unauthenticated caller cannot drive that work on demand.
+	mux.HandleFunc("GET "+APIPrefix+"/drift", s.handleDrift)
+	mux.HandleFunc(APIPrefix+"/drift", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// GET ONLY, with no bare companion, for the same ServeMux reason as
+	// /events/stream above: a bare "/drift/summary" would match every method
+	// on that literal while "GET /drift/{id}" matches GET on every segment --
+	// neither contains the other, so registering both would panic at startup.
+	// A non-GET request to /drift/summary still gets an honest 405 from the
+	// bare "/drift/{id}" handler below.
+	mux.HandleFunc("GET "+APIPrefix+"/drift/summary", s.handleDriftSummary)
+
+	// Three segments, so this never overlaps the two-segment /drift/{id}.
+	mux.HandleFunc("GET "+APIPrefix+"/drift/container/{id}", s.handleDriftByContainer)
+	mux.HandleFunc(APIPrefix+"/drift/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/drift/{id}", s.handleDriftDetail)
+	mux.HandleFunc("PATCH "+APIPrefix+"/drift/{id}", s.handleDriftPatch)
+	mux.HandleFunc(APIPrefix+"/drift/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

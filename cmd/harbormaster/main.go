@@ -343,6 +343,36 @@ func run() error {
 	diffs := service.NewDiffEngine(cfg.Snapshots)
 	retention := service.NewRetentionService(db.Snapshots, cfg.Snapshots, logger)
 
+	// Configuration drift.
+	//
+	// The engine reuses the Phase 3 diff engine to compare each container
+	// against its baseline snapshot; it reads the inventory HarborMaster has
+	// already persisted and never calls Docker. It has no remediation path,
+	// and the only mutation it exposes is an operator moving a record's status
+	// on HarborMaster's own row.
+	//
+	// The spec builder is the same one the snapshot diff endpoint uses:
+	// in-memory only, so evaluating drift cannot create a snapshot as a side
+	// effect -- which would make every evaluation the new baseline and leave
+	// drift permanently empty.
+	drift := service.NewDriftService(service.DriftOptions{
+		Snapshots:  db.Snapshots,
+		Containers: db.Containers,
+		Records:    db.Drift,
+		Pruner:     db.Drift,
+		Inventory:  db.Inventory,
+		SpecBuilder: func(detail domain.ContainerDetail) domain.SnapshotSpec {
+			return service.BuildSpec(detail, detail.Image, hasher)
+		},
+		Config: cfg.Drift,
+		Logger: logger,
+	})
+
+	// The event engine schedules a drift evaluation once a refresh has
+	// COMMITTED, never on the raw event: evaluating before the inventory is
+	// written would compare the baseline against data one generation stale.
+	events.SetDriftScheduler(drift)
+
 	// SHUTDOWN ORDER, and why it is what it is.
 	//
 	// Deferred calls unwind last-to-first, and the order below is deliberate:
@@ -367,7 +397,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(3)
+	background.Add(4)
 
 	go func() {
 		defer background.Done()
@@ -380,6 +410,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		retention.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		drift.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -403,6 +437,9 @@ func run() error {
 		SnapshotSpecBuilder: func(detail domain.ContainerDetail) domain.SnapshotSpec {
 			return service.BuildSpec(detail, detail.Image, hasher)
 		},
+
+		Drift:       db.Drift,
+		DriftConfig: cfg.Drift,
 
 		Logger:         logger,
 		Config:         cfg.Server,

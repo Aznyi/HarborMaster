@@ -39,6 +39,13 @@ import type {
   SnapshotDiff,
   SnapshotQuery,
 } from "./snapshotTypes";
+import type {
+  ContainerDrift,
+  DriftQuery,
+  DriftRecord,
+  DriftSummary,
+  OperatorStatus,
+} from "./driftTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -90,7 +97,7 @@ export interface RequestOptions {
 async function request<T>(
   path: string,
   options: RequestOptions = {},
-  method: "GET" | "POST" = "GET",
+  method: "GET" | "POST" | "PATCH" = "GET",
   body?: unknown,
 ): Promise<T> {
   const { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
@@ -478,4 +485,91 @@ export function getSnapshotReadiness(
   options?: RequestOptions,
 ): Promise<ReadinessReport> {
   return request<ReadinessReport>(`/snapshots/${id}/restore-readiness`, options);
+}
+
+/* ------------------------------------------------------------------ drift -- */
+
+/**
+ * Configuration drift.
+ *
+ * Four reads and one write. The write moves a record's STATUS on
+ * HarborMaster's own row: there is deliberately no function here that
+ * evaluates, resolves, remediates, or rolls anything back, because the API
+ * exposes no such endpoint and HarborMaster has no such capability.
+ */
+
+/** Builds the drift list query string from validated, closed vocabularies. */
+function buildDriftQuery(query: DriftQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.containerId) params.set("containerId", query.containerId);
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  // Sent only when explicitly set, so the server's own default stands
+  // otherwise and the two cannot disagree about what "default" means.
+  if (query.openOnly !== undefined) params.set("openOnly", String(query.openOnly));
+
+  for (const category of query.category ?? []) params.append("category", category);
+  for (const severity of query.severity ?? []) params.append("severity", severity);
+  for (const status of query.status ?? []) params.append("status", status);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/drift */
+export function listDrift(
+  query: DriftQuery = {},
+  options?: RequestOptions,
+): Promise<ListResponse<DriftRecord>> {
+  return request<ListResponse<DriftRecord>>(`/drift${buildDriftQuery(query)}`, options);
+}
+
+/** GET /api/v1/drift/{id} */
+export function getDriftRecord(
+  id: number,
+  options?: RequestOptions,
+): Promise<DriftRecord> {
+  return request<DriftRecord>(`/drift/${id}`, options);
+}
+
+/** GET /api/v1/drift/summary */
+export function getDriftSummary(options?: RequestOptions): Promise<DriftSummary> {
+  return request<DriftSummary>("/drift/summary", options);
+}
+
+/** GET /api/v1/drift/container/{id} */
+export function getContainerDrift(
+  containerId: string,
+  query: DriftQuery = {},
+  options?: RequestOptions,
+): Promise<ContainerDrift> {
+  return request<ContainerDrift>(
+    `/drift/container/${encodeURIComponent(containerId)}${buildDriftQuery(query)}`,
+    options,
+  );
+}
+
+/**
+ * PATCH /api/v1/drift/{id}
+ *
+ * Moves a drift record's status. **This changes nothing outside
+ * HarborMaster's own database** — no container, image, or snapshot is touched.
+ *
+ * The status type is `OperatorStatus`, not `DriftStatus`: `active` and
+ * `resolved` are engine-owned and the server rejects them. Narrowing it here
+ * means a caller that tries finds out at compile time rather than from a 400.
+ */
+export function updateDriftStatus(
+  id: number,
+  status: OperatorStatus,
+  note?: string,
+  options?: RequestOptions,
+): Promise<DriftRecord> {
+  return request<DriftRecord>(`/drift/${id}`, options, "PATCH", {
+    status,
+    ...(note ? { note } : {}),
+  });
 }

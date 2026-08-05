@@ -325,6 +325,67 @@ func (r *SnapshotRepository) getByChecksum(ctx context.Context, containerID, che
 	return scanSnapshotRow(r.db.QueryRowContext(ctx, query, containerID, checksum))
 }
 
+// Baseline returns the snapshot drift is measured against for one container:
+// its most recent capture.
+//
+// # Why the newest, and why that is not an arbitrary choice
+//
+// Retention already treats it as special -- "the newest snapshot of a
+// container is never pruned under any policy: it is the restore baseline" --
+// so drift and restore agree on what the container is supposed to look like.
+// Two different definitions of "baseline" would be worse than either one.
+//
+// It also means drift needs no baseline SELECTION mechanism. A caller-supplied
+// snapshot id in the evaluation path would be an enumeration surface on an
+// unauthenticated API and would let a caller pick a baseline that makes drift
+// disappear.
+//
+// Ordered by created_at then id, so two snapshots captured in the same
+// nanosecond still resolve deterministically rather than by insertion luck.
+func (r *SnapshotRepository) Baseline(ctx context.Context, containerID string) (domain.Snapshot, error) {
+	const query = selectSnapshotColumns + ` FROM snapshots
+		WHERE container_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`
+	return scanSnapshotRow(r.db.QueryRowContext(ctx, query, containerID))
+}
+
+// BaselineIDs returns the baseline snapshot id for every container that has
+// one, keyed by container.
+//
+// One query for the whole estate rather than one per container: a sweep over a
+// thousand containers would otherwise issue a thousand round trips against the
+// single SQLite connection, which is the N+1 pattern in the place it hurts
+// most.
+func (r *SnapshotRepository) BaselineIDs(ctx context.Context) (map[string]int64, error) {
+	// MAX(id) is the tiebreak within a container's newest created_at, matching
+	// Baseline's ordering. Grouping by container_id makes this one pass over
+	// the index rather than a correlated subquery per row.
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT container_id, id FROM snapshots
+		WHERE id IN (
+			SELECT MAX(id) FROM snapshots
+			GROUP BY container_id
+		)`)
+	if err != nil {
+		return nil, fmt.Errorf("query baseline snapshots: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	baselines := make(map[string]int64)
+	for rows.Next() {
+		var (
+			containerID string
+			id          int64
+		)
+		if err := rows.Scan(&containerID, &id); err != nil {
+			return nil, fmt.Errorf("scan baseline snapshot: %w", err)
+		}
+		baselines[containerID] = id
+	}
+	return baselines, rows.Err()
+}
+
 // List returns a filtered page of snapshots and the total matching count.
 func (r *SnapshotRepository) List(ctx context.Context, filter SnapshotFilter) ([]domain.Snapshot, int, error) {
 	where, args := filter.build()
