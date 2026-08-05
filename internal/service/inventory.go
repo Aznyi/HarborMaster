@@ -42,6 +42,22 @@ type InventoryService struct {
 	mu       sync.RWMutex
 	running  bool
 	runState refreshState
+	// asyncCancel cancels the in-flight BACKGROUND refresh, the one started by
+	// the manual endpoint and detached from its HTTP request. There is at most
+	// one, because the refresh slot admits exactly one runner, so a single
+	// field is sufficient and a map would only imply a concurrency that cannot
+	// occur. Nil when no background refresh is running.
+	asyncCancel context.CancelFunc
+
+	// background tracks detached refresh goroutines so shutdown can wait for
+	// them. Without it a `docker restart` of HarborMaster during a manual
+	// refresh abandons a goroutine that is mid-transaction against a database
+	// the process is about to close.
+	background sync.WaitGroup
+
+	// shutdownGrace bounds how long a detached refresh may run past
+	// cancellation before it is cancelled outright.
+	shutdownGrace time.Duration
 
 	// targeted serialises single-resource writes against each other. See
 	// targeted.go for why it does not serialise against a full refresh.
@@ -74,6 +90,9 @@ type InventoryOptions struct {
 	// SuppressPeriodic hands ownership of the periodic full refresh to another
 	// component. Startup and manual refreshes are unaffected.
 	SuppressPeriodic bool
+	// ShutdownGrace bounds how long a detached refresh may run past
+	// cancellation. Zero selects DefaultShutdownGrace.
+	ShutdownGrace time.Duration
 }
 
 // NewInventoryService builds an InventoryService.
@@ -89,6 +108,10 @@ func NewInventoryService(opts InventoryOptions) *InventoryService {
 	if opts.Config.Workers < 1 {
 		opts.Config.Workers = config.DefaultInventoryWorkers
 	}
+	grace := opts.ShutdownGrace
+	if grace <= 0 {
+		grace = DefaultShutdownGrace
+	}
 
 	return &InventoryService{
 		runtime:          opts.Runtime,
@@ -97,6 +120,7 @@ func NewInventoryService(opts InventoryOptions) *InventoryService {
 		logger:           logger,
 		cfg:              opts.Config,
 		suppressPeriodic: opts.SuppressPeriodic,
+		shutdownGrace:    grace,
 		now:              now,
 	}
 }
@@ -120,6 +144,10 @@ func (s *InventoryService) Run(ctx context.Context) {
 		s.logger.Info("inventory engine disabled by configuration")
 		return
 	}
+
+	// Detached refreshes are waited for on the way out, so a caller that waits
+	// on Run has waited on every goroutine this service owns.
+	defer s.awaitBackground()
 
 	if s.cfg.RefreshOnStartup {
 		if _, err := s.Refresh(ctx, domain.TriggerStartup); err != nil {
@@ -233,21 +261,83 @@ func (s *InventoryService) TriggerAsync(trigger domain.RefreshTrigger) (bool, ti
 		return false, startedAt
 	}
 
-	go func() {
-		defer s.endRefresh()
+	// Detached from any request: the refresh outlives the HTTP call that asked
+	// for it, and is bounded by its own timeout instead. The cancel func is
+	// published so shutdown can stop it -- an untracked goroutine writing to a
+	// database the process is closing is how "graceful shutdown" turns into a
+	// panic in the logs.
+	refreshCtx, cancel := context.WithTimeout(context.Background(), maxAsyncRefresh)
+	s.setAsyncCancel(cancel)
 
-		// Detached from any request: the refresh outlives the HTTP call that
-		// asked for it, and is bounded by its own timeout instead.
-		ctx, cancel := context.WithTimeout(context.Background(), maxAsyncRefresh)
+	s.background.Add(1)
+	go func() {
+		defer s.background.Done()
+		defer s.endRefresh()
+		defer s.clearAsyncCancel()
 		defer cancel()
 
-		if _, err := s.execute(ctx, trigger, startedAt); err != nil {
+		if _, err := s.execute(refreshCtx, trigger, startedAt); err != nil {
 			s.logger.Warn("background inventory refresh failed",
 				slog.String("trigger", string(trigger)),
 				slog.String("error", docker.SanitizeError(err)))
 		}
 	}()
 	return true, startedAt
+}
+
+// setAsyncCancel publishes the in-flight background refresh's cancel func.
+func (s *InventoryService) setAsyncCancel(cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.asyncCancel = cancel
+}
+
+func (s *InventoryService) clearAsyncCancel() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.asyncCancel = nil
+}
+
+// cancelAsync stops the in-flight background refresh, if there is one.
+//
+// The lock is released BEFORE cancelling. Holding it across the cancel would
+// let the goroutine's own clearAsyncCancel block on the same mutex, which is
+// the deadlock this ordering avoids.
+func (s *InventoryService) cancelAsync() {
+	s.mu.RLock()
+	cancel := s.asyncCancel
+	s.mu.RUnlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// awaitBackground drains detached refreshes at shutdown, in two bounded steps.
+//
+// The grace period first, so a sweep that is mid-transaction gets to commit
+// rather than being rolled back for no reason. Then cancellation, because a
+// refresh against a daemon that has stopped answering would otherwise hold the
+// process until its own fifteen-minute bound -- long past the point the
+// orchestrator gives up and sends SIGKILL.
+//
+// The second wait is the backstop for the case where cancellation is not
+// honoured promptly. If that elapses too, the goroutine is abandoned and said
+// so: an abandoned SQLite writer's transaction is rolled back by the database,
+// which is recoverable, while an unbounded hang is not.
+func (s *InventoryService) awaitBackground() {
+	if WaitGroupTimeout(&s.background, s.shutdownGrace) {
+		return
+	}
+
+	s.logger.Warn("a background inventory refresh is still running at shutdown; cancelling it",
+		slog.Duration("grace", s.shutdownGrace))
+	s.cancelAsync()
+
+	if !WaitGroupTimeout(&s.background, s.shutdownGrace) {
+		s.logger.Error("a background inventory refresh did not stop after cancellation; abandoning it",
+			slog.String("effect", "its transaction will be rolled back when the database handle closes"))
+	}
 }
 
 // CheckRuntime reports whether the container runtime is reachable.

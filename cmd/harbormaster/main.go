@@ -22,12 +22,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/api"
 	"github.com/Aznyi/HarborMaster/internal/config"
+	"github.com/Aznyi/HarborMaster/internal/diagnostics"
 	"github.com/Aznyi/HarborMaster/internal/docker"
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/healthcheck"
@@ -75,6 +77,12 @@ func dispatch(args []string) int {
 	case "healthcheck":
 		return healthcheckCommand()
 
+	case "diagnose":
+		return diagnoseCommand(os.Stdout)
+
+	case "backup":
+		return backupCommand(os.Stdout, args[1:])
+
 	case "version":
 		build := version.Get()
 		fmt.Printf("harbormaster %s (commit %s, built %s, %s, %s)\n",
@@ -111,16 +119,61 @@ func healthcheckCommand() int {
 	})
 }
 
+// diagnoseCommand inspects HarborMaster's storage and prints a report.
+//
+// It opens the database READ-ONLY and never contacts Docker, so it is safe to
+// run against a live server, a stopped one, or a copy. It is a command rather
+// than an endpoint on purpose: see the package comment in internal/diagnostics.
+func diagnoseCommand(out io.Writer) int {
+	cfg, err := config.Load()
+	if err != nil {
+		// The error names offending variables, never their values.
+		fmt.Fprintf(os.Stderr, "diagnose: invalid configuration: %v\n", err)
+		return diagnostics.ExitFailed
+	}
+
+	report := diagnostics.Diagnose(context.Background(), cfg)
+	diagnostics.Render(out, report)
+	return report.ExitCode()
+}
+
+// backupCommand writes a consistent, verified copy of the database.
+//
+// Exactly one argument, the destination. No flags: every additional knob on a
+// backup command is another way to produce a backup that is not what the
+// operator thought it was.
+func backupCommand(out io.Writer, args []string) int {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		fmt.Fprintln(os.Stderr, "backup: usage: harbormaster backup <destination>")
+		return exitUsage
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "backup: invalid configuration: %v\n", err)
+		return diagnostics.ExitFailed
+	}
+
+	return diagnostics.RunBackup(context.Background(), out, cfg, args[0])
+}
+
 func usage(w io.Writer) {
 	// Usage text to stdout. A write failure here means the stream is gone,
 	// which is not something a help message can or should recover from.
 	_, _ = fmt.Fprint(w, `HarborMaster - safety-first container lifecycle manager.
 
 Usage:
-  harbormaster [serve]     Run the API server and serve the web interface (default)
-  harbormaster healthcheck Probe the local health endpoint; exit 0 when healthy or degraded
-  harbormaster version     Print build metadata
-  harbormaster help        Show this message
+  harbormaster [serve]      Run the API server and serve the web interface (default)
+  harbormaster healthcheck  Probe the local health endpoint; exit 0 when healthy or degraded
+  harbormaster diagnose     Inspect the database and report reliability findings
+  harbormaster backup PATH  Write a consistent, verified copy of the database to PATH
+  harbormaster version      Print build metadata
+  harbormaster help         Show this message
+
+diagnose opens the database read-only and contacts no Docker daemon. backup
+uses SQLite's VACUUM INTO, so it is consistent while the server is running, and
+it verifies the copy before reporting success. Neither is reachable over HTTP:
+both report host detail that an unauthenticated API must not disclose.
 
 Configuration is read from the environment. See .env.example for the full list.
 `)
@@ -153,7 +206,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	db, err := store.Open(ctx, cfg.Store.Path)
+	db, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -162,7 +215,9 @@ func run() error {
 			logger.Error("close database failed", slog.String("error", err.Error()))
 		}
 	}()
-	logger.Info("database ready")
+	logger.Info("database ready",
+		slog.String("journalMode", db.OpenReport().JournalMode),
+		slog.String("integrity", db.OpenReport().Integrity.Summary()))
 
 	dockerClient, err := docker.New(docker.Options{
 		Host:    cfg.Docker.Host,
@@ -197,6 +252,12 @@ func run() error {
 		slog.Duration("interval", reconcileInterval),
 		slog.String("owner", refreshOwner(eventsOwnReconciliation)))
 
+	// One grace budget for every detached background task, taken from the
+	// server's shutdown timeout. The orchestrator counts down a single
+	// deadline for the whole process, so the HTTP drain and the background
+	// drain must not each help themselves to their own.
+	shutdownGrace := cfg.Server.ShutdownTimeout
+
 	inventory := service.NewInventoryService(service.InventoryOptions{
 		Runtime:          dockerClient,
 		Inventory:        db.Inventory,
@@ -204,14 +265,16 @@ func run() error {
 		Logger:           logger,
 		Config:           cfg.Inventory,
 		SuppressPeriodic: eventsOwnReconciliation,
+		ShutdownGrace:    shutdownGrace,
 	})
 
 	events := service.NewEventService(service.EventOptions{
-		Runtime:   dockerClient,
-		Events:    db.DockerEvents,
-		Inventory: inventory,
-		Logger:    logger,
-		Config:    cfg.Events,
+		Runtime:       dockerClient,
+		Events:        db.DockerEvents,
+		Inventory:     inventory,
+		Logger:        logger,
+		Config:        cfg.Events,
+		ShutdownGrace: shutdownGrace,
 	})
 
 	health := service.NewHealthService(service.HealthOptions{
@@ -286,16 +349,23 @@ func run() error {
 	//
 	//  1. serve() returns after the HTTP server has drained. In-flight requests
 	//     and open SSE streams end first, so nothing is still reading.
-	//  2. background.Wait() (deferred here, runs next) waits for the inventory
-	//     loop and the event engine to exit. Both are cancelled by the same ctx
-	//     the signal handler cancels, and both return only once every goroutine
-	//     they own has stopped.
+	//  2. awaitBackgroundServices (deferred here, runs next) waits for the
+	//     inventory loop and the event engine to exit. Both are cancelled by
+	//     the same ctx the signal handler cancels, and both return only once
+	//     every goroutine they own has stopped.
 	//  3. dockerClient.Close() and db.Close() (deferred earlier in this
 	//     function, so they run last) release the socket and the database.
 	//
 	// The database MUST close after the background services, or a final event
 	// flush would write to a closed handle. That ordering is the reason this
-	// wait group is deferred here rather than anywhere earlier.
+	// wait is deferred here rather than anywhere earlier.
+	//
+	// The wait is BOUNDED. An unbounded one makes the whole shutdown only as
+	// fast as the slowest background task, and those tasks are allowed to run
+	// for minutes: a reconciliation of a thousand containers against a daemon
+	// that has stopped answering would hold the process open long past the
+	// point the runtime gives up and sends SIGKILL -- which is a worse ending
+	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
 	background.Add(3)
 
@@ -311,7 +381,7 @@ func run() error {
 		defer background.Done()
 		retention.Run(ctx)
 	}()
-	defer background.Wait()
+	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
 	server := api.NewServer(api.Options{
 		Health:       health,
@@ -349,6 +419,57 @@ func run() error {
 	return serve(ctx, logger, db, server.HTTPServer(), cfg.Server.ShutdownTimeout)
 }
 
+// openStore opens the database with the configured reliability settings and
+// translates a classified failure into an operator-facing message.
+//
+// The remedy line is what makes the difference between "migrate database:
+// database disk image is malformed" and an operator who knows, in the first
+// sentence, that the answer is a restore rather than a restart loop.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*store.DB, error) {
+	db, err := store.OpenWithOptions(ctx, store.Options{
+		Path:             cfg.Store.Path,
+		BusyTimeout:      cfg.Store.BusyTimeout,
+		Integrity:        store.IntegrityMode(cfg.Store.IntegrityCheck),
+		IntegrityTimeout: cfg.Store.IntegrityTimeout,
+		RequireWAL:       cfg.Store.RequireWAL,
+		Logger:           logger,
+	})
+	if err == nil {
+		return db, nil
+	}
+
+	// A schema this build does not understand is its own kind of failure, and
+	// the wrong remedy (delete the database) is catastrophic, so it is named
+	// explicitly rather than folded into the storage classification.
+	switch {
+	case errors.Is(err, store.ErrSchemaAhead),
+		errors.Is(err, store.ErrMigrationChanged),
+		errors.Is(err, store.ErrMigrationGap):
+		return nil, fmt.Errorf("%w\n\tthe database was NOT modified; do not delete it", err)
+	}
+
+	// The fatal/non-fatal distinction is the difference between "wait for the
+	// disk to free up and it will come back" and "this will never come back".
+	// Saying so is what stops an operator putting a corrupt database into a
+	// restart loop while their backup window closes.
+	if kind := store.Classify(err); kind != store.FailureNone {
+		return nil, fmt.Errorf("%w\n\t%s%s", err, store.Remedy(kind), restartAdvice(kind))
+	}
+	if errors.Is(err, store.ErrCorrupt) {
+		return nil, fmt.Errorf("%w\n\t%s%s", err,
+			store.Remedy(store.FailureCorrupt), restartAdvice(store.FailureCorrupt))
+	}
+	return nil, err
+}
+
+// restartAdvice tells the operator whether starting again could possibly help.
+func restartAdvice(kind store.FailureKind) string {
+	if store.IsFatal(kind) {
+		return "\n\trestarting will not help; this condition does not clear on its own"
+	}
+	return "\n\tHarborMaster will start normally once this condition clears"
+}
+
 // refreshOwner names the component that owns the periodic full sweep, for the
 // startup log line.
 func refreshOwner(eventEngine bool) string {
@@ -356,6 +477,27 @@ func refreshOwner(eventEngine bool) string {
 		return "event engine reconciliation"
 	}
 	return "inventory refresh interval"
+}
+
+// awaitBackgroundServices waits for the background services, within a bound.
+//
+// Each service already bounds its own internal work, so reaching the bound
+// here means one of them is genuinely wedged -- most plausibly a database
+// write against a volume that has stopped answering. Abandoning it is safe:
+// the deferred db.Close that runs immediately after this rolls back any
+// uncommitted transaction, which is the same outcome a SIGKILL would produce,
+// minus the arbitrary timing.
+//
+// It is logged at error level rather than swallowed. A shutdown that silently
+// abandons work teaches an operator nothing the next time it happens.
+func awaitBackgroundServices(logger *slog.Logger, background *sync.WaitGroup, grace time.Duration) {
+	if service.WaitGroupTimeout(background, grace) {
+		logger.Info("background services stopped")
+		return
+	}
+	logger.Error("background services did not stop within the shutdown grace period; abandoning them",
+		slog.Duration("grace", grace),
+		slog.String("effect", "any uncommitted database transaction is rolled back when the handle closes"))
 }
 
 // serve runs the HTTP server until ctx is cancelled, then drains in-flight

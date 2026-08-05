@@ -123,11 +123,18 @@ dimension is bounded, and the bound is configuration rather than a magic number.
 | Write endpoints | Token bucket, per process |
 | Snapshot growth | `(container_id, checksum)` unique index; retention by count and age |
 | Database writer | `MaxOpenConns(1)`; prune in bounded batches |
+| Cross-process lock wait | `DB_BUSY_TIMEOUT`, 100ms–5m, no "wait forever" |
+| Startup integrity check | `DB_INTEGRITY_TIMEOUT`; past it the result is *incomplete*, not *damaged* |
+| Integrity problem reporting | 20 lines, enforced in the pragma **and** in the reader |
+| Event stream replay on reconnect | 1 hour, so a long outage cannot request the daemon's whole ring |
+| Shutdown, HTTP and background | One `SHUTDOWN_TIMEOUT` budget, bounded at every step |
+| Detached background work | `GraceContext`: bounded grace, then a hard maximum |
+| Backup verification | 10 minutes, so a backup command cannot hang |
 
 **Refused, not queued.** A queue converts a load spike into unbounded memory and
 latency. Every ceiling here returns `429` or `503` with `Retry-After`.
 
-## 6. Concurrency
+## 6. Concurrency and shutdown
 
 Every goroutine has a bounded lifetime tied to a context. Every `time.NewTimer`
 has a `defer Stop()`. Every channel is created with an explicit capacity.
@@ -137,8 +144,58 @@ HTTP server drains first, then background services, then the Docker client and
 the database. The database must close *after* the background services or a final
 event flush would write to a closed handle.
 
+**Every wait in that sequence is bounded**, by one budget —
+`SHUTDOWN_TIMEOUT` — shared between the HTTP drain and the background drain,
+because the orchestrator counts down a single deadline for the whole process.
+
+`service.GraceContext` is the primitive. Work that must not be interrupted
+mid-transaction survives cancellation for a bounded grace period and is then
+cancelled. Detached-*and*-unbounded is the anti-pattern it replaced: a
+reconciliation detached with `context.WithoutCancel` and a fifteen-minute bound
+meant `SIGTERM` during a large sweep held the process open until the runtime
+sent `SIGKILL` — which is the abrupt, arbitrary interruption the detachment was
+trying to avoid.
+
+Where a bound is reached, HarborMaster logs what it is abandoning at error
+level and closes the database anyway. An abandoned SQLite writer's transaction
+is rolled back; an unbounded hang is not recoverable.
+
 `go test -race` runs in CI on every push. It is not optional: the event engine
-owns several long-lived goroutines and a bounded queue.
+owns several long-lived goroutines and a bounded queue, and the shutdown
+primitives own a watchdog goroutine per detached task, with a leak test to
+match.
+
+## 6a. Storage reliability
+
+Persistence is a security boundary as well as a durability one: a database that
+silently degrades is a database whose redaction and constraint guarantees can no
+longer be relied on.
+
+| Property | Mechanism | Where |
+| --- | --- | --- |
+| Damage detected before it is written over | `quick_check` at open, **before** migrating | `internal/store/integrity.go` |
+| Damage fails closed | Refuse the open; only corruption is fatal | `internal/store/failure.go` |
+| Uncertainty does not fail closed | An *incomplete* check is distinguished from *damage* and does not refuse | `IntegrityReport.Damaged` |
+| Durability profile is confirmed, not assumed | Journal mode read back; WAL fallback warned or refused | `store.OpenWithOptions` |
+| An old binary cannot write a new schema | Applied migrations validated against the embedded set | `internal/store/migrate.go` |
+| An edited migration cannot be skipped | SHA-256 per migration, recorded at apply | same |
+| Failures name the right remedy | SQLite **result codes** classified, never message text | `internal/store/failure.go` |
+| Backups are consistent and verified | `VACUUM INTO` in a read transaction, then a full check | `internal/store/backup.go` |
+| Backups are not world readable | Created `0600`, directory `0750` | same |
+| Diagnostics never write | `OpenReadOnly` — `mode=ro`, no migration | `internal/store/store.go` |
+
+**Diagnostics are deliberately not an endpoint.** `harbormaster diagnose`
+reports filesystem paths, free space, journal mode, page counts, schema history,
+and daemon reachability — reconnaissance for an attacker, necessity for an
+operator. The API is unauthenticated in this phase, so the surface is a command
+requiring shell access instead.
+`TestDiagnosticsAreNotReachableOverHTTP` in `internal/arch` fails the build if
+`internal/api` imports the diagnostics package.
+
+The report itself carries only counts, closed-vocabulary states, timestamps,
+sizes, modes, and the operator's own configured paths. It never renders a row's
+contents, and a test sweeps the rendered output for a seeded value with a
+positive control.
 
 ## 7. Frontend
 

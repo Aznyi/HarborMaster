@@ -46,6 +46,10 @@ where most of the defects in most projects come from.
 - [ ] **Every security control has a negative test.** A control with only a happy
       path has not been verified.
 - [ ] Concurrent code has a `-race` test.
+- [ ] Code that runs at shutdown has a test asserting it finishes **within a
+      bound**, not merely that it finishes.
+- [ ] A storage failure path is tested by inducing the real condition, not by
+      mocking the error.
 - [ ] Any test that sweeps for something (a leaked secret, a forbidden pattern)
       has a positive control proving the sweep can find what it looks for.
 - [ ] Frontend changes have component tests covering loading, ready,
@@ -111,6 +115,8 @@ triggers:
 | A change to secret handling | Security review; threat model update |
 | A new external dependency | Justification in the PR: purpose, maintenance, licence, transitive cost |
 | A new network listener or protocol | Threat model update |
+| Moving a diagnostic or storage-inspection capability onto the HTTP surface | Threat model update; it changes which actor can perform reconnaissance |
+| A new command that writes a file carrying database contents | Threat model update; permissions and overwrite behaviour reviewed |
 | A new trust boundary | Threat model update; architecture document update |
 | Loosening a security control | An explicit, recorded decision — never a side effect |
 

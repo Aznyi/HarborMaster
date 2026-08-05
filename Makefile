@@ -31,7 +31,7 @@ IMAGE_TAG   ?= dev
 COMPOSE     := docker compose -f deployments/compose.yaml
 COMPOSE_DEV := $(COMPOSE) -f deployments/compose.build.yaml
 
-.PHONY: help tidy fmt fmt-check vet vet-integration test test-race test-integration cover \
+.PHONY: help tidy fmt fmt-check vet vet-integration test test-race test-integration test-fuzz cover \
         web-install web-test web-build web-dev \
         build run clean \
         docker-build docker-smoke docker-inspect \
@@ -66,6 +66,15 @@ test-race: ## Run Go tests with the race detector (needs cgo and a C toolchain)
 
 test-integration: ## Run the live-Docker integration suite (needs a reachable daemon)
 	go test -tags integration -v -timeout 15m ./internal/integration/...
+
+# The seed corpus runs as an ordinary test in `make test`; this explores beyond
+# it. The property under test is that Open either succeeds with a usable
+# database or returns an error, for ANY bytes at the path -- never a panic,
+# never a hang, never a leaked handle.
+FUZZTIME ?= 60s
+test-fuzz: ## Fuzz the database open path against arbitrary file contents
+	go test -run FuzzOpenArbitraryDatabaseFile \
+		-fuzz FuzzOpenArbitraryDatabaseFile -fuzztime $(FUZZTIME) ./internal/store/
 
 vet-integration: ## Vet the build-tagged integration suite, which the default vet skips
 	go vet -tags integration ./...

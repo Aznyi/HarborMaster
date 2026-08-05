@@ -123,6 +123,17 @@ A blocked reader on the Docker event stream stalls the whole stream.
 
 **5.6 New concurrent code ships with a `-race` test.**
 
+**5.7 Detached is not a substitute for bounded.** Work that must survive
+cancellation to finish a transaction uses `service.GraceContext`, which gives it
+a bounded grace period and then cancels it. `context.WithoutCancel` with a long
+timeout is the anti-pattern: it converts "do not interrupt this transaction"
+into "hold the process open until the runtime sends SIGKILL", which interrupts
+it anyway, at a worse moment.
+
+**5.8 Every shutdown wait has a bound and says what it abandoned.**
+`sync.WaitGroup.Wait` at shutdown is a hang waiting for one wedged goroutine.
+Use `service.WaitGroupTimeout` and log at error level when the bound is reached.
+
 ---
 
 ## 6. Frontend
@@ -195,7 +206,20 @@ small. A mistyped path pointing at `/dev/zero` should not exhaust memory.
 **9.4 Write atomically.** Temp file with `O_EXCL`, `fsync`, rename, `fsync` the
 directory. A crash mid-write must not leave a truncated key.
 
-**9.5 Explicit permissions.** `0600` for secrets, `0750` for data directories.
+**9.5 Explicit permissions.** `0600` for secrets and for anything carrying
+database contents (a backup is a complete copy of the database); `0750` for data
+directories. Set the mode explicitly after creating the file — the process
+umask decides otherwise, and on a permissive host that is `0644`.
+
+**9.6 Never silently overwrite an operator's file.** A command that writes to a
+path the operator named refuses an existing destination rather than replacing
+it. Overwriting the previous backup with a bad one is how a single failure
+destroys the recovery path.
+
+**9.7 Remove a partial artifact on the failure path.** A half-written file that
+looks like a backup is worse than no file, because it will be trusted. The
+exception is a file that FAILED VERIFICATION rather than failed to write: leave
+that one, and say so, because it is the evidence.
 
 ---
 
@@ -217,6 +241,16 @@ method set, the list of routed paths. Weakening them should break a test.
 **10.5 Test the invariant, not just the feature.**
 `TestNoRestoreEndpointExists` asserts something that does not exist and must not
 come to exist.
+
+**10.6 Induce failures, do not mock them.** A mock of `SQLITE_FULL` proves the
+mock works. `PRAGMA max_page_count` produces the real result code a full volume
+produces; a second connection holding `BEGIN IMMEDIATE` produces a real lock
+conflict; overwriting content pages produces the corruption a bad sector
+produces. Test against the condition, not against your model of it.
+
+**10.7 Bound every test that waits.** A shutdown test asserts on ELAPSED TIME as
+well as outcome — a process that shuts down "successfully" in fifteen minutes
+has the defect the test was written to catch, and only a time assertion sees it.
 
 ---
 

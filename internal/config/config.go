@@ -41,6 +41,24 @@ const (
 	DefaultLogLevel          = "info"
 	DefaultLogFormat         = "json"
 
+	// Storage reliability defaults.
+	//
+	// DefaultDBBusyTimeout bounds cross-process lock contention. Five seconds
+	// absorbs a checkpoint or a backup without turning a momentary overlap
+	// into a failed write, and is short enough that a genuinely stuck writer
+	// is reported rather than waited on forever.
+	DefaultDBBusyTimeout      = 5 * time.Second
+	DefaultDBIntegrityCheck   = IntegrityCheckQuick
+	DefaultDBIntegrityTimeout = 30 * time.Second
+	DefaultDBRequireWAL       = false
+
+	// MinDBBusyTimeout rejects a value so small it would surface SQLITE_BUSY
+	// on any normal overlap. Zero is not offered: "wait not at all" is a
+	// configuration nobody wants and a support case waiting to happen.
+	MinDBBusyTimeout = 100 * time.Millisecond
+	// MaxDBBusyTimeout keeps a typo from making every write appear to hang.
+	MaxDBBusyTimeout = 5 * time.Minute
+
 	// Inventory defaults.
 	//
 	// DefaultRefreshInterval is a compromise: often enough that the UI is not
@@ -168,6 +186,27 @@ type Docker struct {
 type Store struct {
 	// Path is the SQLite database file.
 	Path string
+
+	// BusyTimeout bounds how long a statement waits for another PROCESS's
+	// write lock. Within HarborMaster the connection pool already serialises
+	// writers, so this governs contention with a second instance, a backup
+	// tool, or an operator's sqlite3 shell.
+	BusyTimeout time.Duration
+
+	// IntegrityCheck selects the validation performed at startup: off, quick,
+	// or full. Quick is the default; see internal/store/integrity.go for why
+	// the cheap check is the right one on the startup path.
+	IntegrityCheck string
+	// IntegrityTimeout bounds that check. Past it the result is reported as
+	// incomplete and startup continues, because a slow disk must not become an
+	// outage on a database that is probably fine.
+	IntegrityTimeout time.Duration
+
+	// RequireWAL turns "write-ahead logging could not be enabled" from a
+	// warning into a refusal to start. Off by default: a rollback journal is
+	// slower and less concurrent but still correct, and refusing to run on a
+	// filesystem that cannot do WAL would be a harsh default.
+	RequireWAL bool
 }
 
 // Inventory holds settings for the read-only inventory engine.
@@ -355,6 +394,20 @@ var (
 	validLogFormats = []string{"json", "text"}
 )
 
+// The integrity-check vocabulary.
+//
+// Restated here rather than imported from internal/store so that configuration
+// stays a leaf package: config is loaded before anything is opened, and making
+// it depend on the persistence adapter would invert the layering for the sake
+// of three string constants. A test asserts the two vocabularies agree.
+const (
+	IntegrityCheckOff   = "off"
+	IntegrityCheckQuick = "quick"
+	IntegrityCheckFull  = "full"
+)
+
+var validIntegrityChecks = []string{IntegrityCheckOff, IntegrityCheckQuick, IntegrityCheckFull}
+
 // defaultMaskMode is the classification policy when none is configured.
 const defaultMaskMode = domain.MaskModeDefault
 
@@ -384,7 +437,8 @@ func load(lookup lookupFunc) (Config, error) {
 			Host: stringVar(lookup, "DOCKER_HOST", defaultDockerHost()),
 		},
 		Store: Store{
-			Path: stringVar(lookup, "DB_PATH", DefaultDBPath),
+			Path:           stringVar(lookup, "DB_PATH", DefaultDBPath),
+			IntegrityCheck: strings.ToLower(stringVar(lookup, "DB_INTEGRITY_CHECK", DefaultDBIntegrityCheck)),
 		},
 		Log: Log{
 			Level:  strings.ToLower(stringVar(lookup, "LOG_LEVEL", DefaultLogLevel)),
@@ -422,6 +476,13 @@ func load(lookup lookupFunc) (Config, error) {
 	cfg.Docker.Timeout, err = durationVar(lookup, "DOCKER_TIMEOUT", DefaultDockerTimeout)
 	collect(err)
 	cfg.Healthcheck.Timeout, err = durationVar(lookup, "HEALTHCHECK_TIMEOUT", DefaultHealthcheckTimeout)
+	collect(err)
+
+	cfg.Store.BusyTimeout, err = durationVar(lookup, "DB_BUSY_TIMEOUT", DefaultDBBusyTimeout)
+	collect(err)
+	cfg.Store.IntegrityTimeout, err = durationVar(lookup, "DB_INTEGRITY_TIMEOUT", DefaultDBIntegrityTimeout)
+	collect(err)
+	cfg.Store.RequireWAL, err = boolVar(lookup, "DB_REQUIRE_WAL", DefaultDBRequireWAL)
 	collect(err)
 
 	cfg.Inventory.Enabled, err = boolVar(lookup, "INVENTORY_ENABLED", DefaultInventoryEnabled)
@@ -550,6 +611,22 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Store.Path) == "" {
 		errs = append(errs, fmt.Errorf("%sDB_PATH must not be empty", envPrefix))
+	}
+	// An unrecognised mode is rejected rather than treated as "off". Silently
+	// skipping the integrity check because of a typo is the failure this
+	// setting exists to prevent.
+	if !slices.Contains(validIntegrityChecks, c.Store.IntegrityCheck) {
+		errs = append(errs, fmt.Errorf("%sDB_INTEGRITY_CHECK must be one of %s",
+			envPrefix, strings.Join(validIntegrityChecks, ", ")))
+	}
+	if c.Store.BusyTimeout < MinDBBusyTimeout || c.Store.BusyTimeout > MaxDBBusyTimeout {
+		errs = append(errs, fmt.Errorf("%sDB_BUSY_TIMEOUT must be between %s and %s",
+			envPrefix, MinDBBusyTimeout, MaxDBBusyTimeout))
+	}
+	// Zero would mean an unbounded check on the startup path, which is exactly
+	// the hang this timeout exists to prevent.
+	if c.Store.IntegrityTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sDB_INTEGRITY_TIMEOUT must be positive", envPrefix))
 	}
 	if !slices.Contains(validLogLevels, c.Log.Level) {
 		errs = append(errs, fmt.Errorf("%sLOG_LEVEL must be one of %s", envPrefix, strings.Join(validLogLevels, ", ")))

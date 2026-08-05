@@ -66,6 +66,11 @@ type EventService struct {
 	status  engineState
 	counter counters
 
+	// shutdownGrace is how long a reconciliation already in flight may run
+	// past cancellation, so it can finish its transaction instead of being
+	// abandoned mid-write. See GraceContext.
+	shutdownGrace time.Duration
+
 	// now and jitter are injectable so timing behaviour is deterministic in
 	// tests. Backoff tests must not depend on real elapsed time.
 	now    func() time.Time
@@ -107,6 +112,12 @@ type EventOptions struct {
 	Logger    *slog.Logger
 	Config    config.Events
 
+	// ShutdownGrace bounds how long work already in flight may run past
+	// cancellation. Zero selects DefaultShutdownGrace. Wire it from the
+	// server's shutdown timeout: the HTTP drain and the background drain share
+	// one orchestrator-imposed deadline.
+	ShutdownGrace time.Duration
+
 	// Now and Jitter are injectable for deterministic tests. Jitter receives a
 	// computed backoff and returns the delay actually waited.
 	Now    func() time.Time
@@ -135,6 +146,10 @@ func NewEventService(opts EventOptions) *EventService {
 	if cfg.BatchSize < 1 {
 		cfg.BatchSize = config.DefaultEventBatchSize
 	}
+	shutdownGrace := opts.ShutdownGrace
+	if shutdownGrace <= 0 {
+		shutdownGrace = DefaultShutdownGrace
+	}
 
 	service := &EventService{
 		runtime:   opts.Runtime,
@@ -146,10 +161,11 @@ func NewEventService(opts EventOptions) *EventService {
 		dedup:     newDedupWindow(cfg.DedupWindow, dedupCapacity(cfg.BufferSize)),
 		// The pending-refresh map is capped relative to the queue: past that,
 		// tracking resources individually costs more than reconciling.
-		scheduler:   newRefreshScheduler(cfg.RefreshDebounce, cfg.BufferSize, now),
-		broadcaster: newEventBroadcaster(cfg.StreamSubscribers, cfg.StreamBuffer),
-		now:         now,
-		jitter:      jitter,
+		scheduler:     newRefreshScheduler(cfg.RefreshDebounce, cfg.BufferSize, now),
+		broadcaster:   newEventBroadcaster(cfg.StreamSubscribers, cfg.StreamBuffer),
+		shutdownGrace: shutdownGrace,
+		now:           now,
+		jitter:        jitter,
 	}
 
 	service.status.connection = domain.ConnStateDisabled
@@ -225,7 +241,9 @@ func (s *EventService) Run(ctx context.Context) {
 	}
 
 	// Restore what survived the last run, so status is not blank until the
-	// first connection.
+	// first connection -- and so the FIRST connection after a restart can ask
+	// the daemon for what happened while HarborMaster was down, instead of
+	// starting blind. See resumePoint for why that window is clamped.
 	if state, err := s.events.LoadState(ctx, domain.LocalHostID); err == nil {
 		s.state.Lock()
 		s.status.lastConnected = state.LastConnectedAt
@@ -280,7 +298,13 @@ func (s *EventService) readLoop(ctx context.Context) {
 	// resumeFrom lets a reconnect ask the daemon for what it missed. Best
 	// effort only: the daemon keeps a bounded in-memory ring, so a long outage
 	// returns nothing, which is why every reconnect also reconciles.
-	var resumeFrom time.Time
+	//
+	// Seeded from the persisted state, so the first connection after a RESTART
+	// recovers the same way a reconnect does. Before this the engine started
+	// blind after every restart and relied entirely on the startup
+	// reconciliation, which is correct but coarser: it sees the end state and
+	// never the transitions.
+	resumeFrom := s.resumePoint()
 
 	for {
 		if ctx.Err() != nil {
@@ -803,10 +827,11 @@ func (s *EventService) runReconciliation(ctx context.Context, trigger domain.Ref
 	}
 	s.counter.fullReconciliations.Add(1)
 
-	// Detached from cancellation but bounded: a sweep of a large host must not
-	// be aborted by a shutdown signal mid-transaction, and must not outlive the
-	// shutdown grace period forever either.
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxAsyncRefresh)
+	// Survives cancellation for the shutdown grace period and no longer. A
+	// sweep of a large host must not be aborted mid-transaction by a signal --
+	// and must not hold the process open past the deadline the orchestrator is
+	// counting down either. See GraceContext for why both halves matter.
+	refreshCtx, cancel := GraceContext(ctx, s.shutdownGrace, maxAsyncRefresh)
 	defer cancel()
 
 	err := s.inventory.Reconcile(refreshCtx, trigger)
@@ -1049,20 +1074,41 @@ func (s *EventService) noteEventTime(at time.Time) {
 	s.status.lastEvent = &at
 }
 
+// maxResumeLookback bounds how far back a reconnect asks the daemon to replay.
+//
+// The window is an UNBOUNDED input if it is not clamped. A HarborMaster that
+// was stopped for a month would, on restart, ask the daemon for a month of
+// events; the daemon walks its ring to satisfy that, and whatever it returns
+// arrives as a burst against a queue sized for steady state -- so the recovery
+// path becomes the load spike. An hour is longer than any realistic restart
+// and far shorter than any outage a replay could actually cover, and every
+// (re)connection reconciles regardless, so the clamp costs no correctness.
+const maxResumeLookback = time.Hour
+
 // resumePoint chooses where a reconnect asks the daemon to resume from.
+//
+// Clamped to maxResumeLookback: a resume point far in the past is a request
+// for an unbounded replay, and this is a read against a privileged socket.
 func (s *EventService) resumePoint() time.Time {
 	s.state.RLock()
 	defer s.state.RUnlock()
 
-	if s.status.lastEvent != nil {
+	var from time.Time
+	switch {
+	case s.status.lastEvent != nil:
 		// One nanosecond past the last event seen, so the resume neither
 		// replays it nor skips one that shared its instant.
-		return s.status.lastEvent.Add(time.Nanosecond)
+		from = s.status.lastEvent.Add(time.Nanosecond)
+	case s.status.lastDisconnected != nil:
+		from = *s.status.lastDisconnected
+	default:
+		return time.Time{}
 	}
-	if s.status.lastDisconnected != nil {
-		return *s.status.lastDisconnected
+
+	if earliest := s.now().Add(-maxResumeLookback); from.Before(earliest) {
+		return earliest
 	}
-	return time.Time{}
+	return from
 }
 
 // persistState writes the small slice of status worth surviving a restart.

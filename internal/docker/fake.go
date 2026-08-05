@@ -206,6 +206,36 @@ func (f *Fake) Subscriptions() int {
 	return f.StreamCalls
 }
 
+// FirstEventsSince returns the `since` argument of the FIRST subscription, or
+// the zero time if none was made.
+//
+// The first is what a restart-recovery test asserts on: it is the point the
+// engine resumed from when the process came up, before any reconnect has had a
+// chance to move it.
+func (f *Fake) FirstEventsSince() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.SinceValues) == 0 {
+		return time.Time{}
+	}
+	return f.SinceValues[0]
+}
+
+// LastEventsSince returns the `since` argument of the most recent
+// subscription, or the zero time if none was made.
+//
+// Read through this accessor rather than the SinceValues field whenever the
+// fake is shared with a running engine: the engine subscribes from its own
+// goroutine, so touching the slice directly is a data race.
+func (f *Fake) LastEventsSince() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.SinceValues) == 0 {
+		return time.Time{}
+	}
+	return f.SinceValues[len(f.SinceValues)-1]
+}
+
 // InspectCallCount reports how many times InspectContainer was called.
 //
 // Read the counters through these accessors, never through the fields, whenever

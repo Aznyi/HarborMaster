@@ -28,7 +28,7 @@ func openRawDB(t *testing.T) *sql.DB {
 func openMigratedDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := openRawDB(t)
-	if err := store.Migrate(context.Background(), db); err != nil {
+	if _, err := store.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -67,7 +67,7 @@ func TestMigration0004PreservesLegacySnapshotRows(t *testing.T) {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	if err := store.Migrate(context.Background(), db); err != nil {
+	if _, err := store.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestMigration0004CreatesAnEmptySnapshotsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.Migrate(context.Background(), db); err != nil {
+	if _, err := store.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

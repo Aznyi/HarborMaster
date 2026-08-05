@@ -122,6 +122,23 @@ largest residual risk in the product.
 
 Docker event stream (outbound), SQLite file, HMAC key file, embedded migrations.
 
+**The operator commands are deliberately here and not above.**
+`harbormaster diagnose` and `harbormaster backup` report filesystem paths, free
+space, journal mode, page counts, schema history, and daemon reachability, and
+`backup` writes a complete copy of the database to an operator-chosen path.
+Every one of those is what an operator needs during an incident and what an
+attacker wants during reconnaissance.
+
+Exposing them over HTTP would put host layout behind an endpoint that has no
+authentication. Requiring shell access to the container or the host is the
+control: that is a privilege an operator already has and an anonymous HTTP
+request does not. `TestDiagnosticsAreNotReachableOverHTTP` fails the build if
+`internal/api` imports the diagnostics package, so the rule survives a
+well-meaning "show the diagnosis in the UI" change.
+
+`diagnose` opens the database read-only and contacts no Docker daemon.
+`backup` reads and writes files only. Neither adds a Docker capability.
+
 ---
 
 ## 6. STRIDE per boundary
@@ -162,9 +179,22 @@ Docker event stream (outbound), SQLite file, HMAC key file, embedded migrations.
 | **T**ampering | SQL injection via a filter | Every value bound; sort fields from a fixed allowlist; tested with injection payloads | Low |
 | **T**ampering | Snapshot history rewritten | Append-only repository; one `UPDATE` touching two summary columns; source-level test enforces it | Low |
 | **I**nfo disclosure | Stolen database yields secrets | Keyed HMAC digests, not plaintext; whole-database sweep test | Low, given key hygiene |
-| **I**nfo disclosure | Database world-readable | Directory created `0750` | Low |
+| **I**nfo disclosure | Database world-readable | Directory created `0750`; `diagnose` reports a wider mode as a finding | Low |
+| **I**nfo disclosure | A backup left world-readable | `harbormaster backup` creates `0600`, parent `0750` | Low |
+| **I**nfo disclosure | Diagnostics exposed to the network | Command only, never a route; enforced by `TestDiagnosticsAreNotReachableOverHTTP` | Low |
+| **I**nfo disclosure | A diagnosis printing row contents | Report carries only counts, closed-vocabulary states, sizes, and configured paths; output swept in test with a positive control | Low |
+| **T**ampering | An old binary writes a schema it does not understand | Applied migrations validated against the embedded set; `ErrSchemaAhead` refuses the open without modifying the database | Low |
+| **T**ampering | An applied migration edited after the fact | SHA-256 recorded per migration at apply time; a mismatch refuses the open | Low for edits made after this version; **undetectable** for edits predating it |
+| **T**ampering | Backup path interpreted as SQL | `VACUUM INTO ?` takes a bound parameter; tested with a quoted filename | Low |
+| **T**ampering | A backup silently overwriting the good one | Refuses an existing destination and the live database and its sidecars | Low |
+| **I**ntegrity | Undetected corruption written over | `quick_check` at open, **before** migrating; damage refuses startup | Low |
+| **I**ntegrity | A restored backup that cannot actually be restored | Every backup verified on write: full integrity check, foreign key check, schema history, row counts | Low |
+| **I**ntegrity | Silent WAL fallback changing the crash profile | Journal mode read back and warned; `DB_REQUIRE_WAL` turns it into a refusal | Low |
 | **D**enial of service | Unbounded growth | Retention by count and age, bounded batches, newest always kept | Low |
 | **D**enial of service | Writer starvation | `MaxOpenConns(1)`, WAL, busy timeout, bounded prune batches | Medium under heavy write load |
+| **D**enial of service | A startup integrity check that never finishes | `DB_INTEGRITY_TIMEOUT`; an incomplete check is reported, not treated as damage, and does not refuse startup | Low |
+| **D**enial of service | Shutdown held open by detached background work | One `SHUTDOWN_TIMEOUT` budget; `GraceContext` bounds every detached task | Low |
+| **D**enial of service | A long outage requesting the daemon's whole event ring on reconnect | Resume window clamped to one hour | Low |
 
 ### TB4 — CI/CD to registry
 
@@ -228,6 +258,11 @@ Ordered by severity. These are accepted, not solved.
 | R7 | **Name-based secret classification** | **Low** | Value scanning is worse | `all-sensitive` mode |
 | R8 | **SQLite single writer** | **Low** | Right choice for a single-host tool | Bounded batches; retention |
 | R9 | **No TLS in-process** | **Low** | Terminating TLS is a proxy's job | Reverse proxy |
+| R10 | **Backups are unencrypted.** A backup is a complete copy of the database, and `harbormaster backup` writes it in the clear | **Medium** | Encrypting it would need key management HarborMaster does not have, and would produce an artifact no standard tool can read during an incident | `0600` mode; store backups on an encrypted volume; keep the HMAC key out of the same backup |
+| R11 | **Migration edits predating this version are undetectable.** Checksums are recorded from this release onward and backfilled for older rows | **Low** | Nothing can retroactively prove what an already-applied file contained; the evidence does not exist | Every edit from this version forward is detected and refuses the open |
+| R12 | **`diagnose` cannot read a database left with a hot write-ahead log by a crashed process**, because replaying it is a write and the diagnosis is read-only | **Low** | The read-only guarantee is worth more than reading in this one state; the filesystem-level findings still render | Start HarborMaster once to replay the log, then re-run; the condition is reported explicitly rather than as corruption |
+| R13 | **An integrity check that times out establishes nothing**, and startup continues | **Low** | Refusing on an *incomplete* check would turn a slow disk into an outage; a false-positive refusal is worse than a late diagnosis | Raise `DB_INTEGRITY_TIMEOUT`, or run `harbormaster diagnose`, which uses the full check with no startup pressure |
+| R14 | **A wedged background task can be abandoned at shutdown** once the grace period elapses | **Low** | An unbounded wait is not recoverable; an abandoned SQLite transaction is rolled back by the database | Logged at error level with what was abandoned; raise `SHUTDOWN_TIMEOUT` |
 
 ---
 
@@ -274,3 +309,8 @@ Revisit this document when any of the following happens:
 - The secret handling design changes.
 - A new trust boundary is introduced (a second host, an agent, a plugin).
 - A dependency with access to the socket changes major version.
+- A diagnostic, backup, or storage-inspection capability is proposed for the
+  **HTTP surface**. Today they are commands requiring shell access, and moving
+  one to a route changes which actor can perform reconnaissance.
+- A new command writes a file outside the data directory, or writes one that
+  carries database contents.

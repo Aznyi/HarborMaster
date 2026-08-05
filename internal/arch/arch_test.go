@@ -166,6 +166,40 @@ func TestRuntimeSurfaceIsTheExpectedReadOnlySet(t *testing.T) {
 	}
 }
 
+// diagnosticsPackage is the operator-facing diagnostic surface.
+const diagnosticsPackage = "github.com/Aznyi/HarborMaster/internal/diagnostics"
+
+// apiPackage is the HTTP layer, which must never reach the diagnostics.
+const apiPackage = "internal/api"
+
+// TestDiagnosticsAreNotReachableOverHTTP fails if the API layer imports the
+// diagnostics package.
+//
+// `harbormaster diagnose` reports filesystem paths, free space, journal mode,
+// page counts, schema history, and when the Docker daemon was last reachable.
+// That is what an operator needs and what an attacker wants, and HarborMaster's
+// API is unauthenticated by design in this phase -- so an endpoint serving it
+// would hand host layout to anything that can reach the port.
+//
+// Requiring shell access instead is the control. This test is what keeps it
+// from being undone by a well-meaning "expose the diagnosis in the UI" change,
+// which is a reasonable thing to want and an unreasonable thing to have before
+// authentication exists.
+func TestDiagnosticsAreNotReachableOverHTTP(t *testing.T) {
+	for _, imp := range allImports(t) {
+		if imp.path != diagnosticsPackage && !strings.HasPrefix(imp.path, diagnosticsPackage+"/") {
+			continue
+		}
+		if filepath.ToSlash(filepath.Dir(imp.rel)) != apiPackage {
+			continue
+		}
+		t.Errorf("%s imports %s\n"+
+			"\tthe diagnostics report host paths, free space, and schema detail, and the API is "+
+			"unauthenticated; it must stay a command that requires shell access, not an endpoint",
+			imp.file, imp.path)
+	}
+}
+
 // anImport is one import declaration found in the repository.
 type anImport struct {
 	// file is a repo-relative path used in failure messages.

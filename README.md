@@ -24,6 +24,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Container image](#container-image)
 - [Inventory](#inventory)
 - [Docker events](#docker-events)
+- [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [API](#api)
@@ -174,6 +175,13 @@ docker inspect --format '{{.State.Health.Status}}' harbormaster
 
 # Run the built-in check by hand (no shell or curl inside the image)
 docker exec harbormaster /usr/local/bin/harbormaster healthcheck
+
+# Inspect the database and report reliability findings (read-only, no Docker)
+docker exec harbormaster /usr/local/bin/harbormaster diagnose
+
+# Take a consistent, verified backup while the server is running
+docker exec harbormaster /usr/local/bin/harbormaster backup \
+  /var/lib/harbormaster/backup-$(date -u +%Y%m%dT%H%M%SZ).db
 
 # Build metadata
 curl -s http://127.0.0.1:8080/api/v1/version
@@ -588,6 +596,105 @@ widens the `inventory_refreshes` trigger constraint to accept `reconcile`.
 not be conflated: that one is HarborMaster's audit log of its **own** actions,
 this one records what the **Docker daemon** reported.
 
+## Reliability and recovery
+
+The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
+This is the shape of it.
+
+### Two operator commands
+
+```sh
+harbormaster diagnose            # inspect the database, print findings
+harbormaster backup <path>       # consistent copy, then verify it
+```
+
+Both are **commands, not endpoints, and will stay that way while the API is
+unauthenticated**. They report filesystem paths, free space, schema history,
+and when the daemon was last reachable — what an operator needs and what an
+attacker wants. Requiring shell access is the control, and an architecture test
+fails the build if `internal/api` ever imports the diagnostics package.
+
+`diagnose` opens the database **read-only** and migrates nothing, so it is safe
+against a live server, a stopped one, or a backup. It opens no Docker
+connection: a diagnostic that talks to a privileged socket to answer a question
+about a file would be adding a capability for the sake of a report.
+
+### Do not `cp` the database
+
+With write-ahead logging the committed state is split between
+`harbormaster.db` and its `-wal` sidecar. A file copy taken while HarborMaster
+is running can capture a database missing its most recent commits, or one that
+is internally inconsistent. It will usually *seem* to work — the worst property
+a backup procedure can have.
+
+`harbormaster backup` uses SQLite's `VACUUM INTO`, which runs inside a read
+transaction and produces a consistent, defragmented copy without an exclusive
+lock. It then **verifies the copy**: a full integrity check, a foreign key
+check, the schema history compared against the running build, and row counts
+for every table that carries history. An unverified backup is a belief, not a
+control.
+
+It refuses to overwrite an existing file and refuses the live database and its
+sidecars. A backup that fails verification is left on disk deliberately — it is
+evidence — and reported as failed.
+
+### What happens at startup
+
+Journal mode is **confirmed**, not assumed: SQLite falls back from WAL silently
+on a filesystem that cannot support it, and the durability profile then differs
+from the documented one with no signal unless something asks.
+
+The database is then **validated before it is migrated**. Detected damage
+refuses startup, because writing more history over a malformed image shortens
+the window in which a backup still predates the damage. A check that could not
+*complete* does not refuse: it establishes nothing, and turning a slow disk into
+an outage is worse than a late diagnosis.
+
+Schema history is validated too. Three states are refused, and each means *the
+schema is not what this binary believes*: a migration this build does not
+contain (a newer HarborMaster wrote the database), an applied migration whose
+file has since changed, and a gap in the sequence. In all three cases the
+database is **not modified**, and the error says so — the destructive instinct
+here is to delete it and let it rebuild, which throws away the history.
+
+### Crash recovery
+
+A HarborMaster killed mid-write leaves committed transactions in the
+write-ahead log; the next start replays them. No committed data is lost and no
+operator action is required.
+
+An interrupted inventory refresh leaves the **previous** inventory whole,
+because a refresh commits in one transaction at a new generation. An
+interrupted migration leaves the last complete one, and the next start finishes
+the job. The event engine restores its timestamps and reconnect count, and
+resumes the Docker stream from just after the last event it saw — **clamped to
+one hour**, because an unclamped window turns a long outage into a request for
+the daemon's whole event ring, making recovery the load spike.
+
+### Bounded shutdown
+
+Every wait is bounded by `HARBORMASTER_SHUTDOWN_TIMEOUT`, and it is **one
+budget** for the HTTP drain and the background drain together — the
+orchestrator counts down a single deadline for the whole process.
+
+Work already in flight gets a grace period rather than being cancelled
+outright, so a reconciliation mid-transaction commits instead of rolling back
+for no reason; it is then cancelled. Both halves matter. An unbounded wait means
+a sweep of a thousand containers against a daemon that has stopped answering
+holds the process open long past the point the runtime gives up and sends
+`SIGKILL` — a worse ending, because it lands at an arbitrary instant.
+
+### Failure conditions
+
+SQLite result codes are classified rather than message text, so each condition
+reports the remedy it actually implies: corruption means restore, a full disk
+means free space, a read-only mount means fix the mount, busy means another
+writer holds the lock. Corruption is the only one treated as fatal — everything
+else describes a condition that can clear.
+
+Docker being unreachable is **degraded, never unhealthy**. Escalating it would
+put HarborMaster into a restart loop every time the daemon restarts.
+
 ## Architecture
 
 Layers depend inward. Nothing in `domain` imports an adapter, and services
@@ -654,10 +761,19 @@ Shutdown order is deliberate, because the last step depends on the first:
 
 1. The HTTP server drains. In-flight requests and open SSE streams end.
 2. Background services stop. The inventory loop and the event engine exit, and
-   the engine flushes anything already read using a context detached from
-   cancellation so those events are not lost.
+   the engine flushes anything already read using a context that survives
+   cancellation for a bounded grace period, so those events are not lost and
+   the flush cannot outlive the shutdown deadline.
 3. The Docker client and the database close — the database **after** background
    persistence has stopped, or a final flush would write to a closed handle.
+   `Close` checkpoints the write-ahead log, so a clean stop leaves nothing to
+   replay.
+
+Every one of those waits is **bounded**. `GraceContext` is the primitive: work
+detached from cancellation survives a signal just long enough to commit, and is
+then cancelled. Detached-but-unbounded is the failure mode it replaced — a
+fifteen-minute reconciliation bound meant `SIGTERM` during a large sweep held
+the process open until the runtime killed it.
 
 One subtlety worth knowing if you touch the adapter: the event stream uses a
 **second SDK client built without a request timeout**. The SDK's `WithTimeout`
@@ -695,6 +811,10 @@ for the full list with defaults.
 | `HARBORMASTER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Engine endpoint |
 | `HARBORMASTER_DOCKER_TIMEOUT` | `10s` | Per-call Engine timeout |
 | `HARBORMASTER_DB_PATH` | `./data/harbormaster.db` | SQLite database file |
+| `HARBORMASTER_DB_BUSY_TIMEOUT` | `5s` | Wait for another **process's** write lock |
+| `HARBORMASTER_DB_INTEGRITY_CHECK` | `quick` | Startup validation: `off`, `quick`, or `full` |
+| `HARBORMASTER_DB_INTEGRITY_TIMEOUT` | `30s` | Bound on that check; past it the result is *incomplete*, not *damaged* |
+| `HARBORMASTER_DB_REQUIRE_WAL` | `false` | Refuse to start when write-ahead logging could not be enabled |
 | `HARBORMASTER_INVENTORY_ENABLED` | `true` | Turn the inventory engine on or off |
 | `HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP` | `true` | Collect once at boot |
 | `HARBORMASTER_INVENTORY_REFRESH_INTERVAL` | `60s` | Periodic refresh; `0` disables it |
@@ -968,6 +1088,21 @@ vanishes mid-refresh, an image that cannot be resolved, a daemon that is down.
 
 A synthetic 1,000-container inventory test exercises persistence and paged
 queries at the stated design target.
+
+Storage failures are **induced rather than mocked**, because a mock of
+`SQLITE_FULL` proves only that the mock works. A page limit produces a real
+full-database error, a second connection holding `BEGIN IMMEDIATE` produces a
+real lock conflict, overwriting content pages while leaving the header intact
+produces the corruption a bad sector produces, and a handle abandoned without
+`Close` leaves the hot write-ahead log a killed process leaves. Every
+classification test asserts the specific verdict, and the remedy sweep carries
+a positive control proving it can find what it looks for.
+
+`FuzzOpenArbitraryDatabaseFile` feeds arbitrary bytes to the open path. The
+property is not "bad input is rejected" but the stronger one: whatever is at
+the path, `Open` either succeeds with a **usable, migrated** database or
+returns an error — never a panic, never a hang, never a leaked handle on the
+failure path.
 
 Frontend tests run under Vitest with Testing Library, asserting on roles and
 accessible names rather than class names. Filter, sort, and pagination tests
