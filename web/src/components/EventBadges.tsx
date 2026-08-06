@@ -96,6 +96,7 @@ const streamTones: Record<StreamStatus, BadgeTone> = {
   reconnecting: "warn",
   idle: "neutral",
   unavailable: "neutral",
+  signedOut: "danger",
 };
 
 const streamLabels: Record<StreamStatus, string> = {
@@ -104,6 +105,7 @@ const streamLabels: Record<StreamStatus, string> = {
   reconnecting: "reconnecting",
   idle: "not connected",
   unavailable: "unavailable",
+  signedOut: "signed out",
 };
 
 export function StreamStatusBadge({ status }: { status: StreamStatus }) {
@@ -123,6 +125,8 @@ function describeStream(status: StreamStatus): string {
       return "The live stream dropped. The browser is retrying on its own; history below is still accurate.";
     case "idle":
       return "The live stream is not connected.";
+    case "signedOut":
+      return "The live stream ended because this session is no longer valid. Sign in again.";
     case "unavailable":
       return "Live updates are unavailable. The history below is still accurate.";
   }

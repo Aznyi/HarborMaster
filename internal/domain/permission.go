@@ -108,9 +108,19 @@ const (
 	PermUserManage Permission = "user:manage"
 	// PermAuditRead reads the security audit history.
 	PermAuditRead Permission = "audit:read"
-	// PermSettingsManage covers security-sensitive application settings.
-	PermSettingsManage Permission = "settings:manage"
 )
+
+// There is deliberately no `settings:manage`.
+//
+// HarborMaster is configured entirely through environment variables, and the
+// settings page is read-only: it reports observed state and names the variables
+// that produced it. A permission existed for it briefly and guarded no route,
+// which is worse than no permission at all -- the role catalogue advertised a
+// capability the API did not have, so a client building its UI from that
+// catalogue would offer a control that could not exist.
+//
+// A permission is added when a route needs it, and
+// TestEveryPermissionGuardsARoute fails the build on one that does not.
 
 // AllPermissions lists every permission, sorted.
 //
@@ -127,7 +137,6 @@ var AllPermissions = []Permission{
 	PermInventoryRead, PermInventoryRefresh,
 	PermPlanGenerate, PermPlanRead,
 	PermPolicyAnnotate, PermPolicyEvaluate, PermPolicyManage, PermPolicyRead,
-	PermSettingsManage,
 	PermSnapshotCreate, PermSnapshotRead,
 	PermUserManage,
 }
@@ -194,8 +203,6 @@ func (p Permission) Describe() string {
 		return "manage users, roles, and sessions"
 	case PermAuditRead:
 		return "read the security audit history"
-	case PermSettingsManage:
-		return "change security-sensitive settings"
 	default:
 		return "an unrecognised capability"
 	}
@@ -312,7 +319,6 @@ var administratorPermissions = []Permission{
 	PermPolicyManage,
 	PermUserManage,
 	PermAuditRead,
-	PermSettingsManage,
 }
 
 // rolePermissions is the whole authorization model, in one table.

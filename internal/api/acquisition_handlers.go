@@ -201,6 +201,9 @@ func (s *Server) handleAcquisitionCreate(w http.ResponseWriter, r *http.Request)
 	acquisition, err := s.acquisitions.Request(r.Context(), service.AcquisitionRequest{
 		PlanID:     planID,
 		RequestKey: requestKey,
+		// Carried onto the record so the OUTCOME can be attributed by a worker
+		// that runs later with no request and no session.
+		RequestedBy: s.requesterFrom(r),
 	})
 	if err != nil {
 		s.writeAcquisitionError(w, r, err)

@@ -510,6 +510,23 @@ and `TestLocalAdminIsNotReachableFromTheAPI` forbids it from naming. "Never
 exposed over HTTP" is a structural fact rather than a promise: a handler cannot
 call what its dependency does not declare.
 
+### Long-lived responses are re-authorized
+
+Every route re-reads the account on each request. A STREAM makes one request and
+then runs for as long as the client holds it, so authorizing it only at connect
+would make it the one place where revoking a session does not stop the flow of
+data.
+
+`GET /events/stream` therefore re-checks the session AND the `event:read`
+permission on every heartbeat, and ends with a `closed` frame the moment either
+stops holding. The permission is re-checked as well as the session because a
+demotion leaves a VALID session that no longer holds the permission.
+
+It fails closed: a lookup that errors ends the stream. A stream is a standing
+grant, and a grant that cannot be reconfirmed is one that should stop.
+
+The residual window is one heartbeat, recorded as R40.
+
 ### Audit
 
 Before this phase every feature recorded WHAT happened and none recorded WHO.
@@ -537,6 +554,33 @@ sweeps every recorded row for every secret that was in scope.
 An audit write never fails an action. If it could, filling the disk would become
 a way to disable HarborMaster, and a failed write during logout would leave the
 operator logged in. The failure is logged at ERROR and the action proceeds.
+
+#### A request and an outcome are separate facts
+
+The two operations that change the Docker host record BOTH.
+
+A request can be refused by the second preflight, cancelled before the first
+mutation, expire in the queue, or fail partway and leave two containers behind.
+An audit log holding only `execution.requested` cannot answer the question an
+administrator actually asks after an incident -- *was this container replaced,
+and by whom* -- so it also records `execution.completed` or `execution.failed`,
+and the failure reason says whether the host was left changed.
+
+The completions are what `Privileged()` counts and what the WARN log line
+reports. Counting requests would over-report host changes, and a security
+counter that over-reports is one an administrator learns to ignore.
+
+The outcome is written by a WORKER, minutes after the request, on a goroutine
+with no HTTP request and no session. So the requesting account is stored ON the
+record -- see migration 0012 -- because that is the only thing the worker has.
+Two fields, user id and username: no role, no session, no address, because those
+belong to the request and are already audited with it. A second, staler copy
+that can disagree with the first is worse than none.
+
+It reaches the log from ONE place: a deferred call at the end of the pipeline
+that reads the final state back from the store. The pipeline has a dozen
+terminal paths, and an audit call on each would be a list a future path forgets
+to join.
 
 ### The source address
 

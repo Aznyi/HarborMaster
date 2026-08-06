@@ -142,6 +142,11 @@ type ExecutionOptions struct {
 	// makes preservation UNVERIFIABLE, which fails closed rather than passing.
 	Hasher *Hasher
 
+	// Audit records what a finished recreation did to the host, attributed to
+	// the account that asked for it. Nil records nothing, which is correct for
+	// a test but not for a deployment.
+	Audit *AuditRecorder
+
 	Config config.Execution
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -155,6 +160,9 @@ type ExecutionService struct {
 	capturer docker.ConfigCapturer
 	mutator  docker.ContainerMutator
 	hasher   *Hasher
+	// audit records the OUTCOME of a recreation in the security log. Nil in a
+	// test that is not about attribution; auditOutcome is nil-safe.
+	audit *AuditRecorder
 
 	cfg    config.Execution
 	logger *slog.Logger
@@ -227,6 +235,7 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		capturer:   opts.Capturer,
 		mutator:    opts.Mutator,
 		hasher:     opts.Hasher,
+		audit:      opts.Audit,
 		cfg:        cfg,
 		logger:     logger,
 		now:        now,
@@ -281,6 +290,11 @@ type ExecutionRequest struct {
 	// RequestKey is an optional idempotency key, so a retried request -- or a
 	// double-clicked button -- does not start a second recreation.
 	RequestKey string
+
+	// RequestedBy is the account asking. Stored on the record so the OUTCOME
+	// can be attributed minutes later by a worker that has no request and no
+	// session; see auditOutcome.
+	RequestedBy domain.Requester
 }
 
 // Request validates and records a recreation request.
@@ -346,6 +360,7 @@ func (s *ExecutionService) Request(
 		ExpiresAt:      now.Add(s.cfg.RequestTTL),
 		RequestKey:     request.RequestKey,
 		PlanDigest:     decision.Plan.InputDigest,
+		RequestedBy:    request.RequestedBy,
 	}
 
 	created, err := s.store.Create(ctx, execution, now)

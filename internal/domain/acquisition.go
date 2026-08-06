@@ -473,6 +473,13 @@ type Acquisition struct {
 	// RequestKey is the idempotency key, when the caller supplied one.
 	RequestKey string `json:"requestKey,omitempty"`
 
+	// RequestedBy is the account that asked for this download.
+	//
+	// Carried on the record because the OUTCOME is audited by a worker with no
+	// request and no session -- see migration 0012. Absent on records written
+	// before HarborMaster recorded requesters.
+	RequestedBy Requester `json:"requestedBy,omitzero"`
+
 	// PlanDigest is the plan's input fingerprint AS APPROVED. Preflight
 	// recomputes the plan's fingerprint and compares against this, which is how
 	// "the evidence has not moved" is established exactly rather than by

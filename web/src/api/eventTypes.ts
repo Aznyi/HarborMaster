@@ -202,10 +202,27 @@ export interface StreamTruncatedPayload {
   notice: string;
 }
 
+/**
+ * Sent when the server ends the stream deliberately.
+ *
+ * The only reason today is that the session behind it stopped being valid --
+ * signed out, expired, revoked, the password changed, the account disabled, or
+ * the role demoted below `event:read`. The stream is re-authorized on every
+ * heartbeat, so this arrives within one heartbeat of the change.
+ *
+ * A client that receives it should STOP reconnecting: EventSource would
+ * otherwise loop into a 401.
+ */
+export interface StreamClosedPayload {
+  reason: string;
+}
+
 /** How the browser's connection to the SSE endpoint is doing. */
 export type StreamStatus =
   | "idle"
   | "connecting"
   | "open"
   | "reconnecting"
-  | "unavailable";
+  | "unavailable"
+  /** The server closed the stream because the session is no longer valid. */
+  | "signedOut";

@@ -23,11 +23,23 @@ import (
 // own with Last-Event-ID. A WebSocket would add a second protocol and a second
 // set of framing bugs to solve a problem that does not exist here.
 //
-// SECURITY. This endpoint is UNAUTHENTICATED, like the rest of the API in this
-// phase. Everything it emits has already been through redaction before being
-// stored, so an attribute whose key matched a sensitive pattern carries the
-// mask rather than the secret. No raw Docker payload is ever written to the
-// wire: the frames carry HarborMaster's own event model and nothing else.
+// SECURITY. This endpoint requires `event:read`, like every other event route.
+// Everything it emits has already been through redaction before being stored,
+// so an attribute whose key matched a sensitive pattern carries the mask rather
+// than the secret. No raw Docker payload is ever written to the wire: the
+// frames carry HarborMaster's own event model and nothing else.
+//
+// # A stream is re-authorized, not authorized once
+//
+// Every other route in HarborMaster re-reads the account on each request, which
+// is what makes a disablement, a demotion, or a password change take effect
+// immediately. A stream makes ONE request and then runs for as long as the
+// client holds the connection -- up to the session's absolute lifetime.
+//
+// Authorizing it only at connect would therefore make it the one place where
+// revoking a session does not stop the flow of estate data. So the session is
+// re-checked on every heartbeat, and the stream ends the moment it stops being
+// valid. See revalidate.
 
 // SSE event names. A named event lets a client attach separate listeners
 // instead of parsing a discriminator out of every payload.
@@ -40,7 +52,16 @@ const (
 	// client knows to reload the paginated history rather than assume it has
 	// everything.
 	sseEventTruncated = "replay-truncated"
+	// sseEventClosed says the server is ending the stream deliberately, so a
+	// client can tell "you are signed out" from a dropped connection and stop
+	// reconnecting into a 401 loop.
+	sseEventClosed = "closed"
 )
+
+// closedPayload explains a deliberate close.
+type closedPayload struct {
+	Reason string `json:"reason"`
+}
 
 // readyPayload is the opening frame.
 type readyPayload struct {
@@ -117,6 +138,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	defer heartbeat.Stop()
 
 	ctx := r.Context()
+	// The session this stream was opened under. Re-checked on every heartbeat.
+	identity, _ := IdentityFrom(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,6 +169,19 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case <-heartbeat.C:
+			// Re-authorize BEFORE writing the heartbeat. A stream whose session
+			// has been revoked must stop delivering estate data, and the
+			// heartbeat is the natural cadence: it is the only thing that
+			// happens on a quiet connection, so the check costs one indexed
+			// lookup per interval rather than one per event.
+			if !s.streamStillAuthorized(r, identity) {
+				writer.event(sseEventClosed, closedPayload{
+					Reason: "your session is no longer valid; sign in again",
+				})
+				writer.flush()
+				return
+			}
+
 			// A comment frame. It carries no data and no event name, so a
 			// client ignores it, but it keeps proxies and load balancers from
 			// closing an idle connection.
@@ -157,6 +193,37 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// streamStillAuthorized reports whether an open stream may keep delivering.
+//
+// Re-resolves the session token and re-checks the permission, so every way a
+// session can end -- sign-out, expiry, a password change, a role change, a
+// disablement, an administrator revoking it, the per-account cap superseding it
+// -- closes the stream at the next heartbeat.
+//
+// The permission is re-checked as well as the session, because a demotion from
+// operator to viewer leaves a VALID session that no longer holds `event:read`.
+//
+// Fails CLOSED. A lookup that errors ends the stream: a stream is a standing
+// grant, and a grant that cannot be reconfirmed is one that should stop.
+func (s *Server) streamStillAuthorized(r *http.Request, opened service.Authenticated) bool {
+	if s.auth == nil {
+		return false
+	}
+
+	current, err := s.auth.Authenticate(r.Context(), opened.Token)
+	if err != nil {
+		return false
+	}
+	// The same ACCOUNT and the same SESSION. A token that now resolves to a
+	// different session would mean the row was replaced under us, which is not
+	// a thing to keep streaming through.
+	if current.User.UserID != opened.User.UserID ||
+		current.Session.SessionID != opened.Session.SessionID {
+		return false
+	}
+	return current.User.Can(domain.PermEventRead)
 }
 
 // prepareStream writes the SSE response headers and clears the write deadline.

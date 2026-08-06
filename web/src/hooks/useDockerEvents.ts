@@ -214,6 +214,19 @@ export function useEventStream({
       }
     });
 
+    // The server ends the stream when the session behind it stops being valid.
+    //
+    // EventSource reconnects on its own, and without this it would loop into a
+    // 401 forever. Closing the source and reporting "signedOut" stops that, and
+    // the 401 the next ordinary request receives is what moves the whole app to
+    // the sign-in page.
+    source.addEventListener("closed", () => {
+      if (closed) return;
+      closed = true;
+      setStatus("signedOut");
+      source.close();
+    });
+
     source.addEventListener("docker-event", (message: MessageEvent) => {
       if (closed) return;
 

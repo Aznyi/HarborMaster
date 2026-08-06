@@ -103,7 +103,8 @@ const selectAcquisitionColumns = `
 	       a.acquired_os, a.acquired_arch, a.acquired_variant, a.size_bytes,
 	       a.layers, a.bytes_transferred, a.progress,
 	       a.requested_at, a.started_at, a.completed_at, a.expires_at,
-	       a.request_key, a.plan_digest
+	       a.request_key, a.plan_digest,
+	       a.requested_by_user_id, a.requested_by_username
 	FROM acquisitions a`
 
 // ------------------------------------------------------------- creating --
@@ -161,8 +162,9 @@ func (r *AcquisitionRepository) Create(
 			 target_registry, target_repository, target_digest, target_reference,
 			 target_os, target_arch, target_variant,
 			 state, requested_at, expires_at, request_key, plan_digest,
+			 requested_by_user_id, requested_by_username,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		acquisition.AcquisitionID, acquisition.PlanID,
 		acquisition.ContainerID, acquisition.ContainerName,
 		acquisition.Target.Registry, acquisition.Target.Repository,
@@ -171,6 +173,7 @@ func (r *AcquisitionRepository) Create(
 		acquisition.Target.Platform.Variant,
 		string(state), requested, formatTime(acquisition.ExpiresAt.UTC()),
 		acquisition.RequestKey, acquisition.PlanDigest,
+		acquisition.RequestedBy.UserID, acquisition.RequestedBy.Username,
 		stamp, stamp)
 	if err != nil {
 		// The partial unique index refused: another acquisition for this
@@ -901,6 +904,7 @@ func scanAcquisitions(rows *sql.Rows) ([]domain.Acquisition, error) {
 			&acquisition.Layers, &acquisition.BytesTransferred, &acquisition.Progress,
 			&requested, &started, &completed, &expires,
 			&acquisition.RequestKey, &acquisition.PlanDigest,
+			&acquisition.RequestedBy.UserID, &acquisition.RequestedBy.Username,
 		); err != nil {
 			return nil, fmt.Errorf("scan acquisition: %w", err)
 		}

@@ -130,6 +130,16 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 		delete(s.containers, execution.ContainerID)
 		s.inFlight--
 		s.mu.Unlock()
+
+		// The OUTCOME reaches the security audit log from exactly one place.
+		//
+		// The pipeline has a dozen terminal paths -- refused, cancelled,
+		// failed before the mutation, failed after it, succeeded, succeeded
+		// with the original left behind -- and an audit call on each would be
+		// a list that a future path forgets to join. This deferred call reads
+		// the FINAL state back from the store instead, so a path that reaches
+		// a conclusion is audited whether or not its author remembered to.
+		s.auditOutcome(ctx, execution)
 	}()
 
 	// ---- claim -----------------------------------------------------------
@@ -833,4 +843,104 @@ func classifyMutationFailure(err error, fallback domain.ExecutionFailure) domain
 		return domain.ExecutionFailureDockerUnavailable
 	}
 	return fallback
+}
+
+// ------------------------------------------------------- audit attribution --
+
+// auditOutcome records what a finished recreation did to the host.
+//
+// # Why this is separate from the execution record
+//
+// The execution record is an operational history: an operator reads it to
+// understand one recreation. The audit log is a security record: an
+// administrator reads it to answer "what has been done to this host, and by
+// whom". The second question is not answerable from a request row alone,
+// because a request can be refused, cancelled, expired, or fail partway.
+//
+// # Why it reads the state back
+//
+// The state at the moment this runs is the conclusion. Passing an expected
+// outcome in from each terminal path would mean trusting the caller to be
+// honest about what it did, and a caller that got it wrong would write a
+// confident audit row that disagrees with the record beside it.
+//
+// # Why it is bounded and cannot fail the recreation
+//
+// The recreation is already over. A detached, bounded context so the write
+// lands even when the parent is cancelled, and every failure is logged rather
+// than returned: an audit log that could fail an operation is a way to disable
+// HarborMaster by filling a disk.
+func (s *ExecutionService) auditOutcome(ctx context.Context, requested domain.Execution) {
+	if s.audit == nil {
+		return
+	}
+
+	writeCtx, cancel := GraceContext(ctx, executionWriteGrace, executionWriteGrace)
+	defer cancel()
+
+	final, err := s.store.Get(writeCtx, requested.ExecutionID)
+	if err != nil {
+		// The row could not be read back, so the outcome is genuinely unknown.
+		// Recording "failed" would be a guess; recording nothing would lose the
+		// event. The row says what is true: HarborMaster does not know.
+		s.audit.RecordAction(writeCtx, requesterActor(requested.RequestedBy),
+			domain.AuditExecutionFailed, domain.AuditFailed,
+			domain.AuditTargetExecution, requested.ExecutionID, requested.ContainerName,
+			"the recreation finished but its record could not be read back")
+		return
+	}
+
+	// Still running. Reached when a shutdown abandoned the pipeline mid-flight;
+	// the restart recovery pass settles the record and audits it then.
+	if !final.State.Terminal() {
+		return
+	}
+
+	action := domain.AuditExecutionFailed
+	outcome := domain.AuditFailed
+	if final.State == domain.ExecutionSucceeded {
+		action = domain.AuditExecutionCompleted
+		outcome = domain.AuditSucceeded
+	}
+
+	s.audit.RecordAction(writeCtx, requesterActor(final.RequestedBy),
+		action, outcome, domain.AuditTargetExecution,
+		final.ExecutionID, final.ContainerName, executionOutcomeReason(final))
+}
+
+// executionOutcomeReason renders the conclusion in HarborMaster's own words.
+//
+// Never the failure MESSAGE, which is built for an operator reading the
+// recreation page and can carry a Docker error. This is a fixed sentence plus a
+// closed-vocabulary failure name, because the value reaches a page an
+// administrator reads and a column that must stay bounded.
+//
+// The most important thing it says is whether the host was left changed. That
+// is the difference between a record somebody has to act on and one they do not.
+func executionOutcomeReason(final domain.Execution) string {
+	switch {
+	case final.State == domain.ExecutionSucceeded && final.OriginalRemoved:
+		return "the container was replaced on the approved image and the original removed"
+	case final.State == domain.ExecutionSucceeded:
+		return "the container was replaced on the approved image; the original is still present"
+	case final.Checkpoint.HostChanged():
+		return "the recreation failed after changing this host and needs attention (" +
+			string(final.Failure) + ")"
+	case final.State == domain.ExecutionCancelled:
+		return "cancelled before anything on this host was changed"
+	case final.State == domain.ExecutionExpired:
+		return "expired in the queue; nothing on this host was changed"
+	default:
+		return "refused or failed before anything on this host was changed (" +
+			string(final.Failure) + ")"
+	}
+}
+
+// requesterActor projects a stored requester onto an audit actor.
+//
+// The role, session, request id, and address are deliberately absent: they
+// belong to the REQUEST, which was audited with them at the time. Repeating a
+// stale copy here would produce two rows that can disagree about the same fact.
+func requesterActor(requester domain.Requester) Actor {
+	return Actor{UserID: requester.UserID, Username: requester.Username}
 }

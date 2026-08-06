@@ -1019,7 +1019,7 @@ paths:
 
         ### Frames
 
-        Three named event types are emitted, plus comment heartbeats:
+        Four named event types are emitted, plus comment heartbeats:
 
         - `ready` -- sent once when the stream opens, carrying
           `{ lastEventId, replayed, redacted, notice }`.
@@ -1027,11 +1027,29 @@ paths:
           `sequence`, which the browser echoes back as `Last-Event-ID`.
         - `replay-truncated` -- sent when a replay was capped, carrying
           `{ skipped, limit, notice }`.
+        - `closed` -- the server is ending the stream deliberately, carrying
+          `{ reason }`. See below.
         - `: heartbeat` -- a comment frame on the configured interval, which
           keeps proxies from closing an idle connection. Clients ignore it.
 
         A `retry:` field is sent first, telling the browser how long to wait
         before reconnecting.
+
+        ### A stream is re-authorized, not authorized once
+
+        Every other route re-reads the account on each request, which is what
+        makes a disablement, a demotion, or a password change take effect
+        immediately. A stream makes ONE request and then runs for as long as the
+        client holds it -- up to the session's absolute lifetime.
+
+        So the session and the `event:read` permission are **re-checked on every
+        heartbeat**, and the stream ends the moment either stops holding. A
+        client receives a `closed` frame saying so, and should stop reconnecting
+        and present its sign-in page rather than loop into a 401.
+
+        The check fails CLOSED: a lookup that errors ends the stream. A stream is
+        a standing grant, and a grant that cannot be reconfirmed is one that
+        should stop.
 
         ### Replay
 
@@ -3844,7 +3862,11 @@ paths:
           schema: { type: string }
         - name: targetId
           in: query
-          schema: { type: string }
+          description: |
+            The identifier the action acted on -- an execution id, a policy id,
+            a snapshot number, or, for an authorization denial, the permission
+            that was refused.
+          schema: { type: string, maxLength: 256 }
         - name: securityOnly
           in: query
           description: |
@@ -6944,6 +6966,15 @@ components:
             never validated and never pulled: running it later would be acting
             on an approval whose evidence has aged.
         requestKey: { type: string }
+        requestedBy:
+          allOf:
+            - $ref: "#/components/schemas/Requester"
+          description: |
+            The account that asked for this. Carried on the record so the
+            OUTCOME can be attributed by the worker that finishes the job,
+            minutes later, with no request and no session of its own.
+
+            Absent on records written before HarborMaster recorded requesters.
         planDigest:
           type: string
           description: |
@@ -7446,6 +7477,15 @@ components:
             When a still-queued request is abandoned. An expired request never
             started and changed nothing.
         requestKey: { type: string }
+        requestedBy:
+          allOf:
+            - $ref: "#/components/schemas/Requester"
+          description: |
+            The account that asked for this. Carried on the record so the
+            OUTCOME can be attributed by the worker that finishes the job,
+            minutes later, with no request and no session of its own.
+
+            Absent on records written before HarborMaster recorded requesters.
         planDigest:
           type: string
           description: |
@@ -7843,7 +7883,6 @@ components:
         - policy:manage
         - user:manage
         - audit:read
-        - settings:manage
 
     UserStatus:
       type: string
@@ -8053,6 +8092,22 @@ components:
 
     # ------------------------------------------------------- security audit --
 
+    Requester:
+      type: object
+      description: |
+        The account that asked for a piece of asynchronous work.
+
+        Two fields, and the omissions are deliberate. No role, because a role is
+        what the authorization decision used at the moment of the request and a
+        reader of a later record would take it as current. No session, because a
+        session identifier is meaningful only while the session exists. No
+        address, because that belongs to the request, which is audited with it.
+
+        Absent on work requested before HarborMaster recorded requesters.
+      properties:
+        userId: { type: string }
+        username: { type: string }
+
     AuditOutcome:
       type: string
       enum: [succeeded, failed, denied]
@@ -8075,8 +8130,24 @@ components:
         action:
           type: string
           description: |
-            The action, from a closed vocabulary -- `auth.login.succeeded`,
-            `execution.requested`, and so on.
+            The action, from a closed vocabulary.
+
+            The two host-changing operations record a REQUEST and an OUTCOME
+            separately, because they are separate facts: a request can be
+            refused by the second preflight, cancelled before anything moves,
+            expire in the queue, or fail partway.
+
+            - `acquisition.requested` / `execution.requested` -- somebody asked.
+            - `acquisition.completed` / `execution.completed` -- **the host
+              changed.** These are the two actions counted as
+              `privilegedActions`, and the two logged at WARN.
+            - `acquisition.failed` / `execution.failed` -- it did not complete.
+              The reason says whether the host was left changed, which is what
+              decides whether somebody has to go and look.
+
+            A completion carries the account that REQUESTED the work, read from
+            the record: the outcome is written by a worker minutes later, with
+            no request and no session of its own.
         outcome: { $ref: "#/components/schemas/AuditOutcome" }
         actorUserId: { type: string }
         actorUsername: { type: string }
@@ -8130,8 +8201,13 @@ components:
         privilegedActions:
           type: integer
           description: |
-            Host-changing actions in the window -- an image acquired or a
-            container replaced.
+            Host changes in the window: images actually acquired and containers
+            actually replaced.
+
+            Counts COMPLETIONS, not requests. A request that was refused,
+            cancelled, or expired changed nothing, and counting it here would
+            make this number an over-count -- which is how a security counter
+            becomes one an administrator learns to ignore.
         windowHours:
           type: integer
           description: How far back the windowed counters look.

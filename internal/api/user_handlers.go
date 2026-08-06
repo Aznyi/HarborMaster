@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/service"
@@ -407,7 +408,9 @@ type auditQuery struct {
 	Outcomes     []domain.AuditOutcome
 	ActorUserID  string
 	TargetType   domain.AuditTargetType
+	TargetID     string
 	SecurityOnly bool
+	Since        time.Time
 
 	Page     int
 	PageSize int
@@ -457,6 +460,24 @@ func parseAuditQuery(query url.Values) (auditQuery, error) {
 		}
 		parsed.TargetType = domain.AuditTargetType(raw)
 	}
+	if raw := strings.TrimSpace(query.Get("targetId")); raw != "" {
+		// Bounded and control-character free rather than matched against a
+		// vocabulary: a target id is a container id, a policy id, a snapshot
+		// number, or a permission name, and there is no single shape. It is a
+		// BOUND PARAMETER either way, so the bound is about the request rather
+		// than about the query.
+		if len(raw) > domain.MaxAuditTargetIDBytes || raw != domain.SanitiseDisplayText(raw, domain.MaxAuditTargetIDBytes) {
+			return parsed, invalidParam("targetId", "a short, printable identifier")
+		}
+		parsed.TargetID = raw
+	}
+	since, err := parseTimeParam(query, "since")
+	if err != nil {
+		return parsed, err
+	}
+	if since != nil {
+		parsed.Since = *since
+	}
 	if raw := strings.TrimSpace(query.Get("securityOnly")); raw != "" {
 		switch raw {
 		case "true":
@@ -477,7 +498,9 @@ func (q auditQuery) filter() store.AuditFilter {
 		Outcomes:     q.Outcomes,
 		ActorUserID:  q.ActorUserID,
 		TargetType:   q.TargetType,
+		TargetID:     q.TargetID,
 		SecurityOnly: q.SecurityOnly,
+		Since:        q.Since,
 		Page: store.Page{
 			Limit:  q.PageSize,
 			Offset: (q.Page - 1) * q.PageSize,

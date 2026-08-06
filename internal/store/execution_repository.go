@@ -128,7 +128,8 @@ const selectExecutionColumns = `
 	       e.health_state, e.health_checked, e.stability_seconds,
 	       e.preservation_report, e.recovery_plan,
 	       e.requested_at, e.started_at, e.mutated_at, e.completed_at, e.expires_at,
-	       e.request_key, e.plan_digest
+	       e.request_key, e.plan_digest,
+	       e.requested_by_user_id, e.requested_by_username
 	FROM executions e`
 
 // -------------------------------------------------------------- creating --
@@ -188,8 +189,9 @@ func (r *ExecutionRepository) Create(
 			 target_reference, target_image_id,
 			 target_os, target_arch, target_variant,
 			 state, requested_at, expires_at, request_key, plan_digest,
+			 requested_by_user_id, requested_by_username,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		execution.ExecutionID, execution.AcquisitionID, execution.PlanID, execution.SnapshotID,
 		execution.ContainerID, execution.ContainerName,
 		execution.OldImage, execution.OldImageID, execution.OldImageDigest,
@@ -199,6 +201,7 @@ func (r *ExecutionRepository) Create(
 		execution.Target.Platform.Variant,
 		string(state), requested, formatTime(execution.ExpiresAt.UTC()),
 		execution.RequestKey, execution.PlanDigest,
+		execution.RequestedBy.UserID, execution.RequestedBy.Username,
 		stamp, stamp)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -1117,6 +1120,7 @@ func scanExecutions(rows *sql.Rows) ([]domain.Execution, error) {
 			&preservationReport, &recoveryPlan,
 			&requested, &started, &mutated, &completed, &expires,
 			&execution.RequestKey, &execution.PlanDigest,
+			&execution.RequestedBy.UserID, &execution.RequestedBy.Username,
 		); err != nil {
 			return nil, fmt.Errorf("scan execution: %w", err)
 		}

@@ -201,6 +201,12 @@ Walk the chain right to left and stop at the first untrusted hop.
 cannot use. The server refuses regardless, and the test that proves it lives on
 the server.
 
+**4a.12 Every permission guards a route, and every guarded permission is
+reachable from a role.** A permission that grants nothing is a capability
+`GET /roles` advertises and the API does not have; a route whose permission no
+role holds answers 403 to everyone including the administrator. Two tests fail
+the build on either.
+
 ---
 
 ## 4b. Audit
@@ -223,6 +229,34 @@ would become a way to disable HarborMaster. Log at ERROR and proceed.
 **4b.5 Bound every audit field at one choke point.** `prepareAuditEvent` is that
 point. Do not bound at the call site; there are thirty of them and they will
 drift.
+
+**4b.6 Audit the OUTCOME of anything that changes the host, not just the
+request.** A request is an intention: it can be refused, cancelled, expire, or
+fail partway. Record the completion too, attributed to the account that asked,
+and say in the reason whether the host was left changed.
+
+**4b.7 Attribute asynchronous work from the RECORD, not from the request.** A
+worker that finishes a job minutes later has no request and no session. Store
+the requester on the record at request time -- user id and username only.
+
+**4b.8 Record an outcome from ONE place.** A deferred read-back of the final
+state at the end of the pipeline, not an audit call on each terminal path. A
+list of paths is a list a future path forgets to join.
+
+---
+
+## 4c. Long-lived responses
+
+**4c.1 A stream is re-authorized, not authorized once.** Every ordinary route
+re-reads the account per request; a stream makes one request and runs for days.
+Re-check the session AND the permission on the heartbeat, and end the response
+when either stops holding.
+
+**4c.2 Fail closed.** A check that cannot be performed ends the stream. A
+standing grant that cannot be reconfirmed is one that should stop.
+
+**4c.3 Say why you closed it.** A client that is not told stops reconnecting
+into a 401 loop only by accident.
 
 ---
 
@@ -383,6 +417,9 @@ has the defect the test was written to catch, and only a time assertion sees it.
 - [ ] Every new route declares an access policy, and a public one says why
 - [ ] Every new state-changing route calls `auditWrite` or is listed as audited
 - [ ] No role compared in a handler; permissions are typed constants
+- [ ] Any new long-lived response re-authorizes on its own cadence
+- [ ] Any new host-changing operation audits its outcome, attributed
+- [ ] Any new documented filter is actually applied, not accepted and dropped
 - [ ] Errors sanitised
 - [ ] Negative tests for each new control
 - [ ] `gofmt`, `go vet`, `go test -race`, `golangci-lint`, `govulncheck` clean

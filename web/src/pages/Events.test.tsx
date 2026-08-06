@@ -271,6 +271,41 @@ describe("Events live stream", () => {
     );
   });
 
+  // The server ends a stream whose session stopped being valid, and the client
+  // must STOP reconnecting. Without this, EventSource retries on its own timer
+  // forever and every retry is a 401.
+  it("closes the stream and stops reconnecting when the session ends", async () => {
+    stubApi();
+    const { factory, streams } = fakeStreamFactory();
+    renderEvents(factory);
+
+    await waitForEngine();
+    await waitFor(() => expect(streams).toHaveLength(1));
+
+    const stream = streams[0]!;
+    act(() => {
+      stream.open();
+      stream.emit("ready", { lastEventId: 0, replayed: 0, redacted: true, notice: "" });
+    });
+
+    const live = await screen.findByRole("region", { name: /^live$/i });
+    await waitFor(() => expect(within(live).getByText("live")).toBeInTheDocument());
+
+    act(() => {
+      stream.emit("closed", { reason: "your session is no longer valid; sign in again" });
+    });
+
+    // The underlying connection is closed rather than left to retry.
+    await waitFor(() => expect(stream.closed).toBe(true));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: /^live$/i })).getByText("signed out"),
+      ).toBeInTheDocument(),
+    );
+    // And no replacement stream was opened.
+    expect(streams).toHaveLength(1);
+  });
+
   it("reports reconnecting without claiming a failure", async () => {
     stubApi();
     const { factory, streams } = fakeStreamFactory();

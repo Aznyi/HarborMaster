@@ -185,7 +185,7 @@ func TestBootstrapRequiresTheOneTimeToken(t *testing.T) {
 	}
 
 	// A wrong token, and the right one with a character changed.
-	for _, wrong := range []string{"", "wrong", token[:len(token)-1] + "X"} {
+	for _, wrong := range []string{"", "wrong", flipLast(token)} {
 		if _, _, err := harness.auth.Bootstrap(ctx, service.BootstrapRequest{
 			Token: wrong, Username: "admin", Password: "a decent passphrase",
 		}); !errors.Is(err, service.ErrBootstrapToken) {
@@ -440,7 +440,7 @@ func TestAuthenticateRefusesEverythingButALiveSession(t *testing.T) {
 		"wrong shape":    "short",
 		"oversized":      strings.Repeat("a", 100_000),
 		"right shape":    strings.Repeat("a", 43),
-		"one char off":   issued.Token[:len(issued.Token)-1] + "X",
+		"one char off":   flipLast(issued.Token),
 		"the CSRF token": issued.CSRFToken,
 	} {
 		if _, err := harness.auth.Authenticate(ctx, token); !errors.Is(err, service.ErrNoSession) {
@@ -641,7 +641,7 @@ func TestTheCSRFTokenIsDerivedFromTheSessionToken(t *testing.T) {
 	for name, presented := range map[string]string{
 		"empty":             "",
 		"the session token": issued.Token,
-		"one character off": issued.CSRFToken[:len(issued.CSRFToken)-1] + "0",
+		"one character off": flipLast(issued.CSRFToken),
 	} {
 		if harness.auth.ValidCSRF(issued.Token, presented) {
 			t.Errorf("ValidCSRF accepted %s", name)
@@ -1220,4 +1220,26 @@ func TestSweepingSessionsIsBoundedAndSurvivesShutdown(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the session sweeper did not stop when its context was cancelled")
 	}
+}
+
+// flipLast returns the value with its final character changed.
+//
+// # Why this is not `value[:len(value)-1] + "X"`
+//
+// That is the obvious spelling and it is wrong roughly one run in sixteen: if
+// the value already ends in the replacement character, the "wrong" token is the
+// RIGHT one and the test asserts that a valid credential is rejected. It found
+// its way into three tests here and produced exactly that intermittent failure.
+//
+// Swapping to a character the original does not end with makes the mutation
+// unconditional, so the test means the same thing on every run.
+func flipLast(value string) string {
+	if value == "" {
+		return "x"
+	}
+	replacement := byte('0')
+	if value[len(value)-1] == replacement {
+		replacement = '1'
+	}
+	return value[:len(value)-1] + string(replacement)
 }

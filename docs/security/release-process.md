@@ -18,7 +18,7 @@ A release is blocked until every one of these is green. They are not advisory.
 | Integration tests | `ci.yml` | Any failure; leftover test resources |
 | Frontend typecheck, test, build | `ci.yml` | Any failure |
 | Binary smoke test | `ci.yml` | Health, version, SPA, or subcommand failure |
-| **CodeQL** (Go + TypeScript) | `codeql.yml` | Any new alert |
+| **CodeQL** (Go + TypeScript) | `codeql.yml` | Any new alert not on the accepted list below |
 | **govulncheck** | `security.yml` | Any reachable advisory |
 | **golangci-lint** | `security.yml` | Any finding |
 | **Trivy** filesystem + config | `security.yml` | Fixable High/Critical |
@@ -28,6 +28,21 @@ A release is blocked until every one of these is green. They are not advisory.
 | **Dependency review** | `dependency-review.yml` | High/Critical advisory, or a denied licence |
 | OpenAPI route coverage | `internal/api` tests | A route documented but not served, or served but not documented |
 | Architecture invariants | `internal/arch` tests | SDK leak, or a new runtime method |
+
+### Reviewed and accepted CodeQL alerts
+
+The gate is "any new alert". An alert that is genuinely not a defect is recorded
+HERE, dismissed in the Security tab with the same reasoning, and re-reviewed
+whenever the code around it changes. It is never suppressed by a repo-wide query
+filter: that would hide the next genuine instance of the same rule.
+
+| Rule | Location | Why it is accepted |
+| --- | --- | --- |
+| `go/cookie-secure-not-set` (CWE-614) | `internal/api/auth_middleware.go`, in `expireCookie` | The cookie carries an EMPTY value and a negative `Max-Age`; its only purpose is to make the browser delete the one that did carry a token, and there is nothing in it to protect in transit. It cannot be written with `Secure` unconditionally: a browser IGNORES a Secure cookie that arrives over plain HTTP, so on a loopback deployment without TLS the deletion would be silently dropped and the dead token would stay in the browser. The cookie that carries the session token is a different call site and is marked Secure on every path except a loopback request without TLS. |
+
+A reviewer adding a row here is asserting that they read the query's intent and
+the code, not that the alert was inconvenient. If the justification takes more
+than a paragraph, the alert is probably a defect.
 
 **No `--force`, no "we'll fix it after release".** A gate that can be waived is
 not a gate. If something must ship with a known issue, it goes in the release

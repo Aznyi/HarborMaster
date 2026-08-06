@@ -88,10 +88,27 @@ const (
 	AuditPlanGenerated      AuditAction = "plan.generated"
 
 	// The two that change the Docker host.
+	//
+	// Each has a REQUEST and an OUTCOME, and they are separate events because
+	// they are separate facts. A request can be refused by the second
+	// preflight, cancelled before anything moves, expire in the queue, or fail
+	// partway. "Somebody asked" and "the host changed" must not be the same row.
 	AuditAcquisitionRequested AuditAction = "acquisition.requested"
 	AuditAcquisitionCancelled AuditAction = "acquisition.cancelled"
-	AuditExecutionRequested   AuditAction = "execution.requested"
-	AuditExecutionCancelled   AuditAction = "execution.cancelled"
+	// AuditAcquisitionCompleted means an image is now in the local store.
+	AuditAcquisitionCompleted AuditAction = "acquisition.completed"
+	// AuditAcquisitionFailed means it is not, and says why.
+	AuditAcquisitionFailed AuditAction = "acquisition.failed"
+
+	AuditExecutionRequested AuditAction = "execution.requested"
+	AuditExecutionCancelled AuditAction = "execution.cancelled"
+	// AuditExecutionCompleted means a container was replaced and the original
+	// removed. This is the most consequential row HarborMaster writes.
+	AuditExecutionCompleted AuditAction = "execution.completed"
+	// AuditExecutionFailed means the recreation did not finish. The reason says
+	// whether the host was left changed, because that is what decides whether
+	// somebody has to go and look.
+	AuditExecutionFailed AuditAction = "execution.failed"
 )
 
 // AuditActions lists every action.
@@ -110,7 +127,9 @@ var AuditActions = []AuditAction{
 	AuditPolicyEvaluated, AuditPolicyAnnotated,
 	AuditImageRefreshed, AuditPlanGenerated,
 	AuditAcquisitionRequested, AuditAcquisitionCancelled,
+	AuditAcquisitionCompleted, AuditAcquisitionFailed,
 	AuditExecutionRequested, AuditExecutionCancelled,
+	AuditExecutionCompleted, AuditExecutionFailed,
 }
 
 // ValidAuditAction reports whether name is a known action.
@@ -135,9 +154,19 @@ func (a AuditAction) Security() bool {
 }
 
 // Privileged reports whether the action changed the Docker host.
+// Privileged reports whether an action CHANGED the Docker host.
+//
+// Deliberately the completions, not the requests. A request is an intention and
+// may come to nothing; a completion is a host that is different from how it was.
+// Counting requests would make the summary's "host changes" number an
+// over-count, and a security counter that over-reports is one an administrator
+// learns to ignore.
+//
+// A privileged action is also logged at WARN, so it appears in a default log
+// configuration without anybody opening a page.
 func (a AuditAction) Privileged() bool {
 	switch a {
-	case AuditAcquisitionRequested, AuditExecutionRequested:
+	case AuditAcquisitionCompleted, AuditExecutionCompleted:
 		return true
 	default:
 		return false
@@ -368,4 +397,49 @@ func NormaliseClientAddr(remoteAddr string) string {
 		addr = addr.Unmap()
 	}
 	return addr.String()
+}
+
+// ------------------------------------------------------------- requesters --
+
+// Requester is the account that asked for a piece of asynchronous work.
+//
+// # Why this is not the full audit actor
+//
+// An audit event records five things about who acted: the user, the username,
+// the role, the session, and the address. A Requester records TWO, and the
+// omissions are deliberate.
+//
+//   - No role. A role is what the authorization decision used at the moment of
+//     the request; storing it on a record that outlives the request invites a
+//     reader to treat it as current, and it is not.
+//   - No session. A session identifier is only meaningful while the session
+//     exists, and this record outlives it.
+//   - No address. The address belongs to the REQUEST, which is already audited
+//     with it. Repeating it on the record would be a second copy that can
+//     disagree with the first.
+//
+// What remains is the smallest thing that answers "whose action was this" after
+// the request is gone.
+type Requester struct {
+	UserID   string `json:"userId,omitempty"`
+	Username string `json:"username,omitempty"`
+}
+
+// Known reports whether an actor was recorded.
+//
+// False for work requested before HarborMaster recorded requesters, and for
+// work started by a path that has no account behind it. The distinction
+// matters: "nobody" and "not recorded" are different, and a UI that renders
+// them the same is lying about one of them.
+func (r Requester) Known() bool { return r.UserID != "" || r.Username != "" }
+
+// Describe renders the requester for an audit reason or a log line.
+func (r Requester) Describe() string {
+	if r.Username != "" {
+		return r.Username
+	}
+	if r.UserID != "" {
+		return r.UserID
+	}
+	return "an unrecorded account"
 }

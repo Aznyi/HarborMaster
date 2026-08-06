@@ -444,6 +444,17 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, issued
 		maxAge = 1
 	}
 
+	// `secure` is false in exactly one case: a request that arrived over
+	// LOOPBACK on a deployment that has not configured TLS. Every other path --
+	// TLS terminated here, a trusted proxy reporting HTTPS, the explicit
+	// setting, or a peer that is not loopback -- yields true, and an
+	// unidentifiable peer yields true as well.
+	//
+	// Plain HTTP on loopback is a supported mode: the traffic never leaves the
+	// machine, and forcing Secure would make older browsers refuse to send the
+	// cookie back over http://127.0.0.1, which breaks sign-in for the default
+	// standalone deployment. The suppression is this one line and this one
+	// case; the off-box case is what the audit closed.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName(secure),
 		Value:    issued.Token,
@@ -461,19 +472,38 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, issued
 }
 
 // clearSessionCookie removes both cookie names.
-func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	secure := s.requestIsSecure(r)
+//
+// Both, unconditionally. A deployment that gained or lost TLS can have left a
+// token under the other name, and a token left in a browser is one that can be
+// presented later.
+func (s *Server) clearSessionCookie(w http.ResponseWriter, _ *http.Request) {
 	s.expireCookie(w, SessionCookieName, false)
 	s.expireCookie(w, SecureSessionCookieName, true)
-	_ = secure
 }
 
 // expireCookie writes a cookie that a browser deletes immediately.
+//
+// The `secure` argument matches the NAME being cleared, not the request: a
+// `__Host-` cookie can only be replaced by another Secure cookie, so clearing
+// it needs Secure set whatever the current connection looks like.
 func (s *Server) expireCookie(w http.ResponseWriter, name string, secure bool) {
 	sameSite := http.SameSiteStrictMode
 	if s.authCfg.CookieSameSiteLax {
 		sameSite = http.SameSiteLaxMode
 	}
+	// CodeQL reports go/cookie-secure-not-set here, and the finding is
+	// reviewed and accepted rather than suppressed in source -- see
+	// docs/security/release-process.md.
+	//
+	// This cookie carries an EMPTY value and a negative Max-Age. There is
+	// nothing in it to protect in transit; its whole purpose is to make the
+	// browser delete the one that DID carry a token.
+	//
+	// It cannot be written with Secure unconditionally. A browser ignores a
+	// Secure cookie that arrives over plain HTTP, so on a loopback deployment
+	// without TLS the deletion would be silently dropped and the dead token
+	// would stay in the browser -- which is the opposite of what signing out
+	// is for.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",

@@ -111,6 +111,11 @@ type AcquisitionOptions struct {
 	// correct behaviour for a deployment that has not opted in.
 	Acquirer docker.ImageAcquirer
 
+	// Audit records what a finished download did to the host, attributed to the
+	// account that asked for it. Nil records nothing, which is correct for a
+	// test but not for a deployment.
+	Audit *AuditRecorder
+
 	Config config.Acquisition
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -122,6 +127,9 @@ type AcquisitionService struct {
 	evidence AcquisitionEvidence
 	runtime  docker.Runtime
 	acquirer docker.ImageAcquirer
+	// audit records the OUTCOME of a download in the security log. Nil in a
+	// test that is not about attribution; auditOutcome is nil-safe.
+	audit *AuditRecorder
 
 	cfg    config.Acquisition
 	logger *slog.Logger
@@ -179,6 +187,7 @@ func NewAcquisitionService(opts AcquisitionOptions) *AcquisitionService {
 		evidence:    opts.Evidence,
 		runtime:     opts.Runtime,
 		acquirer:    opts.Acquirer,
+		audit:       opts.Audit,
 		cfg:         cfg,
 		logger:      logger,
 		now:         now,
@@ -210,6 +219,11 @@ type AcquisitionRequest struct {
 	// RequestKey is an optional idempotency key, so a retried request does not
 	// start a second pull.
 	RequestKey string
+
+	// RequestedBy is the account asking. Stored on the record so the OUTCOME
+	// can be attributed minutes later by a worker that has no request and no
+	// session; see auditOutcome.
+	RequestedBy domain.Requester
 }
 
 // Request validates and records an acquisition request.
@@ -271,6 +285,7 @@ func (s *AcquisitionService) Request(
 		ExpiresAt:     now.Add(s.cfg.RequestTTL),
 		RequestKey:    request.RequestKey,
 		PlanDigest:    decision.Plan.InputDigest,
+		RequestedBy:   request.RequestedBy,
 	}
 
 	created, err := s.store.Create(ctx, acquisition, now)
@@ -652,6 +667,11 @@ func (s *AcquisitionService) execute(ctx context.Context, acquisition domain.Acq
 			delete(s.perRegistry, acquisition.Target.Registry)
 		}
 		s.mu.Unlock()
+
+		// The OUTCOME reaches the security audit log from exactly one place --
+		// see ExecutionService.auditOutcome for why a deferred read-back beats
+		// an audit call on each of the terminal paths.
+		s.auditOutcome(ctx, acquisition)
 	}()
 
 	// ---- claim -----------------------------------------------------------
@@ -1128,4 +1148,66 @@ func (e *planEvidence) ContainerPresent(ctx context.Context, containerID string)
 		return false, fmt.Errorf("look up container: %w", err)
 	}
 	return true, nil
+}
+
+// ------------------------------------------------------- audit attribution --
+
+// auditOutcome records what a finished download did to the host.
+//
+// The image store is a smaller blast radius than a running container, but the
+// event still belongs in the security log: an image on the host is content
+// somebody caused to arrive, and "who downloaded this" is a question an
+// administrator asks after finding one.
+//
+// Bounded, detached, and unable to fail the acquisition -- the same reasoning
+// as ExecutionService.auditOutcome, which documents it at length.
+func (s *AcquisitionService) auditOutcome(ctx context.Context, requested domain.Acquisition) {
+	if s.audit == nil {
+		return
+	}
+
+	writeCtx, cancel := GraceContext(ctx, acquisitionWriteGrace, acquisitionWriteGrace)
+	defer cancel()
+
+	final, err := s.store.Get(writeCtx, requested.AcquisitionID)
+	if err != nil {
+		s.audit.RecordAction(writeCtx, requesterActor(requested.RequestedBy),
+			domain.AuditAcquisitionFailed, domain.AuditFailed,
+			domain.AuditTargetAcquisition, requested.AcquisitionID, requested.ContainerName,
+			"the download finished but its record could not be read back")
+		return
+	}
+	if !final.State.Terminal() {
+		// Abandoned by a shutdown. The restart recovery pass settles it.
+		return
+	}
+
+	action := domain.AuditAcquisitionFailed
+	outcome := domain.AuditFailed
+	if final.State == domain.AcquisitionSucceeded {
+		action = domain.AuditAcquisitionCompleted
+		outcome = domain.AuditSucceeded
+	}
+
+	s.audit.RecordAction(writeCtx, requesterActor(final.RequestedBy),
+		action, outcome, domain.AuditTargetAcquisition,
+		final.AcquisitionID, final.ContainerName, acquisitionOutcomeReason(final))
+}
+
+// acquisitionOutcomeReason renders the conclusion in HarborMaster's own words.
+//
+// Never the failure message, which can carry a registry's text. The digest is
+// included on success because it is the one fact that identifies WHAT arrived,
+// and it is a hex digest HarborMaster computed rather than a value it was told.
+func acquisitionOutcomeReason(final domain.Acquisition) string {
+	switch final.State {
+	case domain.AcquisitionSucceeded:
+		return "the image is now in this host's local store at " + final.AcquiredDigest
+	case domain.AcquisitionCancelled:
+		return "cancelled; the transfer was stopped and nothing is reported as acquired"
+	case domain.AcquisitionExpired:
+		return "expired in the queue; nothing was downloaded"
+	default:
+		return "the download did not complete (" + string(final.Failure) + ")"
+	}
 }

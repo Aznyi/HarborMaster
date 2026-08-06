@@ -198,6 +198,23 @@ func (s *Server) actorFrom(r *http.Request) service.Actor {
 	return actor
 }
 
+// requesterFrom projects the caller onto the actor stored with async work.
+//
+// Two fields only -- see domain.Requester for why the role, session, and
+// address are deliberately left behind. The zero value is correct for a caller
+// with no identity: the record then reads "not recorded" rather than being
+// attributed to nobody in particular.
+func (s *Server) requesterFrom(r *http.Request) domain.Requester {
+	identity, ok := IdentityFrom(r.Context())
+	if !ok {
+		return domain.Requester{}
+	}
+	return domain.Requester{
+		UserID:   identity.User.UserID,
+		Username: identity.User.Username,
+	}
+}
+
 // auditWrite records who performed an operational write.
 //
 // # Why every write handler calls this

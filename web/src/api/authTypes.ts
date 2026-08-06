@@ -46,8 +46,7 @@ export type Permission =
   | "execution:cancel"
   | "policy:manage"
   | "user:manage"
-  | "audit:read"
-  | "settings:manage";
+  | "audit:read";
 
 /** Whether an account may sign in. */
 export type UserStatus = "active" | "disabled";

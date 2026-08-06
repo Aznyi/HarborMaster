@@ -346,6 +346,11 @@ the per-account cap supersedes the oldest. The account behind a session is
 re-read on **every** request, which is what makes a demotion or a disablement
 take effect immediately rather than at the next sign-in.
 
+The live event stream is the one response that outlives a single request, so it
+re-checks the session and the permission on **every heartbeat** and closes as
+soon as either stops holding. Revoking a session stops the flow of estate data
+within one heartbeat, not at the end of the session's seven-day ceiling.
+
 Every state-changing request additionally carries a CSRF token in the
 `X-HarborMaster-CSRF` header. It is derived from the session token rather than
 stored, so it rotates with the session and there is nothing at rest to steal.
@@ -421,7 +426,17 @@ role, session, request id, and source address that caused it.
 A record is who, what, to what, from where, and whether it worked. **It is not a
 request log**: no body, no header, no environment value, and no credential
 appears in any record, and no column exists that could hold one. Records are
-append-only — no endpoint edits or deletes one. Security records are retained
+append-only — no endpoint edits or deletes one.
+
+**The two operations that change the Docker host record their outcome as well as
+their request.** A request can be refused by the second preflight, cancelled
+before anything moves, expire in the queue, or fail partway — so
+`execution.requested` and `execution.completed` are separate rows, and the
+failure row says whether the host was left changed. That last part is what
+decides whether somebody has to go and look.
+
+The completions are what the page counts as host changes and what appears in the
+log at `WARN`. A request that came to nothing is not a host change. Security records are retained
 far longer than operational ones, because an inventory refresh from six months
 ago is noise while a failed sign-in from six months ago is the first entry in a
 story.

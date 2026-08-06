@@ -48,7 +48,6 @@ const ADMIN_ONLY: Permission[] = [
   "policy:manage",
   "user:manage",
   "audit:read",
-  "settings:manage",
 ];
 
 export function permissionsFor(role: Role): Permission[] {

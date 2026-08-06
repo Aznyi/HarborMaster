@@ -427,6 +427,13 @@ describe("Image detail", () => {
 
     const source = await screen.findByText("https://evil.example.com/payload");
     expect(source.closest("a")).toBeNull();
-    expect(screen.queryByRole("link", { name: /evil\.example\.com/ })).toBeNull();
+    // Asserted with a DOM selector rather than a name matcher.
+    //
+    // The obvious spellings -- an unanchored regex, or `includes` on the
+    // accessible name -- are both the shape static analysis flags as a
+    // URL-validation mistake, because in production code they WOULD be one.
+    // Here the intent is the opposite of validation: prove no anchor anywhere
+    // points at this host. An attribute selector says exactly that.
+    expect(document.querySelector('a[href*="evil.example.com"]')).toBeNull();
   });
 });

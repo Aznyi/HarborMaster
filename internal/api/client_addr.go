@@ -207,6 +207,21 @@ func peerAddr(r *http.Request) string {
 //     arbitrary client would let anyone make the cookie Secure on a plain-HTTP
 //     deployment, which stops the browser sending it -- a denial of service
 //     delivered by a header.
+//
+// # And one floor, added by the pre-Phase-10 audit
+//
+// A request that did NOT arrive over loopback is marked secure regardless.
+//
+// Plain HTTP over loopback is a supported deployment: the traffic never leaves
+// the machine, and a Secure cookie is one an older browser would refuse to send
+// over `http://127.0.0.1`. Plain HTTP from ANYWHERE ELSE is a misconfiguration
+// in which the session token crosses a network in the clear, and the audit
+// found that HarborMaster's only response to it was a startup warning.
+//
+// Marking the cookie Secure there means the browser will not send it back, so
+// sign-in stops working and the operator finds out. That is the same "loud
+// failure rather than silent weakening" the CookieSecure setting is documented
+// with, applied automatically to the case that needs it most.
 func (s *Server) requestIsSecure(r *http.Request) bool {
 	if s.authCfg.CookieSecure {
 		return true
@@ -214,13 +229,20 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if !s.proxies.enabled() {
-		return false
+
+	if s.proxies.enabled() {
+		peerIP, proxyErr := netip.ParseAddr(peerAddr(r))
+		if proxyErr == nil && s.proxies.trusts(peerIP) {
+			return strings.EqualFold(
+				strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+		}
 	}
 
+	// The floor. An unparseable peer is treated as NOT loopback, because a
+	// peer that cannot be identified is not one that can be vouched for.
 	peerIP, err := netip.ParseAddr(peerAddr(r))
-	if err != nil || !s.proxies.trusts(peerIP) {
-		return false
+	if err != nil {
+		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	return !peerIP.Unmap().IsLoopback()
 }

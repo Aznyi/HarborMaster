@@ -717,6 +717,13 @@ type Execution struct {
 
 	// RequestKey is the idempotency key, when the caller supplied one.
 	RequestKey string `json:"requestKey,omitempty"`
+
+	// RequestedBy is the account that asked for this recreation.
+	//
+	// Carried on the record because the OUTCOME is audited by a worker with no
+	// request and no session -- see migration 0012. Absent on records written
+	// before HarborMaster recorded requesters.
+	RequestedBy Requester `json:"requestedBy,omitzero"`
 	// PlanDigest is the plan's input fingerprint AS APPROVED at acquisition
 	// time. Preflight compares it against the plan's current fingerprint.
 	PlanDigest string `json:"planDigest"`

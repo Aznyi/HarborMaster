@@ -51,7 +51,7 @@ func TestRolePermissionMatrix(t *testing.T) {
 	}
 	for _, permission := range []domain.Permission{
 		domain.PermPolicyManage, domain.PermUserManage,
-		domain.PermAuditRead, domain.PermSettingsManage,
+		domain.PermAuditRead,
 	} {
 		if domain.RoleOperator.Can(permission) {
 			t.Errorf("operator holds %q; a policy is what BLOCKS an operator's action, "+
@@ -67,7 +67,7 @@ func TestRolePermissionMatrix(t *testing.T) {
 	}
 	for _, permission := range []domain.Permission{
 		domain.PermPolicyManage, domain.PermUserManage,
-		domain.PermAuditRead, domain.PermSettingsManage,
+		domain.PermAuditRead,
 	} {
 		if !domain.RoleAdministrator.Can(permission) {
 			t.Errorf("administrator lacks %q", permission)

@@ -203,6 +203,9 @@ func (s *Server) handleExecutionCreate(w http.ResponseWriter, r *http.Request) {
 	execution, err := s.executions.Request(r.Context(), service.ExecutionRequest{
 		AcquisitionID: acquisitionID,
 		RequestKey:    requestKey,
+		// Carried onto the record so the OUTCOME can be attributed by a worker
+		// that runs minutes from now with no request and no session.
+		RequestedBy: s.requesterFrom(r),
 	})
 	if err != nil {
 		s.writeExecutionError(w, r, err)

@@ -442,75 +442,6 @@ func run() error {
 		Logger: logger,
 	})
 
-	// Safe image acquisition.
-	//
-	// HARBORMASTER'S ONLY DOCKER MUTATION, and the only place in this function
-	// where a write capability is handed to anything. Every other service above
-	// receives dockerClient through the read-only docker.Runtime interface;
-	// this one receives it a second time through docker.ImageAcquirer, which
-	// has exactly one method: pull a digest-pinned image.
-	//
-	// It does not update containers. A container keeps running the image it was
-	// created from; an acquired image is another entry in the local store.
-	//
-	// Off unless the deployment asked for it. When disabled the acquirer stays
-	// nil and the service refuses everything -- so the capability is absent
-	// rather than merely unused.
-	var acquirer docker.ImageAcquirer
-	if cfg.Acquisition.Enabled {
-		acquirer = dockerClient
-	}
-	acquisitions := service.NewAcquisitionService(service.AcquisitionOptions{
-		Store:    db.Acquisitions,
-		Evidence: service.NewPlanEvidence(db.Plans, db.ImageIntel, db.Containers),
-		Runtime:  dockerClient,
-		Acquirer: acquirer,
-		Config:   cfg.Acquisition,
-		Logger:   logger,
-	})
-
-	// Manual container recreation.
-	//
-	// HARBORMASTER'S LARGEST PRIVILEGE. Acquisition above writes to the image
-	// store, which affects nothing that is serving. This can stop a running
-	// container and replace it.
-	//
-	// Two capabilities are handed over here and nowhere else in this function:
-	// docker.ConfigCapturer, which reads a container's live configuration into
-	// an opaque value, and docker.ContainerMutator, whose five methods are the
-	// whole of HarborMaster's ability to change a container. Every other
-	// service above holds dockerClient only through the read-only
-	// docker.Runtime interface and therefore cannot reach either.
-	//
-	// Off unless the deployment asked for it, and configuration validation
-	// refuses to start with recreation on and acquisition off. When disabled
-	// both stay nil and the service refuses everything -- so the capability is
-	// ABSENT rather than merely unused.
-	var (
-		capturer docker.ConfigCapturer
-		mutator  docker.ContainerMutator
-	)
-	if cfg.Execution.Enabled {
-		capturer = dockerClient
-		mutator = dockerClient
-	}
-	executions := service.NewExecutionService(service.ExecutionOptions{
-		Store: db.Executions,
-		Evidence: service.NewExecutionEvidence(
-			db.Acquisitions, db.Plans, db.Containers,
-			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
-		Runtime:  dockerClient,
-		Capturer: capturer,
-		Mutator:  mutator,
-		// The same installation key the snapshots use. Configuration
-		// preservation compares sensitive values as keyed digests, and digests
-		// produced under a different key are not comparable -- so sharing the
-		// key is what makes the comparison mean anything.
-		Hasher: hasher,
-		Config: cfg.Execution,
-		Logger: logger,
-	})
-
 	// Identity, authorization, and the security audit log.
 	//
 	// # Always on
@@ -562,6 +493,82 @@ func run() error {
 	// read this process's log or its data directory, rather than merely being
 	// the first to reach the port.
 	announceBootstrap(ctx, logger, auth)
+
+	// Safe image acquisition.
+	//
+	// HARBORMASTER'S ONLY DOCKER MUTATION, and the only place in this function
+	// where a write capability is handed to anything. Every other service above
+	// receives dockerClient through the read-only docker.Runtime interface;
+	// this one receives it a second time through docker.ImageAcquirer, which
+	// has exactly one method: pull a digest-pinned image.
+	//
+	// It does not update containers. A container keeps running the image it was
+	// created from; an acquired image is another entry in the local store.
+	//
+	// Off unless the deployment asked for it. When disabled the acquirer stays
+	// nil and the service refuses everything -- so the capability is absent
+	// rather than merely unused.
+	var acquirer docker.ImageAcquirer
+	if cfg.Acquisition.Enabled {
+		acquirer = dockerClient
+	}
+	acquisitions := service.NewAcquisitionService(service.AcquisitionOptions{
+		Store:    db.Acquisitions,
+		Evidence: service.NewPlanEvidence(db.Plans, db.ImageIntel, db.Containers),
+		Runtime:  dockerClient,
+		Acquirer: acquirer,
+		// The OUTCOME of a download reaches the security audit log attributed
+		// to the account that asked for it, not just the request.
+		Audit:  auditRecorder,
+		Config: cfg.Acquisition,
+		Logger: logger,
+	})
+
+	// Manual container recreation.
+	//
+	// HARBORMASTER'S LARGEST PRIVILEGE. Acquisition above writes to the image
+	// store, which affects nothing that is serving. This can stop a running
+	// container and replace it.
+	//
+	// Two capabilities are handed over here and nowhere else in this function:
+	// docker.ConfigCapturer, which reads a container's live configuration into
+	// an opaque value, and docker.ContainerMutator, whose five methods are the
+	// whole of HarborMaster's ability to change a container. Every other
+	// service above holds dockerClient only through the read-only
+	// docker.Runtime interface and therefore cannot reach either.
+	//
+	// Off unless the deployment asked for it, and configuration validation
+	// refuses to start with recreation on and acquisition off. When disabled
+	// both stay nil and the service refuses everything -- so the capability is
+	// ABSENT rather than merely unused.
+	var (
+		capturer docker.ConfigCapturer
+		mutator  docker.ContainerMutator
+	)
+	if cfg.Execution.Enabled {
+		capturer = dockerClient
+		mutator = dockerClient
+	}
+	executions := service.NewExecutionService(service.ExecutionOptions{
+		Store: db.Executions,
+		Evidence: service.NewExecutionEvidence(
+			db.Acquisitions, db.Plans, db.Containers,
+			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
+		Runtime:  dockerClient,
+		Capturer: capturer,
+		Mutator:  mutator,
+		// The same installation key the snapshots use. Configuration
+		// preservation compares sensitive values as keyed digests, and digests
+		// produced under a different key are not comparable -- so sharing the
+		// key is what makes the comparison mean anything.
+		Hasher: hasher,
+		// The OUTCOME of a recreation -- the most consequential thing
+		// HarborMaster does -- reaches the security audit log attributed to the
+		// account that asked for it.
+		Audit:  auditRecorder,
+		Config: cfg.Execution,
+		Logger: logger,
+	})
 
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
