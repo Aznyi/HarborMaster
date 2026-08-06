@@ -83,10 +83,21 @@ issue is being actively exploited, say so and we will treat it as an emergency.
 
 **Out of scope — known and documented, not bugs:**
 
-- **HarborMaster has no authentication.** Every endpoint is unauthenticated by
-  design in the current phase. "I can read the inventory without logging in" is
-  the documented behaviour, not a finding. Bind it to loopback or put an
-  authenticating proxy in front of it. See [Threat model](docs/security/threat-model.md).
+- **HarborMaster does not terminate TLS.** It authenticates every route, but the
+  transport is a proxy's job. "The session cookie travels in the clear on a
+  plain-HTTP deployment" is documented behaviour, not a finding. Bind to
+  loopback or put a TLS-terminating proxy in front of it.
+- **The four public routes are public by design.** `GET /health` (reduced to a
+  single status field for an anonymous caller), `GET /version`,
+  `POST /auth/login`, and `GET /auth/bootstrap`. Each has a stated reason in
+  `internal/api/routes.go`, and a test fails the build if a fifth appears.
+- **There is no second authentication factor**, no SSO, and no password reset by
+  email. Accounts are local and recovery is another administrator or the
+  console. See [Threat model](docs/security/threat-model.md) R33 and R38.
+- **The bootstrap token is printed to the server's log.** Anyone who can read
+  the startup output of an *unclaimed* installation can claim it. That is the
+  design — the alternative is a default account — and the window closes
+  permanently the moment an administrator exists. See R35.
 - **The Docker socket is root-equivalent.** Mounting it into any container,
   including this one, grants host control. The `:ro` flag on the bind mount does
   not change that.
@@ -115,10 +126,37 @@ These are the guarantees a report can meaningfully contradict:
    `unsafe-inline` and no remote origins.
 6. **Every write endpoint is bounded**: strict JSON decoding, body limits, rate
    limiting, and concurrency limits.
+7. **Every route requires a session except four.** The exceptions are listed
+   above. `TestOnlyTheFourPublicRoutesAnswerWithoutASession` walks the real
+   route table and fails the build if anything else answers anonymously.
+8. **Default deny is a property of the type system.** Every route declares an
+   access policy whose zero value is invalid, so a route registered without one
+   is refused at runtime and fails `TestEveryRouteDeclaresAnAccessPolicy`.
+9. **Authorization is decided in one place.** No handler compares a role;
+   `TestNoHandlerChecksARoleDirectly` fails the build if one does.
+10. **No password, session token, or CSRF token is stored, logged, or returned.**
+    Passwords are Argon2id verifiers; session and bootstrap tokens are keyed
+    digests; the CSRF token is derived and stored nowhere.
+    `TestNoAuditRowEverContainsASecret` sweeps a real recorded audit log for
+    every secret that was in scope during a bootstrap, a sign-in, an account
+    creation, and a password change.
+11. **Every state-changing request is attributed.** `TestEveryWriteRouteIsAudited`
+    resolves each write route to its handler's source and fails if it records no
+    actor.
+12. **A forwarding header is never believed** unless a trusted-proxy range is
+    configured and the peer is inside it.
 
 ## Hardening checklist for operators
 
-- Bind to `127.0.0.1` unless an authenticating reverse proxy sits in front.
+- Bind to `127.0.0.1` unless a TLS-terminating reverse proxy sits in front.
+- Behind a proxy, set `HARBORMASTER_COOKIE_SECURE=true` and set
+  `HARBORMASTER_TRUSTED_PROXIES` to the proxy's ranges and nothing wider.
+- Claim the installation immediately after first start. An unclaimed one is one
+  bootstrap token away from being somebody else's.
+- Give each operator their own account. A shared account makes the audit log
+  answer "somebody" rather than "who".
+- Grant `viewer` unless the person needs to act. Only `operator` and above can
+  download an image or replace a container.
 - Run the published image, which is distroless and runs as UID 65532.
 - Keep `read_only: true`, `cap_drop: [ALL]`, and `no-new-privileges:true`.
 - Supply the snapshot HMAC key via `HARBORMASTER_SNAPSHOT_HMAC_KEY_FILE` and a

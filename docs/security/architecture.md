@@ -360,10 +360,203 @@ same uncertainty.
   is single use; another recreation needs a fresh plan assessed against the
   world as it is now.
 
+## 3g. Identity, authorization, and audit
+
+Phase 9.5 closed the boundary every earlier phase was compensating for. Before
+it, HarborMaster's answer to "who may stop a container" was "whoever can reach
+the port". This section states how that changed, and what it is that makes the
+change hold.
+
+### The shape of the rule
+
+**Every route declares an access policy, and the zero value of that policy is
+invalid.**
+
+That sentence is the whole design. `routeAccess` is a type whose zero value is
+neither "public" nor "authenticated" but `accessInvalid`, so a route registered
+without a policy is refused at runtime and fails
+`TestEveryRouteDeclaresAnAccessPolicy` at build time. "I forgot" and "I meant
+public" have to look different, and with a zero value that means public they do
+not.
+
+`internal/api/routes.go` lists every route exactly once with its policy, and
+nothing else in the package registers a handler. It is deliberately long and
+deliberately not abbreviated with loops: a reader auditing "who can stop a
+container" should find the answer by searching for the permission, and a
+grouping construct is exactly what hides one entry inside another's rule.
+
+Four routes are public, each with a stated reason:
+
+| Route | Reason |
+| --- | --- |
+| `GET /health` | A container runtime's HEALTHCHECK cannot hold a session. The body is REDUCED to the overall status for an anonymous caller; the full report names the database path, the journal mode, and the Docker API version |
+| `GET /version` | Deployment identification by tooling that holds no credential |
+| `POST /auth/login` | It is how a session is obtained |
+| `GET /auth/bootstrap` | A client must choose between sign-in and bootstrap before it holds anything. Returns one boolean |
+
+`POST /auth/bootstrap` carries a policy of its own: reachable only while the
+installation is unclaimed, and `404` afterwards — for that installation the
+endpoint genuinely no longer exists, and "forbidden" would confirm there is a
+flow to race.
+
+### Authorization happens in one place
+
+Handlers never ask about roles. They receive an already-authorized request and
+an identity, and the identity is there for AUDIT ATTRIBUTION rather than for a
+second decision. `TestNoHandlerChecksARoleDirectly` fails the build if any
+handler file names a role constant, and `TestUserHandlersDoNotCompareRoles`
+narrows the one exemption — the account handlers may PARSE a role out of a
+request body, but they may not branch on one.
+
+The permission model itself lives in `internal/domain/permission.go`. Three
+roles, fixed permission sets, and one property that matters more than the
+contents: **an unrecognised role holds nothing at all.** A role read back from a
+corrupt row, or written by a future migration this build does not know, grants
+no permission rather than defaulting to the least privileged one — a corrupt row
+must not become a silent grant.
+
+Policy administration sits at administrator level deliberately. A policy is what
+BLOCKS an acquisition or a recreation, so an operator able to edit one could
+remove the gate standing in their way.
+
+### Sessions
+
+Opaque, server-side, and stored as a keyed digest.
+
+- **The token never leaves the cookie.** It is minted from 32 bytes of system
+  entropy, set `HttpOnly` and `SameSite`, and appears in no response body, no
+  URL, and no log line. A script on the page cannot read it.
+- **The database holds only `HMAC(installation key, purpose, token)`**, so a
+  stolen database yields the ability to verify a token somebody already holds
+  and nothing else.
+- **`__Host-` prefixing over HTTPS.** The prefix is a browser-enforced
+  guarantee, not a convention: a cookie carrying it must be Secure, must have
+  `Path=/`, and must not set a Domain — which stops a sibling subdomain, or a
+  network attacker who can spoof one over plain HTTP, from overwriting the
+  session cookie.
+- **Two expiries.** Idle bounds an abandoned session; absolute bounds a stolen
+  one being kept deliberately warm. Both are enforced in the lookup query, so an
+  expired row cannot be resurrected by a bug elsewhere.
+- **The user is re-read on every request**, not trusted from the session's
+  snapshot. That is what makes a role change, a disablement, and a password
+  change take effect immediately rather than at the next sign-in.
+- **A password change is checked twice.** The session rows are revoked
+  explicitly, AND the lookup requires a session to be newer than the account's
+  `password_changed_at`. The timestamp is the belt that survives a crash between
+  the revocation and the write.
+
+### CSRF, derived rather than stored
+
+The CSRF token is `HMAC(installation key, csrf purpose, raw session token)`.
+
+The server has the raw token on every request — it arrived in the cookie — so
+the expected value is recomputed rather than looked up. Nothing is at rest for a
+database thief to read, the token rotates with the session without a rotation
+mechanism, and the comparison is constant-time.
+
+It travels in a CUSTOM header. A cross-origin form or a "simple" fetch cannot
+set one without triggering a preflight, and no CORS headers are served, so the
+preflight fails. That property is what makes the header meaningful over and
+above the token it carries.
+
+Only login and bootstrap are exempt, because they have no session to derive from,
+and `TestCSRFExemptionsAreOnlyTheSessionlessRoutes` fails the build if a third
+route claims the exemption.
+
+### Passwords
+
+Argon2id, through `golang.org/x/crypto`. No custom cryptography anywhere.
+
+The parameters are stored ALONGSIDE each hash rather than read from
+configuration at verification time, which is what makes raising the cost safe: a
+login below the current policy verifies with the parameters it was made with and
+is transparently re-hashed. They are bounds-checked at construction and again
+per credential, because they drive an allocation — a row claiming 64 GiB would
+otherwise be an out-of-memory kill triggered by a login attempt.
+
+An unknown algorithm, a corrupt salt, or out-of-range parameters produce
+`ErrCredentialUnusable` rather than any comparison at all. Falling back to a
+default would mean a corrupted row could be made to accept a chosen password.
+
+**Enumeration resistance is paid for, not assumed.** An unknown username is
+verified against a DECOY credential built at first use under the current
+parameters, so the response time of a real account and an imaginary one match. A
+disabled account is refused AFTER the password check, so its timing and its
+error are identical to a wrong password. The per-address throttle is applied
+BEFORE the username lookup, so query timing is not a side channel either.
+
+Failures apply an exponential per-account backoff to a bounded ceiling rather
+than a hard lockout: a lockout lets anyone who knows a username deny that
+account service, which turns an authentication control into a denial-of-service
+tool.
+
+### Claiming an installation
+
+A fresh installation has no accounts and no default password. It prints a
+one-time bootstrap token at startup; `POST /auth/bootstrap` exchanges it for the
+first administrator.
+
+The token moves the requirement from "be first to the port" to "can read the
+server's log or its data directory", which is the same bar the rest of the
+deployment already assumes. It is stored as a keyed digest, compared in constant
+time, expires, and is re-minted on every restart of an unclaimed installation —
+so an operator who lost it restarts, and an attacker who captured an old log
+does not benefit.
+
+`harbormaster admin bootstrap` does the same from the host without a token,
+because filesystem access to the database is a stronger proof than any token.
+That path lives in `service.LocalAdmin`, which the API layer does not depend on
+and `TestLocalAdminIsNotReachableFromTheAPI` forbids it from naming. "Never
+exposed over HTTP" is a structural fact rather than a promise: a handler cannot
+call what its dependency does not declare.
+
+### Audit
+
+Before this phase every feature recorded WHAT happened and none recorded WHO.
+
+`auditWrite` is the one line that closes that gap, called at each write's success
+point rather than from a wrapper, because only the handler knows what the write
+acted on. `TestEveryWriteRouteIsAudited` walks the route table, resolves each
+state-changing handler to its source method, and fails if the method's body does
+not call it — or if the route is not listed as audited inside its service, with
+the reason stated.
+
+A record is who, what, to what, from where, and whether it worked. It is **not a
+request log**: there is no body, no header, no environment value, and no
+credential anywhere in the schema, and no column exists that could hold one. An
+authorization denial records the PERMISSION that was refused rather than the
+path, because a permission is a closed vocabulary and a path is
+request-derived text that reaches a page an administrator reads.
+
+Two properties are enforced by test rather than by care:
+`TestCredentialMaterialIsConfinedToStoreAndService` fails the build if the
+verifier type reaches the HTTP layer, and `TestNoAuditRowEverContainsASecret`
+runs a real bootstrap, login, account creation, and password change and then
+sweeps every recorded row for every secret that was in scope.
+
+An audit write never fails an action. If it could, filling the disk would become
+a way to disable HarborMaster, and a failed write during logout would leave the
+operator logged in. The failure is logged at ERROR and the action proceeds.
+
+### The source address
+
+`X-Forwarded-For` and `Forwarded` are **ignored entirely** unless a
+trusted-proxy CIDR is configured and the transport peer is inside it. A
+forwarding header is attacker-controlled text; believing it unconditionally
+would let anyone spoof the source in the audit log and evade the per-address
+throttle by rotating it.
+
+When a proxy is trusted the chain is walked right to left and stops at the first
+untrusted hop, so entries an attacker prepended move nothing.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |
 | --- | --- |
+| Anonymous → authenticated | `internal/api/auth_middleware.go` — one `enforce`, reached by every route through `guard`; there is no code path that registers a bare handler |
+| Authenticated → authorized | The same `enforce`, against the permission the route declared in `internal/api/routes.go` |
+| Credential material | `internal/store` and `internal/service` only; an architecture test fails the build if the verifier type appears elsewhere |
+| Console recovery → HTTP | `internal/service/auth_local.go` is not a dependency of `internal/api`, enforced by test |
 | Untrusted HTTP input | `internal/api/query.go`, `snapshot_query.go`, `write_guard.go` |
 | Untrusted Docker data | `internal/docker/normalize.go`, `redact.go` |
 | SQL | Every query in `internal/store` — bound parameters, allowlisted identifiers |
@@ -487,6 +680,27 @@ positive control.
 
 ## 7. Frontend
 
+- **Nothing about the estate renders before a session exists.** The pre-session
+  states return before the application shell is constructed, so no navigation,
+  no connectivity indicator, and no data hook is mounted for a visitor who has
+  not signed in. Hiding them with CSS, or mounting them and letting each request
+  answer 401, would leak both structure and traffic.
+- **No token is stored where a script can find it.** The session token is in an
+  HttpOnly cookie the app cannot read. The CSRF token is held in a module
+  variable in `api/client.ts` — never `localStorage`, `sessionStorage`, a URL,
+  or a component's state — so it dies with the page, which is the same lifetime
+  as its usefulness.
+- **Hiding a control is not authorization.** Role-aware navigation exists so the
+  app does not offer buttons that will fail, which is a usability property. The
+  server refuses regardless, and the two are checked against each other by
+  `TestEveryPermissionRouteRefusesARoleThatLacksIt` on the backend.
+- **A 401 from anywhere ends the session once.** A single listener in the
+  session provider handles it, so a background poll on a page nobody is looking
+  at produces one transition to the sign-in page rather than an error on every
+  view that happened to be fetching.
+- **The sign-in page says exactly what the server says.** One message for every
+  credential failure; a friendlier "no such user" here would undo the
+  enumeration resistance the backend pays an Argon2id evaluation to provide.
 - **No `dangerouslySetInnerHTML` anywhere.** React escapes by default; nothing
   opts out.
 - **No URL built from backend data.** The only dynamic link targets are internal

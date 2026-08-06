@@ -52,6 +52,16 @@ export type ApiErrorCode =
   | "conflict"
   | "service_unavailable"
   | "feature_disabled"
+  /** No usable session. The shell renders the sign-in page. */
+  | "unauthenticated"
+  /** Authenticated, but the role does not hold the required permission. */
+  | "forbidden"
+  /** A state-changing request with a missing or wrong CSRF token. */
+  | "csrf_required"
+  /** The account must set a new password before doing anything else. */
+  | "password_change_required"
+  /** The installation has no administrator yet. */
+  | "bootstrap_required"
   /** Client-side only: the request never reached the server. */
   | "network_error"
   /** Client-side only: the response was not the JSON shape we expect. */

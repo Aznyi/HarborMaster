@@ -215,7 +215,7 @@ func newSnapshotServer(t *testing.T) *snapshotTestServer {
 		Labels:   []domain.Label{{Key: "app", Value: "api"}},
 	}
 
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health:     &fakeHealth{},
 		Inventory:  stubInventory{},
 		Containers: &fakeContainerReader{detail: &detail},
@@ -244,7 +244,7 @@ func postJSON(t *testing.T, srv *Server, target, body string) *httptest.Response
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	return rec
 }
 
@@ -266,7 +266,7 @@ func TestNoRestoreEndpointExists(t *testing.T) {
 			req := httptest.NewRequest(method, path, nil)
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
+			srv.ServeHTTP(rec, authed(req))
 
 			if rec.Code == http.StatusOK || rec.Code == http.StatusCreated || rec.Code == http.StatusAccepted {
 				t.Errorf("%s %s returned %d; HarborMaster must never restore a container",
@@ -523,7 +523,7 @@ func TestSnapshotCreateRequiresJSONContentType(t *testing.T) {
 			req.Header.Set("Content-Type", contentType)
 		}
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Errorf("Content-Type %q returned %d, want 415", contentType, rec.Code)
@@ -573,7 +573,7 @@ func TestCrossSiteFetchMetadataIsRejected(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
+			srv.ServeHTTP(rec, authed(req))
 
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("status = %d, want 403", rec.Code)
@@ -589,7 +589,7 @@ func TestCrossOriginIsRejected(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example.com")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
@@ -604,7 +604,7 @@ func TestSameOriginIsAccepted(t *testing.T) {
 	req.Header.Set("Origin", "http://"+req.Host)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusCreated {
 		t.Errorf("status = %d, want 201: %s", rec.Code, rec.Body)
@@ -630,7 +630,7 @@ func TestValidationHoldsWithoutFetchMetadata(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/snapshots", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code < 400 {
 			t.Errorf("body %q accepted with no Fetch Metadata headers: %d", body, rec.Code)
@@ -639,7 +639,7 @@ func TestValidationHoldsWithoutFetchMetadata(t *testing.T) {
 }
 
 func TestRateLimitHoldsWithoutFetchMetadata(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health:    &fakeHealth{},
 		Snapshots: newFakeSnapshots(),
 		Capture:   &fakeCapture{enabled: true},
@@ -654,7 +654,7 @@ func TestRateLimitHoldsWithoutFetchMetadata(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/snapshots", strings.NewReader(`{"containerId":"c1"}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code == http.StatusTooManyRequests {
 			limited = true
@@ -754,7 +754,7 @@ func TestSnapshotDiffGroupSelection(t *testing.T) {
 func TestSnapshotDiffBusyReturns429(t *testing.T) {
 	engine := service.NewDiffEngine(config.Snapshots{MaxConcurrentDiffs: 1, DiffTimeout: time.Second})
 
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health:    &fakeHealth{},
 		Snapshots: newFakeSnapshots(),
 		Diffs:     &busyDiffer{},
@@ -811,7 +811,7 @@ func TestSnapshotReadinessNotFound(t *testing.T) {
 // --- unconfigured deployment ------------------------------------------------
 
 func TestSnapshotEndpointsReport503WhenUnconfigured(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Logger: discardLogger(),
 		Config: config.Server{MaxRequestBytes: 4096},

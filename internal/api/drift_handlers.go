@@ -213,10 +213,6 @@ func (s *Server) handleDriftPatch(w http.ResponseWriter, r *http.Request) {
 
 	// Same guard the POST routes use: Fetch Metadata, Origin, and the
 	// per-process rate limit.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	id, ok := s.driftID(w, r)
 	if !ok {
@@ -256,6 +252,10 @@ func (s *Server) handleDriftPatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+
+	s.auditWrite(r, domain.AuditDriftAnnotated, domain.AuditTargetDrift,
+		strconv.FormatInt(record.ID, 10), record.ContainerName,
+		"operator status set to "+string(record.Status))
 
 	writeJSON(w, r, s.logger, http.StatusOK, record)
 }

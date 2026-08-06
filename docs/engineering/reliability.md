@@ -15,17 +15,137 @@ governs; this document is what you read at 3am.
 | `harbormaster diagnose` | Inspects the database **read-only** and prints findings | `0` clean, `1` findings, `2` nothing could be established |
 | `harbormaster backup <path>` | Writes a consistent copy and **verifies it** | `0` written and verified, `2` refused or failed |
 | `harbormaster healthcheck` | Probes the live HTTP endpoint | `0` healthy/degraded, `1` unhealthy, `2` unreachable, `3` malformed |
+| `harbormaster admin bootstrap` | Creates the first administrator on an unclaimed installation | `0` created, `1` refused or failed, `2` usage |
+| `harbormaster admin reset-password` | Replaces an account's password, reactivates it, and ends its sessions | `0` done, `1` refused or failed, `2` usage |
 
-**Neither `diagnose` nor `backup` is reachable over HTTP, and neither ever will
-be while the API is unauthenticated.** They report filesystem paths, free space,
-schema history, and daemon reachability — what an operator needs and what an
-attacker wants. Requiring shell access is the control.
-`internal/arch/arch_test.go` fails the build if `internal/api` imports the
-diagnostics package.
+**None of these is reachable over HTTP, and none ever will be.** `diagnose` and
+`backup` report filesystem paths, free space, schema history, and daemon
+reachability — what an operator needs and what an attacker wants. The `admin`
+commands go further: they claim an installation without the one-time token and
+set a password without knowing the old one. Both are correct for somebody
+holding the database file and catastrophic over a network.
+
+Requiring shell access is the control, and it is enforced structurally rather
+than by convention. `internal/arch/arch_test.go` fails the build if
+`internal/api` imports the diagnostics package or so much as names
+`service.LocalAdmin`, the type the `admin` commands are built on. A handler
+cannot call what its dependency does not declare.
 
 `diagnose` opens no Docker connection. A diagnostic that talks to a privileged
 socket to answer a question about a file would be adding a capability for the
 sake of a report.
+
+---
+
+## 1a. Account recovery
+
+### The situation this exists for
+
+The only administrator has forgotten their password, or left, or their account
+was disabled by mistake. Every authentication system needs an answer, and the
+answers people reach for otherwise are worse: a default password, a permanent
+recovery account, or a support endpoint. All three are backdoors that are always
+present. A command is a backdoor available only to somebody who could already
+edit the users table by hand — which is to say, not a backdoor at all.
+
+### Claiming a fresh installation
+
+A new installation has no accounts and no default password. It prints a
+one-time token at startup:
+
+```
+  ==========================================================
+   HarborMaster bootstrap token (valid until 2026-08-06T13:04:11Z)
+
+     kUu3v8Qm1sFo2Zt9dWl4rXcB
+
+   Use it once to create the first administrator. Restarting
+   HarborMaster issues a new token and invalidates this one.
+  ==========================================================
+```
+
+Open the web interface and use it. If the token was lost, restart HarborMaster
+and a new one is printed; the old one stops working.
+
+Without the web interface, from the host:
+
+```
+harbormaster admin bootstrap --username admin
+```
+
+No token is needed here, because filesystem access to the database is a stronger
+proof than any token. It is still refused once an administrator exists.
+
+### Recovering an account
+
+```
+harbormaster admin reset-password --username admin
+```
+
+It prompts for the password twice, with echo off, and asks for confirmation
+first — because the operation ends every session that account holds.
+
+What it does:
+
+- Replaces the password.
+- **Reactivates a disabled or locked account.** The reset exists because
+  somebody is locked out; leaving them locked out would make it useless. It says
+  so in its output rather than doing it silently.
+- **Revokes every session**, including one the operator may be holding in a
+  browser. A reset whose old sessions survive has recovered nothing from an
+  attacker who holds one.
+- **Requires the password to change at next sign-in**, so a password typed into
+  a terminal is temporary.
+
+What it deliberately does not do: change the role. A password reset is not a
+privilege grant, and a command that could quietly make an account an
+administrator would be the most attractive thing on the host.
+
+For an unattended run, `--generate` produces a strong password and prints it
+once. Without that flag no password is ever printed, and there is no way to
+supply one as an argument or an environment variable — both are visible in the
+process list and in shell history.
+
+### The permission check the commands make
+
+Both refuse to run when the database or the HMAC key file is readable beyond its
+owner:
+
+```
+admin: refusing to continue: harbormaster.db (0644) readable beyond the owner
+    this installation holds password verifiers and session key material
+    fix with: chmod 600 <file>, or pass --force to proceed anyway
+```
+
+Recovering an account into a directory anybody on the host can read is
+recovering it for them too. `--force` exists because an operator locked out of a
+mis-permissioned installation still needs a way in; making them type it is the
+point.
+
+On Windows the check is skipped and says so, because Go synthesises a mode from
+the read-only attribute alone — a "0600, looks fine" from a synthesised value
+would be a security check that lies, which is worse than none.
+
+### Every console operation is audited
+
+As coming from the local console, not from an account. No user performed it, and
+attributing it to the account that was modified would be a lie the audit log
+then repeats forever. "An administrator's password was replaced from the
+console" is exactly the event a compromised host would produce, so it is written
+down.
+
+### What replacing the installation key costs
+
+The key that signs snapshot digests also keys every session digest and the
+bootstrap token digest.
+
+**Replacing it signs everyone out.** That is the correct behaviour: a session
+digest computed under a key that no longer exists cannot be verified, and
+honouring it anyway would mean not verifying it. Nobody is locked out
+permanently — accounts and passwords are unaffected — but every browser has to
+sign in again.
+
+Back the key up. See section 2.
 
 ---
 

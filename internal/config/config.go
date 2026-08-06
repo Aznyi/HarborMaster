@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"slices"
@@ -451,6 +452,100 @@ const (
 	// design, its own blast-radius controls, and its own review.
 	MaxExecutionConcurrent = 4
 	MaxExecutionEvents     = 2000
+
+	// ---- authentication ----------------------------------------------------
+	//
+	// Unlike every other feature in HarborMaster, authentication has no
+	// "enabled" flag. It is ALWAYS on. A switch that could turn it off would be
+	// a switch that could be flipped by accident, by a copied compose file, or
+	// by an environment variable an attacker who already had a foothold could
+	// set -- and the whole point of this phase is that no anonymous request
+	// reaches a Docker mutation.
+
+	// DefaultSessionIdleTTL is how long a session survives without use.
+	//
+	// Eight hours: a working day, so an operator is not signed out over lunch,
+	// and short enough that an abandoned browser on a shared machine does not
+	// stay usable overnight.
+	DefaultSessionIdleTTL = 8 * time.Hour
+	// DefaultSessionAbsoluteTTL is the hard ceiling regardless of use.
+	//
+	// Seven days. It bounds a STOLEN session that is being deliberately kept
+	// warm, which idle expiry alone cannot: an attacker with a token can make a
+	// request every hour forever.
+	DefaultSessionAbsoluteTTL = 7 * 24 * time.Hour
+	// DefaultSessionTouchInterval is how often idle expiry is written forward.
+	//
+	// Five minutes. Writing on every request would make every read a write, and
+	// on SQLite's single writer that is the difference between a page load and
+	// a queue.
+	DefaultSessionTouchInterval = 5 * time.Minute
+	// DefaultMaxSessionsPerUser bounds concurrent sessions for one account.
+	// Past it the oldest is superseded.
+	DefaultMaxSessionsPerUser = 10
+	// DefaultSessionRetention is how long a revoked session row is kept, so
+	// "why was I signed out" has an answer for a while.
+	DefaultSessionRetention = 30 * 24 * time.Hour
+	// DefaultSessionSweepInterval is how often expiry and pruning run.
+	DefaultSessionSweepInterval = 15 * time.Minute
+
+	// DefaultMaxLoginBackoff caps the per-account exponential backoff.
+	//
+	// Fifteen minutes. Long enough that online guessing is hopeless, short
+	// enough that an operator who fat-fingered their password four times is not
+	// locked out of their own estate for the afternoon.
+	DefaultMaxLoginBackoff = 15 * time.Minute
+	// DefaultMaxAddressFailures is how many failures one source address may
+	// accumulate inside the window before it is throttled.
+	DefaultMaxAddressFailures = 20
+	// DefaultAddressFailureWindow is that window.
+	DefaultAddressFailureWindow = 15 * time.Minute
+
+	// DefaultBootstrapTokenTTL is how long the one-time claim token lasts.
+	//
+	// One hour, and re-minted at every startup. Long enough to copy from a log
+	// and paste into a browser, short enough that a token in an old log file is
+	// not a way to claim an installation later.
+	DefaultBootstrapTokenTTL = 1 * time.Hour
+
+	// DefaultAuditRetention is how long an OPERATIONAL audit event is kept.
+	DefaultAuditRetention = 180 * 24 * time.Hour
+	// DefaultSecurityAuditRetention is how long an AUTHENTICATION,
+	// authorization, or user-administration event is kept.
+	//
+	// Two years, deliberately much longer. An inventory refresh from six months
+	// ago is noise; a failed login from six months ago is the first entry in a
+	// story.
+	DefaultSecurityAuditRetention = 2 * 365 * 24 * time.Hour
+	// DefaultAuditSummaryWindow is how far back the audit page's counters look.
+	DefaultAuditSummaryWindow = 24 * time.Hour
+	// DefaultAuditPruneInterval is how often retention runs.
+	DefaultAuditPruneInterval = 6 * time.Hour
+
+	// Argon2id default cost.
+	//
+	// 64 MiB, 3 passes, 4 lanes: comfortably above OWASP.s current minimum and
+	// chosen so a login costs roughly 100ms on modest hardware. The FLOORS and
+	// CEILINGS that stop these being set to something meaningless live in
+	// internal/service, beside the code that uses them.
+	DefaultArgonMemoryKiB   = 64 * 1024
+	DefaultArgonIterations  = 3
+	DefaultArgonParallelism = 4
+
+	// Authentication bounds.
+	MinSessionIdleTTL       = 5 * time.Minute
+	MinSessionAbsoluteTTL   = 15 * time.Minute
+	MaxSessionAbsoluteTTL   = 90 * 24 * time.Hour
+	MinSessionTouchInterval = 30 * time.Second
+	MinSessionSweepInterval = 1 * time.Minute
+	MaxSessionsPerUserLimit = 100
+	MinLoginBackoff         = 1 * time.Second
+	MaxLoginBackoffLimit    = 24 * time.Hour
+	MaxAddressFailuresLimit = 10000
+	MinBootstrapTokenTTL    = 5 * time.Minute
+	MaxBootstrapTokenTTL    = 24 * time.Hour
+	MinAuditSummaryWindow   = 1 * time.Hour
+	MaxTrustedProxyCount    = 64
 
 	// Planner bounds.
 	MinPlannerInterval      = 1 * time.Minute
@@ -936,6 +1031,103 @@ type Acquisition struct {
 	PruneInterval time.Duration
 }
 
+// Auth holds settings for authentication, sessions, and the audit log.
+//
+// # There is no way to switch authentication off
+//
+// Every other feature in HarborMaster has an Enabled flag. This one does not,
+// and the omission is the point: a flag that could disable authentication would
+// be a flag that gets flipped by a copied compose file, by a stale environment,
+// or by an attacker who already has enough of a foothold to set one. Phase 9.5
+// exists so that no anonymous request can reach a Docker mutation, and an
+// off-switch would make that a configuration property rather than a fact.
+//
+// # HTTPS is the operator's responsibility, and HarborMaster says so
+//
+// Session cookies are marked Secure when the request arrived over HTTPS or
+// through a trusted proxy that says it did. Over plain HTTP on loopback -- the
+// default deployment -- the cookie cannot be Secure, because a browser would
+// then refuse to send it at all. See CookieSecure.
+type Auth struct {
+	// SessionIdleTTL is how long a session survives without use, and
+	// SessionAbsoluteTTL the hard ceiling regardless of use. Both are enforced:
+	// the first bounds an abandoned session, the second a stolen one being kept
+	// deliberately warm.
+	SessionIdleTTL     time.Duration
+	SessionAbsoluteTTL time.Duration
+	// SessionTouchInterval is how often idle expiry is written forward. It
+	// exists so a read does not become a write on every request.
+	SessionTouchInterval time.Duration
+	// MaxSessionsPerUser bounds concurrent sessions for one account. Past it
+	// the oldest is superseded.
+	MaxSessionsPerUser int
+	// SessionRetention is how long a revoked session row is kept before
+	// pruning, and SessionSweepInterval how often expiry and pruning run.
+	SessionRetention     time.Duration
+	SessionSweepInterval time.Duration
+
+	// MaxLoginBackoff caps the per-account exponential backoff. A cap rather
+	// than a hard lockout: a lockout lets anyone who knows a username deny that
+	// account service by guessing at it.
+	MaxLoginBackoff time.Duration
+	// MaxAddressFailures and AddressFailureWindow throttle one source address.
+	// Zero failures disables the address throttle, leaving only the per-account
+	// backoff.
+	MaxAddressFailures   int
+	AddressFailureWindow time.Duration
+
+	// Argon2id cost. Stored alongside each credential, so raising these does
+	// not invalidate existing passwords -- a login below the current policy is
+	// transparently re-hashed.
+	ArgonMemoryKiB   int
+	ArgonIterations  int
+	ArgonParallelism int
+
+	// BootstrapTokenTTL is how long the one-time claim token lasts. Re-minted
+	// at every startup of an unclaimed installation.
+	BootstrapTokenTTL time.Duration
+
+	// AuditRetention and SecurityAuditRetention are how long operational and
+	// security audit events are kept. Zero keeps them forever.
+	AuditRetention         time.Duration
+	SecurityAuditRetention time.Duration
+	// AuditSummaryWindow is how far back the audit page's counters look, and
+	// AuditPruneInterval how often retention runs.
+	AuditSummaryWindow time.Duration
+	AuditPruneInterval time.Duration
+
+	// TrustedProxies are CIDR ranges whose X-Forwarded-For HarborMaster will
+	// believe.
+	//
+	// EMPTY BY DEFAULT, and that default is load-bearing. A forwarding header
+	// is attacker-controlled text; trusting it unconditionally would let anyone
+	// spoof the source address in the audit log and evade the per-address
+	// throttle by rotating it. With no trusted proxies configured, the address
+	// is always the transport peer, which cannot be forged.
+	TrustedProxies []string
+
+	// CookieSecure forces the Secure attribute on session cookies regardless of
+	// how the request arrived.
+	//
+	// Needed when HarborMaster sits behind a TLS-terminating proxy that is not
+	// in TrustedProxies -- the request reaches HarborMaster over plain HTTP,
+	// but the browser's connection was HTTPS and the cookie must be marked to
+	// match. Setting it on a genuinely plain-HTTP deployment makes the browser
+	// discard the cookie and nobody can log in, which is a loud failure rather
+	// than a silent weakening.
+	CookieSecure bool
+	// CookieSameSiteLax relaxes SameSite from Strict to Lax.
+	//
+	// Strict is the default and the right answer for a tool with no
+	// cross-origin flows. Lax exists for the documented compatibility case: an
+	// operator following a link into HarborMaster from a chat client or a
+	// ticket system arrives without their cookie under Strict, which reads as a
+	// spurious logout. It remains safe for this application because every
+	// state-changing request additionally requires a CSRF header that a
+	// cross-site navigation cannot set.
+	CookieSameSiteLax bool
+}
+
 // Execution holds settings for manual container recreation.
 //
 // # This is the capability that changes something that is RUNNING
@@ -1106,6 +1298,7 @@ type Config struct {
 	Planner     Planner
 	Acquisition Acquisition
 	Execution   Execution
+	Auth        Auth
 }
 
 var (
@@ -1496,6 +1689,55 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	// ---- authentication ----------------------------------------------------
+	//
+	// No AUTH_ENABLED. Authentication is always on: see the Auth type.
+
+	for _, target := range []struct {
+		name     string
+		fallback time.Duration
+		into     *time.Duration
+	}{
+		{"SESSION_IDLE_TTL", DefaultSessionIdleTTL, &cfg.Auth.SessionIdleTTL},
+		{"SESSION_ABSOLUTE_TTL", DefaultSessionAbsoluteTTL, &cfg.Auth.SessionAbsoluteTTL},
+		{"SESSION_TOUCH_INTERVAL", DefaultSessionTouchInterval, &cfg.Auth.SessionTouchInterval},
+		{"SESSION_RETENTION", DefaultSessionRetention, &cfg.Auth.SessionRetention},
+		{"SESSION_SWEEP_INTERVAL", DefaultSessionSweepInterval, &cfg.Auth.SessionSweepInterval},
+		{"LOGIN_MAX_BACKOFF", DefaultMaxLoginBackoff, &cfg.Auth.MaxLoginBackoff},
+		{"LOGIN_ADDRESS_WINDOW", DefaultAddressFailureWindow, &cfg.Auth.AddressFailureWindow},
+		{"BOOTSTRAP_TOKEN_TTL", DefaultBootstrapTokenTTL, &cfg.Auth.BootstrapTokenTTL},
+		{"AUDIT_RETENTION", DefaultAuditRetention, &cfg.Auth.AuditRetention},
+		{"AUDIT_SECURITY_RETENTION", DefaultSecurityAuditRetention, &cfg.Auth.SecurityAuditRetention},
+		{"AUDIT_SUMMARY_WINDOW", DefaultAuditSummaryWindow, &cfg.Auth.AuditSummaryWindow},
+		{"AUDIT_PRUNE_INTERVAL", DefaultAuditPruneInterval, &cfg.Auth.AuditPruneInterval},
+	} {
+		value, convErr := durationVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"SESSION_MAX_PER_USER", DefaultMaxSessionsPerUser, &cfg.Auth.MaxSessionsPerUser},
+		{"LOGIN_MAX_ADDRESS_FAILURES", DefaultMaxAddressFailures, &cfg.Auth.MaxAddressFailures},
+		{"ARGON_MEMORY_KIB", DefaultArgonMemoryKiB, &cfg.Auth.ArgonMemoryKiB},
+		{"ARGON_ITERATIONS", DefaultArgonIterations, &cfg.Auth.ArgonIterations},
+		{"ARGON_PARALLELISM", DefaultArgonParallelism, &cfg.Auth.ArgonParallelism},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	cfg.Auth.CookieSecure, err = boolVar(lookup, "COOKIE_SECURE", false)
+	collect(err)
+	cfg.Auth.CookieSameSiteLax, err = boolVar(lookup, "COOKIE_SAMESITE_LAX", false)
+	collect(err)
+	cfg.Auth.TrustedProxies = listVar(lookup, "TRUSTED_PROXIES", nil)
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -1583,6 +1825,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Planner.validate()...)
 	errs = append(errs, c.Acquisition.validate()...)
 	errs = append(errs, c.Execution.validate()...)
+	errs = append(errs, c.Auth.validate()...)
 
 	// Recreation without acquisition is not a configuration, it is a
 	// contradiction: an execution names an ACQUISITION, and with acquisition
@@ -1599,6 +1842,154 @@ func (c Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validate checks the authentication settings.
+//
+// Every failure here is a startup refusal. Authentication is the one subsystem
+// where a setting that is merely odd is a setting that gets somebody
+// compromised, and a misconfiguration discovered at the first login is
+// discovered by an operator who is already locked out.
+func (a Auth) validate() []error {
+	var errs []error
+
+	if a.SessionIdleTTL < MinSessionIdleTTL {
+		errs = append(errs, fmt.Errorf("%sSESSION_IDLE_TTL must be at least %s",
+			envPrefix, MinSessionIdleTTL))
+	}
+	if a.SessionAbsoluteTTL < MinSessionAbsoluteTTL || a.SessionAbsoluteTTL > MaxSessionAbsoluteTTL {
+		errs = append(errs, fmt.Errorf("%sSESSION_ABSOLUTE_TTL must be between %s and %s",
+			envPrefix, MinSessionAbsoluteTTL, MaxSessionAbsoluteTTL))
+	}
+	// An idle window longer than the absolute ceiling is not a stricter
+	// setting, it is a setting with no effect -- and an operator who wrote it
+	// believes the ceiling is longer than it is.
+	if a.SessionIdleTTL > a.SessionAbsoluteTTL {
+		errs = append(errs, fmt.Errorf(
+			"%sSESSION_IDLE_TTL (%s) must not exceed %sSESSION_ABSOLUTE_TTL (%s)",
+			envPrefix, a.SessionIdleTTL, envPrefix, a.SessionAbsoluteTTL))
+	}
+	if a.SessionTouchInterval < MinSessionTouchInterval {
+		errs = append(errs, fmt.Errorf("%sSESSION_TOUCH_INTERVAL must be at least %s",
+			envPrefix, MinSessionTouchInterval))
+	}
+	// A touch interval past the idle window means the idle expiry is never
+	// written forward, so every session dies at exactly the idle TTL however
+	// actively it is used.
+	if a.SessionTouchInterval >= a.SessionIdleTTL {
+		errs = append(errs, fmt.Errorf(
+			"%sSESSION_TOUCH_INTERVAL (%s) must be shorter than %sSESSION_IDLE_TTL (%s), "+
+				"or an active session would still expire on schedule",
+			envPrefix, a.SessionTouchInterval, envPrefix, a.SessionIdleTTL))
+	}
+	if a.SessionSweepInterval < MinSessionSweepInterval {
+		errs = append(errs, fmt.Errorf("%sSESSION_SWEEP_INTERVAL must be at least %s",
+			envPrefix, MinSessionSweepInterval))
+	}
+	if a.SessionRetention < 0 {
+		errs = append(errs, fmt.Errorf("%sSESSION_RETENTION must not be negative", envPrefix))
+	}
+
+	if a.MaxSessionsPerUser < 1 || a.MaxSessionsPerUser > MaxSessionsPerUserLimit {
+		errs = append(errs, fmt.Errorf("%sSESSION_MAX_PER_USER must be between 1 and %d",
+			envPrefix, MaxSessionsPerUserLimit))
+	}
+
+	if a.MaxLoginBackoff < MinLoginBackoff || a.MaxLoginBackoff > MaxLoginBackoffLimit {
+		errs = append(errs, fmt.Errorf("%sLOGIN_MAX_BACKOFF must be between %s and %s",
+			envPrefix, MinLoginBackoff, MaxLoginBackoffLimit))
+	}
+	// Zero disables the address throttle, which is a documented choice for a
+	// deployment behind a proxy that already rate-limits. Negative is not a way
+	// to express anything.
+	if a.MaxAddressFailures < 0 || a.MaxAddressFailures > MaxAddressFailuresLimit {
+		errs = append(errs, fmt.Errorf("%sLOGIN_MAX_ADDRESS_FAILURES must be between 0 and %d",
+			envPrefix, MaxAddressFailuresLimit))
+	}
+	if a.MaxAddressFailures > 0 && a.AddressFailureWindow <= 0 {
+		errs = append(errs, fmt.Errorf(
+			"%sLOGIN_ADDRESS_WINDOW must be positive when %sLOGIN_MAX_ADDRESS_FAILURES is set",
+			envPrefix, envPrefix))
+	}
+
+	if a.BootstrapTokenTTL < MinBootstrapTokenTTL || a.BootstrapTokenTTL > MaxBootstrapTokenTTL {
+		errs = append(errs, fmt.Errorf("%sBOOTSTRAP_TOKEN_TTL must be between %s and %s",
+			envPrefix, MinBootstrapTokenTTL, MaxBootstrapTokenTTL))
+	}
+
+	if a.AuditRetention < 0 {
+		errs = append(errs, fmt.Errorf("%sAUDIT_RETENTION must not be negative", envPrefix))
+	}
+	if a.SecurityAuditRetention < 0 {
+		errs = append(errs, fmt.Errorf("%sAUDIT_SECURITY_RETENTION must not be negative", envPrefix))
+	}
+	// Security events must outlive operational ones. The reverse would mean the
+	// authentication history is pruned before the inventory refreshes it is
+	// meant to explain.
+	if a.AuditRetention > 0 && a.SecurityAuditRetention > 0 &&
+		a.SecurityAuditRetention < a.AuditRetention {
+		errs = append(errs, fmt.Errorf(
+			"%sAUDIT_SECURITY_RETENTION (%s) must be at least %sAUDIT_RETENTION (%s)",
+			envPrefix, a.SecurityAuditRetention, envPrefix, a.AuditRetention))
+	}
+	if a.AuditSummaryWindow < MinAuditSummaryWindow {
+		errs = append(errs, fmt.Errorf("%sAUDIT_SUMMARY_WINDOW must be at least %s",
+			envPrefix, MinAuditSummaryWindow))
+	}
+	if a.AuditPruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sAUDIT_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+
+	errs = append(errs, a.validateTrustedProxies()...)
+	return errs
+}
+
+// validateTrustedProxies checks the forwarding-header allowlist.
+//
+// # Why this is validated so strictly
+//
+// A trusted proxy entry is permission to believe an attacker-controlled header
+// about where a request came from. Getting it wrong does not fail loudly: it
+// silently makes the audit log's source addresses forgeable and the per-address
+// throttle evadable, which is exactly the kind of weakening nobody notices.
+//
+// So an unparseable entry refuses startup rather than being skipped, and the
+// list is bounded so a configuration mistake cannot make every request walk a
+// long list.
+func (a Auth) validateTrustedProxies() []error {
+	if len(a.TrustedProxies) == 0 {
+		return nil
+	}
+
+	var errs []error
+	if len(a.TrustedProxies) > MaxTrustedProxyCount {
+		errs = append(errs, fmt.Errorf("%sTRUSTED_PROXIES must list at most %d entries",
+			envPrefix, MaxTrustedProxyCount))
+	}
+
+	for _, entry := range a.TrustedProxies {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		// A bare address is accepted and read as a single-host range, because
+		// "127.0.0.1" is what an operator writes and refusing it would be
+		// pedantry. Anything else must be a CIDR.
+		if _, err := netip.ParseAddr(trimmed); err == nil {
+			continue
+		}
+		if _, err := netip.ParsePrefix(trimmed); err != nil {
+			// The offending value is NOT echoed. It is operator-supplied text
+			// that reaches a startup log, and naming the variable is enough to
+			// find it.
+			errs = append(errs, fmt.Errorf(
+				"%sTRUSTED_PROXIES contains an entry that is neither an IP address nor a CIDR range",
+				envPrefix))
+			break
+		}
+	}
+	return errs
 }
 
 // validate checks the container recreation settings.

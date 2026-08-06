@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -142,6 +143,49 @@ func (k SecretKey) HMAC(value string) string {
 	_, _ = mac.Write([]byte(value))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// HMACFor derives a digest under a NAMED PURPOSE.
+//
+// # Why domain separation matters here
+//
+// One installation key now protects three unrelated things: snapshot secret
+// digests, session tokens, and CSRF tokens. Without separation they share a
+// keyspace, and a value that is a legitimate digest in one context is a
+// legitimate digest in the others -- so anywhere an attacker can get a digest
+// computed over chosen input becomes a way to mint a value another subsystem
+// will accept.
+//
+// Prefixing with a length-delimited purpose makes the three keyspaces disjoint:
+// no input to one can produce the same MAC as any input to another, because the
+// purpose is unambiguously recoverable from the prefix.
+//
+// HMAC (the unprefixed method above) is left exactly as it was. Snapshot
+// digests are compared against values recorded by earlier releases, and adding
+// a prefix would make every historical digest compare unequal -- which an
+// operator would read as "every secret in every container changed at once".
+func (k SecretKey) HMACFor(purpose, value string) string {
+	mac := hmac.New(sha256.New, k.key)
+	// The length prefix is what makes the encoding injective. Without it,
+	// purpose "ab" + value "c" and purpose "a" + value "bc" would hash
+	// identically.
+	_, _ = mac.Write([]byte(strconv.Itoa(len(purpose))))
+	_, _ = mac.Write([]byte(":"))
+	_, _ = mac.Write([]byte(purpose))
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// Purposes for HMACFor. Named constants rather than string literals at the call
+// sites, so a typo cannot silently create a fourth keyspace that nothing else
+// can verify against.
+const (
+	// PurposeSession digests a session token for storage.
+	PurposeSession = "harbormaster.session.v1"
+	// PurposeCSRF derives a CSRF token from a session token.
+	PurposeCSRF = "harbormaster.csrf.v1"
+	// PurposeBootstrap digests the one-time bootstrap token.
+	PurposeBootstrap = "harbormaster.bootstrap.v1"
+)
 
 // Valid reports whether the key is usable. A zero SecretKey is not.
 func (k SecretKey) Valid() bool { return len(k.key) == secretKeyBytes }

@@ -128,7 +128,7 @@ func inventoryServer(t *testing.T, opts Options) *Server {
 	}
 	opts.Logger = discardLogger()
 	opts.Config = config.Server{MaxRequestBytes: 1 << 20}
-	return NewServer(opts)
+	return newAuthedServer(opts)
 }
 
 func decodeBody[T any](t *testing.T, body []byte) T {

@@ -86,12 +86,85 @@ import type {
   ExecutionQuery,
   ExecutionRequest,
 } from "./executionTypes";
+import type {
+  AuditListResponse,
+  AuditQuery,
+  AuditSummary,
+  BootstrapRequest,
+  BootstrapStatus,
+  ChangePasswordRequest,
+  CreateUserRequest,
+  CreatedUser,
+  LoginRequest,
+  PublicUser,
+  RoleCatalogue,
+  SessionListResponse,
+  SessionResponse,
+  UpdateUserRequest,
+  UserListResponse,
+} from "./authTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
 
 /** Requests are bounded so a hung backend cannot leave the UI spinning. */
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** The header the server reads the per-session CSRF token from. */
+export const CSRF_HEADER = "X-HarborMaster-CSRF";
+
+/**
+ * The CSRF token for the current session.
+ *
+ * # Why a module variable and not storage
+ *
+ * `localStorage` and `sessionStorage` survive the tab, are readable by any
+ * script that reaches this origin, and are exactly where a successful XSS looks
+ * first. A module variable dies with the page, which is the same lifetime as
+ * the value's usefulness.
+ *
+ * It is not a secret in the way the session token is -- it is useless without
+ * the cookie -- but there is no reason to persist it, so it is not persisted.
+ */
+let csrfToken = "";
+
+/** Sets the CSRF token for subsequent writes. */
+export function setCsrfToken(token: string): void {
+  csrfToken = token;
+}
+
+/** Clears the CSRF token. Called on sign-out and on any 401. */
+export function clearCsrfToken(): void {
+  csrfToken = "";
+}
+
+/** True when a token is held, so the UI can tell "signed in" from "not". */
+export function hasCsrfToken(): boolean {
+  return csrfToken !== "";
+}
+
+type UnauthenticatedListener = (code: ApiErrorCode) => void;
+
+const unauthenticatedListeners = new Set<UnauthenticatedListener>();
+
+/**
+ * Registers a listener for "this session is no longer usable".
+ *
+ * Returns an unsubscribe function. The session provider is the only subscriber;
+ * it exists so a 401 from any page in the app produces ONE transition to the
+ * sign-in screen rather than an error toast on each view that happened to be
+ * polling.
+ */
+export function onUnauthenticated(listener: UnauthenticatedListener): () => void {
+  unauthenticatedListeners.add(listener);
+  return () => {
+    unauthenticatedListeners.delete(listener);
+  };
+}
+
+function notifyUnauthenticated(code: ApiErrorCode): void {
+  for (const listener of unauthenticatedListeners) listener(code);
+}
 
 /**
  * A failed API call.
@@ -156,15 +229,23 @@ async function request<T>(
   // cannot set this header, so it cannot reach the write endpoints.
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
+  // The CSRF token on every state-changing request.
+  //
+  // A cross-site page can make the browser send our cookie, but it cannot read
+  // this token and cannot set a custom header without a preflight that fails.
+  // Held in memory only -- see `csrfToken` below.
+  if (method !== "GET" && csrfToken) headers[CSRF_HEADER] = csrfToken;
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      // No credentials: the API is unauthenticated and must not attach cookies
-      // to a cross-origin dev proxy by accident.
-      credentials: "omit",
+      // The session cookie must travel with every request, and ONLY to this
+      // origin. "same-origin" is what keeps it from being attached to a
+      // cross-origin dev proxy by accident.
+      credentials: "same-origin",
       signal: AbortSignal.any(signals),
     });
   } catch {
@@ -185,7 +266,15 @@ async function request<T>(
   const requestId = response.headers.get("X-Request-ID") ?? undefined;
 
   if (!response.ok) {
-    throw await toApiError(response, requestId);
+    const failure = await toApiError(response, requestId);
+    // A session that has ended is not an error the calling page can act on --
+    // every subsequent request would fail the same way. It is announced once,
+    // and the shell re-renders as the sign-in page.
+    if (failure.status === 401) {
+      csrfToken = "";
+      notifyUnauthenticated(failure.code);
+    }
+    throw failure;
   }
 
   // No Content. Returning undefined rather than attempting a decode, which
@@ -1209,4 +1298,233 @@ export function cancelExecution(
     options,
     "POST",
   );
+}
+
+/* ------------------------------------------------- identity and sessions -- */
+
+/**
+ * Authentication.
+ *
+ * # No token is ever handled here
+ *
+ * `login` and `bootstrap` return a CSRF token and a user; the SESSION token
+ * arrives as a `Set-Cookie` header the browser stores and this code cannot see.
+ * There is deliberately no function that reads, stores, or sends a session
+ * token, because there is no way for this code to obtain one.
+ */
+
+/** GET /api/v1/auth/bootstrap — whether this installation has been claimed. */
+export function getBootstrapStatus(
+  options?: RequestOptions,
+): Promise<BootstrapStatus> {
+  return request<BootstrapStatus>("/auth/bootstrap", options);
+}
+
+/**
+ * POST /api/v1/auth/bootstrap
+ *
+ * Creates the first administrator. Reachable only while the installation is
+ * unclaimed; afterwards the endpoint answers 404, because for that installation
+ * it genuinely no longer exists.
+ *
+ * The token is the one-time value printed in the server log at startup, so
+ * claiming requires access to the log rather than merely reaching the port.
+ */
+export function bootstrapInstallation(
+  body: BootstrapRequest,
+  options?: RequestOptions,
+): Promise<SessionResponse> {
+  return request<SessionResponse>("/auth/bootstrap", options, "POST", body);
+}
+
+/**
+ * POST /api/v1/auth/login
+ *
+ * Every credential failure -- unknown username, wrong password, disabled
+ * account -- answers 401 with the same message. That is deliberate on the
+ * server's side, and this client must not try to distinguish them either.
+ */
+export function login(
+  body: LoginRequest,
+  options?: RequestOptions,
+): Promise<SessionResponse> {
+  return request<SessionResponse>("/auth/login", options, "POST", body);
+}
+
+/** POST /api/v1/auth/logout — ends this session only. */
+export function logout(options?: RequestOptions): Promise<void> {
+  return request<void>("/auth/logout", options, "POST");
+}
+
+/** GET /api/v1/auth/session — the caller's identity and a fresh CSRF token. */
+export function getSession(options?: RequestOptions): Promise<SessionResponse> {
+  return request<SessionResponse>("/auth/session", options);
+}
+
+/**
+ * POST /api/v1/auth/password
+ *
+ * Requires the current password even though the request is authenticated: a
+ * session is possession, the current password is knowledge, and requiring both
+ * stops a stolen session becoming permanent account control.
+ *
+ * The session ROTATES. Every session on the account ends and a new cookie
+ * replaces this one, so the returned CSRF token must be installed or the next
+ * write will be refused.
+ */
+export function changePassword(
+  body: ChangePasswordRequest,
+  options?: RequestOptions,
+): Promise<SessionResponse> {
+  return request<SessionResponse>("/auth/password", options, "POST", body);
+}
+
+/** GET /api/v1/auth/sessions — the caller's OWN live sessions. */
+export function listOwnSessions(
+  options?: RequestOptions,
+): Promise<SessionListResponse> {
+  return request<SessionListResponse>("/auth/sessions", options);
+}
+
+/** POST /api/v1/auth/sessions/{id}/revoke — end one of the caller's sessions. */
+export function revokeOwnSession(
+  sessionId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/auth/sessions/${encodeURIComponent(sessionId)}/revoke`,
+    options,
+    "POST",
+  );
+}
+
+/* ----------------------------------------------------- user administration -- */
+
+/**
+ * Account administration.
+ *
+ * Every function here needs `user:manage`, which only an administrator holds.
+ * Hiding the UI is not the control -- the server refuses regardless -- but a
+ * button that always fails is a bad interface, so the pages check too.
+ *
+ * Note the absence of a delete: disabling preserves the history an audit record
+ * depends on, and an account that never existed is not the same as one that was
+ * turned off.
+ */
+
+/** GET /api/v1/users */
+export function listUsers(
+  page = 1,
+  pageSize = 50,
+  options?: RequestOptions,
+): Promise<UserListResponse> {
+  const params = new URLSearchParams();
+  if (page > 1) params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+  return request<UserListResponse>(`/users?${params.toString()}`, options);
+}
+
+/** GET /api/v1/users/{id} */
+export function getUser(
+  userId: string,
+  options?: RequestOptions,
+): Promise<PublicUser> {
+  return request<PublicUser>(`/users/${encodeURIComponent(userId)}`, options);
+}
+
+/**
+ * POST /api/v1/users
+ *
+ * Omitting the password makes the server generate one and return it ONCE. That
+ * is the safer default: an administrator never has to invent a password for
+ * somebody else, and never has one they chose sitting in their clipboard.
+ */
+export function createUser(
+  body: CreateUserRequest,
+  options?: RequestOptions,
+): Promise<CreatedUser> {
+  return request<CreatedUser>("/users", options, "POST", body);
+}
+
+/**
+ * PATCH /api/v1/users/{id}
+ *
+ * Changes a role, a status, or both. The server refuses an administrator
+ * modifying their own account and refuses removing the last one.
+ */
+export function updateUser(
+  userId: string,
+  body: UpdateUserRequest,
+  options?: RequestOptions,
+): Promise<PublicUser> {
+  return request<PublicUser>(
+    `/users/${encodeURIComponent(userId)}`,
+    options,
+    "PATCH",
+    body,
+  );
+}
+
+/**
+ * POST /api/v1/users/{id}/password-reset
+ *
+ * Sets a generated temporary password and returns it once, revoking every
+ * session on the account. There is no parameter for choosing the password: an
+ * administrator who picks one picks one they know.
+ */
+export function resetUserPassword(
+  userId: string,
+  options?: RequestOptions,
+): Promise<{ temporaryPassword: string }> {
+  return request<{ temporaryPassword: string }>(
+    `/users/${encodeURIComponent(userId)}/password-reset`,
+    options,
+    "POST",
+  );
+}
+
+/**
+ * GET /api/v1/roles
+ *
+ * The role catalogue, fetched rather than hardcoded so the picker and the
+ * authorization middleware read the same source of truth.
+ */
+export function getRoles(options?: RequestOptions): Promise<RoleCatalogue> {
+  return request<RoleCatalogue>("/roles", options);
+}
+
+/* --------------------------------------------------- the security audit log -- */
+
+/** Builds the audit query string from closed vocabularies. */
+function buildAuditQuery(query: AuditQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.actorUserId) params.set("actorUserId", query.actorUserId);
+  if (query.targetType) params.set("targetType", query.targetType);
+  if (query.targetId) params.set("targetId", query.targetId);
+  if (query.since) params.set("since", query.since);
+  if (query.securityOnly !== undefined) {
+    params.set("securityOnly", String(query.securityOnly));
+  }
+
+  for (const action of query.action ?? []) params.append("action", action);
+  for (const outcome of query.outcome ?? []) params.append("outcome", outcome);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/audit — needs `audit:read`. */
+export function listAuditEvents(
+  query: AuditQuery = {},
+  options?: RequestOptions,
+): Promise<AuditListResponse> {
+  return request<AuditListResponse>(`/audit${buildAuditQuery(query)}`, options);
+}
+
+/** GET /api/v1/audit/summary */
+export function getAuditSummary(options?: RequestOptions): Promise<AuditSummary> {
+  return request<AuditSummary>("/audit/summary", options);
 }

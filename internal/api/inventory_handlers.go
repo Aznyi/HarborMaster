@@ -119,10 +119,6 @@ func (s *Server) handleInventoryRefresh(w http.ResponseWriter, r *http.Request) 
 	// shipped without them; leaving a weaker sibling next to a hardened one
 	// would just move the abuse here. A refresh drives a full sweep of a
 	// privileged socket, so an unbounded request rate is a real amplifier.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	// Checked up front so an unreachable daemon is an immediate, honest 503
 	// rather than an accepted refresh that fails seconds later out of sight.
@@ -137,6 +133,9 @@ func (s *Server) handleInventoryRefresh(w http.ResponseWriter, r *http.Request) 
 		s.writeRefreshConflict(w, r, startedAt)
 		return
 	}
+
+	s.auditWrite(r, domain.AuditInventoryRefreshed, domain.AuditTargetInventory,
+		"", "", "manual refresh requested")
 
 	writeJSON(w, r, s.logger, http.StatusAccepted, refreshAccepted{
 		Accepted:  true,

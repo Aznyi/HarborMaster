@@ -176,7 +176,7 @@ func newEventServer(t *testing.T, events *fakeDockerEvents, engine *fakeEngine) 
 	if engine != nil {
 		opts.EventEngine = engine
 	}
-	return NewServer(opts)
+	return newAuthedServer(opts)
 }
 
 func sampleEvent(sequence int64) domain.DockerEvent {
@@ -573,7 +573,7 @@ func streamRequest(t *testing.T, srv *Server, target string, header http.Header,
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 	}()
 
 	drive(cancel)
@@ -597,7 +597,7 @@ func TestEventStreamSetsStreamingHeaders(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 	}()
 
 	// Wait until the handler has subscribed, which is after the headers are set.
@@ -883,7 +883,7 @@ func TestEventStreamEndsWhenTheEngineStops(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)

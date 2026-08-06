@@ -121,14 +121,17 @@ describe("api client", () => {
 
   // The API is unauthenticated; attaching cookies to a dev proxy would be a
   // silent way to start sending credentials.
-  it("does not send credentials", async () => {
+  // The session cookie must travel with every request, and only to this
+  // origin. "include" would attach it to a cross-origin dev proxy; "omit"
+  // would mean nothing could ever be authenticated.
+  it("sends the session cookie to this origin only", async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse(healthyReport));
 
     await getHealth();
 
     expect(fetch).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ credentials: "omit" }),
+      expect.objectContaining({ credentials: "same-origin" }),
     );
   });
 

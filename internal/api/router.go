@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/config"
@@ -67,6 +68,29 @@ type Server struct {
 	// this API that change something that is RUNNING. Nil in a deployment that
 	// has not opted in, which yields a 503 rather than a broken route.
 	executions ExecutionService
+
+	// auth resolves sessions and answers the authentication endpoints. A nil
+	// auth serves the public routes and refuses everything else with 503 --
+	// fail closed, because a misconfiguration must never silently restore
+	// anonymous access to a Docker mutation.
+	auth AuthService
+	// users answers the account administration endpoints, and audit records and
+	// serves the security log. Both nil in a server built without them.
+	users UserService
+	audit AuditService
+	// authCfg carries the cookie and session settings.
+	authCfg config.Auth
+	// proxies is the parsed TRUSTED_PROXIES allowlist. Empty by default, which
+	// means forwarding headers are ignored entirely.
+	proxies *trustedProxies
+	// claimed caches "this installation has an administrator".
+	//
+	// One-way: it only ever flips false to true. The value changes exactly once
+	// in an installation's life, so a database round trip per request to
+	// re-learn it would be waste -- and because the cache cannot flip back, a
+	// stale read can delay noticing the bootstrap but can never re-open it.
+	claimed atomic.Bool
+
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -190,6 +214,20 @@ type Options struct {
 	// before touching Docker.
 	Executions ExecutionService
 
+	// Auth resolves sessions and answers the authentication endpoints.
+	//
+	// A server built WITHOUT it serves the four public routes and refuses
+	// everything else with 503. That is the fail-closed behaviour and it is
+	// worth being explicit about: there is no configuration, and no partial
+	// wiring, that restores anonymous access to an authenticated endpoint.
+	Auth AuthService
+	// Users answers account administration, and Audit records and serves the
+	// security log.
+	Users UserService
+	Audit AuditService
+	// AuthConfig supplies the cookie, session, and trusted-proxy settings.
+	AuthConfig config.Auth
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -243,6 +281,12 @@ func NewServer(opts Options) *Server {
 		acquisitions: opts.Acquisitions,
 		executions:   opts.Executions,
 
+		auth:    opts.Auth,
+		users:   opts.Users,
+		audit:   opts.Audit,
+		authCfg: opts.AuthConfig,
+		proxies: newTrustedProxies(opts.AuthConfig.TrustedProxies),
+
 		now: now,
 
 		logger:      logger,
@@ -271,240 +315,56 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
+// routes builds the HTTP handler from the route table.
+//
+// # Every registration goes through guard
+//
+// There is no path through this function that registers a bare handler. The
+// mux only ever receives a handler that has already been wrapped with its
+// access policy, which is what makes "no route without a policy" a property of
+// the code rather than a convention.
+//
+// # The middleware chain is unchanged
+//
+// Authentication is per-route rather than a link in this chain, deliberately:
+// a chain link would have to re-derive which route a request is going to hit,
+// and two matchers that can disagree is how an endpoint ends up unprotected.
+// See internal/api/auth_middleware.go.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// The API is read-only, so every endpoint is registered twice: the
-	// method-qualified pattern serves GET, and the bare path -- more specific
-	// than the "/api/" catch-all below -- turns every write attempt into an
-	// explicit 405 rather than a misleading 404.
-	for path, handler := range map[string]http.HandlerFunc{
-		APIPrefix + "/health":    s.handleHealth,
-		APIPrefix + "/version":   s.handleVersion,
-		APIPrefix + "/inventory": s.handleInventory,
-		// Filter vocabularies live under /inventory rather than
-		// /containers/filters: a literal path segment there would outrank
-		// "/containers/{id}" for non-GET methods, which ServeMux rejects as
-		// ambiguous. It is inventory metadata either way.
-		APIPrefix + "/inventory/filters":   s.handleContainerFilters,
-		APIPrefix + "/containers":          s.handleContainers,
-		APIPrefix + "/containers/{id}":     s.handleContainerDetail,
-		APIPrefix + "/containers/{id}/raw": s.handleContainerRaw,
-		APIPrefix + "/images":              s.handleImages,
-		APIPrefix + "/images/{id}":         s.handleImageDetail,
-		APIPrefix + "/images/{id}/history": s.handleImageHistory,
-		APIPrefix + "/networks":            s.handleNetworks,
-		APIPrefix + "/volumes":             s.handleVolumes,
-		// Event history. The engine's status lives at /event-engine rather
-		// than /events/engine for the same ServeMux reason as
-		// /inventory/filters above: a literal "engine" segment registered for
-		// all methods would neither contain nor be contained by
-		// "GET /events/{id}", which ServeMux rejects as an ambiguous pair.
-		APIPrefix + "/events":        s.handleEvents,
-		APIPrefix + "/events/{id}":   s.handleEventDetail,
-		APIPrefix + "/event-engine":  s.handleEventEngine,
-		APIPrefix + "/event-filters": s.handleEventFilters,
-		// Configuration snapshots. Read-only, like everything above: the
-		// capture endpoint is registered separately below because it is a POST.
-		//
-		// There is deliberately NO restore, rollback, or apply route. Phase 3
-		// records configuration and validates whether it could be restored; it
-		// does not restore, and nothing in this router could.
-		APIPrefix + "/snapshots/{id}":                   s.handleSnapshotDetail,
-		APIPrefix + "/snapshots/{id}/diff":              s.handleSnapshotDiff,
-		APIPrefix + "/snapshots/{id}/restore-readiness": s.handleSnapshotReadiness,
-	} {
-		mux.HandleFunc("GET "+path, handler)
-		mux.HandleFunc(path, s.handleMethodNotAllowed("GET, HEAD"))
+	for _, entry := range s.routeTable() {
+		handler := entry.handler
+		if entry.method == "" {
+			// The bare pattern. It answers 405 for a path that exists but does
+			// not serve this method, which is more useful than the 404 the
+			// "/api/" catch-all would otherwise give -- and it carries the
+			// path's read policy, so an unauthenticated caller still gets 401
+			// and learns nothing about which paths exist.
+			access := entry.access
+			access.methodNotAllowed = true
+			mux.HandleFunc(entry.pattern, s.guard(access,
+				s.handleMethodNotAllowed(entry.allowed)))
+			continue
+		}
+		mux.HandleFunc(entry.method+" "+entry.pattern, s.guard(entry.access, handler))
 	}
 
-	// The SSE stream is registered for GET ONLY, with no bare companion.
-	//
-	// A bare "/events/stream" would match every method on that one path, while
-	// "GET /events/{id}" matches GET on every path -- neither contains the
-	// other, so ServeMux would panic on the conflicting pair at startup. GET
-	// alone is a strict subset of both patterns above, so it resolves cleanly,
-	// and a POST to /events/stream still gets an honest 405 from the bare
-	// "/events/{id}" handler rather than a 404.
-	mux.HandleFunc("GET "+APIPrefix+"/events/stream", s.handleEventStream)
-
-	// The only two non-GET endpoints in the whole router. Neither changes a
-	// container: refresh re-reads the host and replaces what HarborMaster has
-	// recorded, and capture writes a snapshot to HarborMaster's own database.
-	//
-	// Both go through guardWrite: strict validation, rate limiting, and the
-	// Fetch Metadata checks. See write_guard.go for why the last of those is
-	// defence in depth rather than the primary control.
-	mux.HandleFunc("POST "+APIPrefix+"/inventory/refresh", s.handleInventoryRefresh)
-	mux.HandleFunc(APIPrefix+"/inventory/refresh", s.handleMethodNotAllowed("POST"))
-
-	// /snapshots serves GET for the list and POST for capture, so the bare
-	// pattern registers a 405 for everything else.
-	mux.HandleFunc("GET "+APIPrefix+"/snapshots", s.handleSnapshots)
-	mux.HandleFunc("POST "+APIPrefix+"/snapshots", s.handleSnapshotCreate)
-	mux.HandleFunc(APIPrefix+"/snapshots", s.handleMethodNotAllowed("GET, HEAD, POST"))
-
-	// Configuration drift.
-	//
-	// Four reads and one write. The write moves a record's STATUS on
-	// HarborMaster's own row; there is no route here that reaches Docker, and
-	// deliberately no evaluate, delete, or remediate endpoint. Drift is
-	// evaluated by the background engine on its own schedule, so an
-	// unauthenticated caller cannot drive that work on demand.
-	mux.HandleFunc("GET "+APIPrefix+"/drift", s.handleDrift)
-	mux.HandleFunc(APIPrefix+"/drift", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// GET ONLY, with no bare companion, for the same ServeMux reason as
-	// /events/stream above: a bare "/drift/summary" would match every method
-	// on that literal while "GET /drift/{id}" matches GET on every segment --
-	// neither contains the other, so registering both would panic at startup.
-	// A non-GET request to /drift/summary still gets an honest 405 from the
-	// bare "/drift/{id}" handler below.
-	mux.HandleFunc("GET "+APIPrefix+"/drift/summary", s.handleDriftSummary)
-
-	// Three segments, so this never overlaps the two-segment /drift/{id}.
-	mux.HandleFunc("GET "+APIPrefix+"/drift/container/{id}", s.handleDriftByContainer)
-	mux.HandleFunc(APIPrefix+"/drift/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/drift/{id}", s.handleDriftDetail)
-	mux.HandleFunc("PATCH "+APIPrefix+"/drift/{id}", s.handleDriftPatch)
-	mux.HandleFunc(APIPrefix+"/drift/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH"))
-
-	// The policy engine.
-	//
-	// The first routes in HarborMaster that create, update and withdraw a
-	// record on request. Every one of them acts on HARBORMASTER'S OWN ROWS: a
-	// policy is a rule that configuration is CHECKED AGAINST, never one that is
-	// applied to Docker. There is no enforce, no remediate, and no apply route,
-	// and nothing here can reach the daemon.
-	mux.HandleFunc("GET "+APIPrefix+"/policies", s.handlePolicies)
-	mux.HandleFunc("POST "+APIPrefix+"/policies", s.handlePolicyCreate)
-	mux.HandleFunc(APIPrefix+"/policies", s.handleMethodNotAllowed("GET, HEAD, POST"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/policies/{id}", s.handlePolicyDetail)
-	mux.HandleFunc("PATCH "+APIPrefix+"/policies/{id}", s.handlePolicyUpdate)
-	// DELETE ARCHIVES. A violation references its policy and the history must
-	// survive the rule being withdrawn, so the row is retained and its open
-	// violations resolve. See policy_handlers.go.
-	mux.HandleFunc("DELETE "+APIPrefix+"/policies/{id}", s.handlePolicyDelete)
-	mux.HandleFunc(APIPrefix+"/policies/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH, DELETE"))
-
-	// The rule catalogue, so the policy editor is built from the same source of
-	// truth the validator uses.
-	mux.HandleFunc("GET "+APIPrefix+"/policy-rules", s.handlePolicyRules)
-	mux.HandleFunc(APIPrefix+"/policy-rules", s.handleMethodNotAllowed("GET, HEAD"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/policy-summary", s.handlePolicySummary)
-	mux.HandleFunc(APIPrefix+"/policy-summary", s.handleMethodNotAllowed("GET, HEAD"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/policy-violations", s.handlePolicyViolations)
-	mux.HandleFunc(APIPrefix+"/policy-violations", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// Three segments, so this never overlaps the two-segment
-	// /policy-violations/{id} below.
-	mux.HandleFunc("GET "+APIPrefix+"/policy-violations/container/{id}", s.handlePolicyByContainer)
-	mux.HandleFunc(APIPrefix+"/policy-violations/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/policy-violations/{id}", s.handlePolicyViolationDetail)
-	mux.HandleFunc("PATCH "+APIPrefix+"/policy-violations/{id}", s.handlePolicyViolationPatch)
-	mux.HandleFunc(APIPrefix+"/policy-violations/{id}", s.handleMethodNotAllowed("GET, HEAD, PATCH"))
-
-	// The manual pass. ASYNCHRONOUS: it schedules work through the same
-	// coalescing queue the scheduled passes use, so calling it in a loop
-	// produces one pass rather than a backlog, and no caller can hold a
-	// request open across a thousand-container sweep.
-	mux.HandleFunc("POST "+APIPrefix+"/policy/evaluate", s.handlePolicyEvaluate)
-	mux.HandleFunc(APIPrefix+"/policy/evaluate", s.handleMethodNotAllowed("POST"))
-
-	// Image intelligence.
-	//
-	// Three reads and one write, and the write SCHEDULES a metadata collection
-	// pass -- it pulls nothing, changes no container, and takes no target of any
-	// kind. There is deliberately no endpoint that applies an update, and no
-	// parameter anywhere in this feature that becomes a network destination.
-	//
-	// GET ONLY, with no bare companion, for the same ServeMux reason as
-	// /events/stream: a bare "/images/updates" would match every method on that
-	// literal while "GET /images/{id}" matches GET on every segment -- neither
-	// contains the other, so registering both would panic at startup. A non-GET
-	// request to /images/updates still gets an honest 405 from the bare
-	// "/images/{id}" handler registered above.
-	mux.HandleFunc("GET "+APIPrefix+"/images/updates", s.handleImageUpdates)
-
-	// POST /images/refresh is strictly more specific than the bare
-	// "/images/{id}" pattern, so this pair resolves without ambiguity.
-	mux.HandleFunc("POST "+APIPrefix+"/images/refresh", s.handleImageRefresh)
-
-	// Change planning.
-	//
-	// Three reads and one write, and the write generates HarborMaster's own
-	// ANALYSIS of its own database. It pulls nothing, changes no container, and
-	// schedules no change; there is deliberately no route that applies a plan,
-	// and no PATCH or DELETE, because a plan is immutable evidence of what was
-	// known at one moment.
-	mux.HandleFunc("GET "+APIPrefix+"/plans", s.handlePlans)
-	mux.HandleFunc(APIPrefix+"/plans", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// Three segments, so this never overlaps the two-segment /plans/{id}.
-	mux.HandleFunc("GET "+APIPrefix+"/plans/container/{id}", s.handlePlansByContainer)
-	mux.HandleFunc(APIPrefix+"/plans/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// POST /plans/generate is strictly more specific than the bare
-	// "/plans/{id}" pattern below, so this pair resolves without ambiguity.
-	mux.HandleFunc("POST "+APIPrefix+"/plans/generate", s.handlePlanGenerate)
-
-	mux.HandleFunc("GET "+APIPrefix+"/plans/{id}", s.handlePlanDetail)
-	mux.HandleFunc(APIPrefix+"/plans/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// Image acquisition. THE ONLY ENDPOINTS IN THIS API THAT CHANGE THE DOCKER
-	// HOST, and the change is one thing: downloading an approved, digest-pinned
-	// image into the local store.
-	//
-	// No container is touched by any of them. There is deliberately no route
-	// that applies an image, recreates a container, restores one, or removes an
-	// image -- and no capability behind one, so adding a route would not be
-	// enough to build one.
-	mux.HandleFunc("GET "+APIPrefix+"/acquisitions", s.handleAcquisitions)
-	mux.HandleFunc("POST "+APIPrefix+"/acquisitions", s.handleAcquisitionCreate)
-	mux.HandleFunc(APIPrefix+"/acquisitions", s.handleMethodNotAllowed("GET, HEAD, POST"))
-
-	// Three segments, so this never overlaps the two-segment
-	// "/acquisitions/{id}" pattern below.
-	mux.HandleFunc("POST "+APIPrefix+"/acquisitions/{id}/cancel", s.handleAcquisitionCancel)
-	mux.HandleFunc(APIPrefix+"/acquisitions/{id}/cancel", s.handleMethodNotAllowed("POST"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/acquisitions/{id}", s.handleAcquisitionDetail)
-	mux.HandleFunc(APIPrefix+"/acquisitions/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// Container recreation. THE ONLY ENDPOINTS IN THIS API THAT CHANGE
-	// SOMETHING RUNNING.
-	//
-	// POST /executions stops one container and replaces it with one built from
-	// its own configuration and an image that is already on this host and was
-	// already verified. The request body carries an ACQUISITION ID and an
-	// optional idempotency key -- no container, no image, no digest, no Docker
-	// parameter of any kind.
-	//
-	// There is deliberately no rollback route, no restore route, no route that
-	// recreates more than one container, and no route that removes an image or
-	// a volume -- and no capability behind any of them, so adding a route would
-	// not be enough to build one.
-	mux.HandleFunc("GET "+APIPrefix+"/executions", s.handleExecutions)
-	mux.HandleFunc("POST "+APIPrefix+"/executions", s.handleExecutionCreate)
-	mux.HandleFunc(APIPrefix+"/executions", s.handleMethodNotAllowed("GET, HEAD, POST"))
-
-	// Three segments, so this never overlaps the two-segment "/executions/{id}"
-	// pattern below.
-	mux.HandleFunc("POST "+APIPrefix+"/executions/{id}/cancel", s.handleExecutionCancel)
-	mux.HandleFunc(APIPrefix+"/executions/{id}/cancel", s.handleMethodNotAllowed("POST"))
-
-	mux.HandleFunc("GET "+APIPrefix+"/executions/{id}", s.handleExecutionDetail)
-	mux.HandleFunc(APIPrefix+"/executions/{id}", s.handleMethodNotAllowed("GET, HEAD"))
-
-	// Any other /api/ path is a JSON 404, never the SPA shell.
+	// Any other /api/ path is a JSON 404, never the SPA shell. Public because
+	// "this path does not exist" discloses nothing, and because answering 401
+	// here would tell a scanner that everything it tried was real.
 	mux.HandleFunc("/api/", s.handleAPINotFound)
 
 	// Everything else is the frontend.
+	//
+	// # Why the SPA bundle is served without a session
+	//
+	// It contains no data. It is a static JavaScript bundle whose first act is
+	// to call GET /auth/session, which is authenticated -- so an unauthenticated
+	// visitor gets the login page and nothing else. Requiring a session to
+	// fetch the bundle would mean there was no page to log in FROM.
+	//
+	// Every byte of estate data comes from the API, and the API is protected.
 	mux.Handle("/", newStaticHandler(s.assets, s.logger))
 
 	maxBody := s.cfg.MaxRequestBytes

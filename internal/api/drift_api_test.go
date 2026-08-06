@@ -124,7 +124,7 @@ func driftRecordFixture(id int64, field string, severity domain.DriftSeverity) d
 
 func newDriftServer(t *testing.T, drift *fakeDrift) *Server {
 	t.Helper()
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health:      &fakeHealth{},
 		Drift:       drift,
 		DriftConfig: config.Drift{Enabled: true, MaxNoteBytes: 500},
@@ -145,7 +145,7 @@ func patch(t *testing.T, srv *Server, target, body string) *httptest.ResponseRec
 	req := httptest.NewRequest(http.MethodPatch, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	return rec
 }
 
@@ -495,7 +495,7 @@ func TestPatchRequiresJSONContentType(t *testing.T) {
 			req.Header.Set("Content-Type", contentType)
 		}
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Errorf("Content-Type %q returned %d, want 415", contentType, rec.Code)
@@ -541,7 +541,7 @@ func TestPatchRejectsACrossSiteRequest(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
@@ -602,7 +602,7 @@ func TestPatchOnAMissingRecordIs404(t *testing.T) {
 // ------------------------------------------------------------- disabled --
 
 func TestDriftEndpointsReportDisabled(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Logger: discardLogger(),
 		Config: config.Server{MaxRequestBytes: 4096},

@@ -84,6 +84,9 @@ func dispatch(args []string) int {
 	case "backup":
 		return backupCommand(os.Stdout, args[1:])
 
+	case "admin":
+		return adminCommand(os.Stdout, args[1:])
+
 	case "version":
 		build := version.Get()
 		fmt.Printf("harbormaster %s (commit %s, built %s, %s, %s)\n",
@@ -168,13 +171,16 @@ Usage:
   harbormaster healthcheck  Probe the local health endpoint; exit 0 when healthy or degraded
   harbormaster diagnose     Inspect the database and report reliability findings
   harbormaster backup PATH  Write a consistent, verified copy of the database to PATH
+  harbormaster admin ...    Claim the installation or recover an account (see admin help)
   harbormaster version      Print build metadata
   harbormaster help         Show this message
 
 diagnose opens the database read-only and contacts no Docker daemon. backup
 uses SQLite's VACUUM INTO, so it is consistent while the server is running, and
-it verifies the copy before reporting success. Neither is reachable over HTTP:
-both report host detail that an unauthenticated API must not disclose.
+it verifies the copy before reporting success. admin writes directly to the
+database and takes filesystem access as its authority. None of the three is
+reachable over HTTP: they report host detail, or perform recovery, that an API
+must never expose.
 
 Configuration is read from the environment. See .env.example for the full list.
 `)
@@ -505,6 +511,58 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Identity, authorization, and the security audit log.
+	//
+	// # Always on
+	//
+	// There is no setting that disables authentication. HarborMaster fronts a
+	// root-equivalent socket and can now replace a running container; an
+	// "auth off for convenience" switch is a switch that ends up on in
+	// production. The only unauthenticated routes are the four listed in the
+	// API's route table.
+	//
+	// # The key is the installation's, not a second one
+	//
+	// Session tokens and the bootstrap token are stored as keyed digests under
+	// the SAME installation key the snapshots use, with the purpose strings in
+	// internal/service providing the domain separation. A second key file would
+	// be a second thing to back up, a second thing to lose, and a second way for
+	// a restore to half-work.
+	//
+	// The consequence is worth stating plainly: replacing the key logs everyone
+	// out. That is the correct behaviour -- a session digest computed under a
+	// key that no longer exists cannot be verified, and honouring it anyway
+	// would mean not verifying it.
+	hasherArgon, err := service.NewPasswordHasher(service.ArgonParamsFrom(cfg.Auth))
+	if err != nil {
+		return fmt.Errorf("password hashing parameters: %w", err)
+	}
+	logger.Info("password hashing configured",
+		slog.Int("memoryKiB", cfg.Auth.ArgonMemoryKiB),
+		slog.Int("iterations", cfg.Auth.ArgonIterations),
+		slog.Int("parallelism", cfg.Auth.ArgonParallelism))
+
+	auditRecorder := service.NewAuditRecorder(db.Audit, cfg.Auth, logger, nil)
+
+	auth := service.NewAuthService(service.AuthOptions{
+		Store:  service.NewAuthStore(db.Users, db.Sessions, db.Audit),
+		Audit:  auditRecorder,
+		Key:    snapshotKey,
+		Hasher: hasherArgon,
+		Config: cfg.Auth,
+		Logger: logger,
+	})
+
+	users := service.NewUserService(
+		service.NewUserAdminStore(db.Users, db.Sessions),
+		auditRecorder, hasherArgon, logger, nil)
+
+	// An unclaimed installation prints a one-time token, and every restart
+	// invalidates the previous one. Claiming therefore requires the ability to
+	// read this process's log or its data directory, rather than merely being
+	// the first to reach the port.
+	announceBootstrap(ctx, logger, auth)
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -546,7 +604,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(9)
+	background.Add(11)
 
 	go func() {
 		defer background.Done()
@@ -583,6 +641,14 @@ func run() error {
 	go func() {
 		defer background.Done()
 		executions.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		auth.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		auditRecorder.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -623,6 +689,11 @@ func run() error {
 		Acquisitions: acquisitions,
 		Executions:   executions,
 
+		Auth:       auth,
+		Users:      users,
+		Audit:      auditRecorder,
+		AuthConfig: cfg.Auth,
+
 		Logger:         logger,
 		Config:         cfg.Server,
 		SnapshotConfig: cfg.Snapshots,
@@ -636,6 +707,70 @@ func run() error {
 	})
 
 	return serve(ctx, logger, db, server.HTTPServer(), cfg.Server.ShutdownTimeout)
+}
+
+// announceBootstrap mints and prints the one-time claim token when this
+// installation has no administrator yet.
+//
+// # Why the token is printed rather than defaulted
+//
+// The alternative is a built-in default account, which is how appliances end up
+// on the internet with admin/admin. There is no default account here: until
+// somebody claims the installation, HarborMaster holds no credentials at all
+// and every route except the four public ones answers 401.
+//
+// # Why it goes to the log
+//
+// The log is the one channel an operator already has for every deployment shape
+// -- `docker logs`, a systemd journal, a compose console. Writing it to a file
+// would require a writable path that may not exist; printing it to stdout only
+// would lose it under a log collector.
+//
+// It is INFO, not WARN. An unclaimed installation is the expected state of a
+// first start, and a warning that fires on every correct first run teaches
+// operators to ignore warnings.
+//
+// A failure here is not fatal. The CLI (`harbormaster admin bootstrap`) can
+// claim the installation from the host filesystem without a token, so a server
+// that could not mint one is inconvenient rather than unusable.
+func announceBootstrap(ctx context.Context, logger *slog.Logger, auth *service.AuthService) {
+	status, err := auth.BootstrapStatus(ctx)
+	if err != nil {
+		logger.Error("could not determine whether this installation has been claimed",
+			slog.String("error", err.Error()))
+		return
+	}
+	if status.Completed {
+		return
+	}
+
+	token, expiresAt, err := auth.IssueBootstrapToken(ctx)
+	if err != nil {
+		if errors.Is(err, service.ErrBootstrapClosed) {
+			return
+		}
+		logger.Error("could not issue a bootstrap token; claim this installation with `harbormaster admin bootstrap`",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	// The token is a credential, and this is the only place it is ever
+	// disclosed: the database holds a keyed digest, and no API response
+	// contains it. It is printed as its own block rather than as a structured
+	// field so a JSON log line cannot bury it in a collector's detail pane.
+	logger.Info("this installation has not been claimed; a one-time bootstrap token was issued",
+		slog.Time("expiresAt", expiresAt),
+		slog.String("nextStep", "open the web interface and create the first administrator"))
+	fmt.Printf("\n"+
+		"  ==========================================================\n"+
+		"   HarborMaster bootstrap token (valid until %s)\n"+
+		"\n"+
+		"     %s\n"+
+		"\n"+
+		"   Use it once to create the first administrator. Restarting\n"+
+		"   HarborMaster issues a new token and invalidates this one.\n"+
+		"  ==========================================================\n\n",
+		expiresAt.Format(time.RFC3339), token)
 }
 
 // openStore opens the database with the configured reliability settings and

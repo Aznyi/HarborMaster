@@ -85,6 +85,17 @@ the other way is a leaked credential, and only one of those is recoverable.
 `invalidParam("trigger", "a known snapshot trigger")` — not the offending value.
 An error message is not a place to reflect attacker-controlled input.
 
+**2.6 A password, a session token, and a CSRF token are secrets under every
+rule above.** No column, no struct field, no log attribute, no audit reason, and
+no API response may hold one. Passwords are verified and discarded; session
+tokens are stored as keyed digests; the CSRF token is derived and stored nowhere
+at all.
+
+**2.7 Never write custom cryptography.** Argon2id comes from
+`golang.org/x/crypto`; HMAC-SHA256 from the standard library. Compare every
+secret with `subtle.ConstantTimeCompare`: a byte-by-byte comparison tells an
+attacker how far they got, which recovers the value one character at a time.
+
 ---
 
 ## 3. SQL
@@ -138,6 +149,80 @@ test that they do.
 wrapped internal errors, no filesystem paths.
 
 **4.8 Never echo a client-supplied request ID.**
+
+---
+
+## 4a. Authentication and authorization
+
+**4a.1 Every route declares an access policy, and the zero value is invalid.**
+`public()`, `bootstrapOnly()`, `authenticated()`, `duringPasswordChange()`, or
+`requires(permission)`. A route registered without one is refused at runtime and
+fails `TestEveryRouteDeclaresAnAccessPolicy`. Do not add a code path that
+registers a bare handler.
+
+**4a.2 Adding a public route is a two-line change, and the second line is a
+test.** `TestThePublicSurfaceIsExactlyTheDocumentedRoutes` pins the
+unauthenticated surface. If you are editing it, say why in the route table too.
+
+**4a.3 Never check a role in a handler.** Authorization is decided once, by the
+middleware, from the route table. A handler receives an already-authorized
+request; the identity it can read is for AUDIT ATTRIBUTION.
+`TestNoHandlerChecksARoleDirectly` fails the build on a role constant in a
+handler file.
+
+**4a.4 Use typed permission constants.** `domain.PermExecutionCreate`, never the
+string. A typo in a string is a permission nobody holds, which fails open in the
+worst possible way — the check simply never matches.
+
+**4a.5 An unrecognised role holds nothing.** Never default an unknown role to
+the least privileged one: a corrupt row must not become a silent grant.
+
+**4a.6 Every credential failure looks the same, and takes the same time.** One
+error, one status, one message, for an unknown username, a wrong password, and a
+disabled account. Hash against the decoy on the paths that have nothing to hash,
+or the endpoint becomes an account directory.
+
+**4a.7 Back off; do not lock out.** A hard lockout lets anyone who knows a
+username deny that account service.
+
+**4a.8 Bound anything that reaches a hash.** Password length before hashing, and
+Argon2id parameters both at construction and per stored credential — they drive
+an allocation, and a corrupt row must not be able to request a gigabyte.
+
+**4a.9 Every state-changing route requires the CSRF header.** The only
+exemptions are routes with no session to derive a token from, and there are
+exactly two.
+
+**4a.10 Never trust a forwarding header.** `X-Forwarded-For` and `Forwarded` are
+ignored unless a trusted-proxy CIDR is configured and the peer is inside it.
+Walk the chain right to left and stop at the first untrusted hop.
+
+**4a.11 Hiding a control is not authorization.** A UI may omit a button the role
+cannot use. The server refuses regardless, and the test that proves it lives on
+the server.
+
+---
+
+## 4b. Audit
+
+**4b.1 Every state-changing route records who did it.** Call
+`s.auditWrite(...)` at the write's success point, or list the route in
+`auditedElsewhere` with the service method that records it.
+`TestEveryWriteRouteIsAudited` fails the build otherwise.
+
+**4b.2 An audit record is the SHAPE of an action, never its content.** No
+request body, no header, no cookie, no environment value, no credential. If you
+are adding a field, ask what an attacker would put in it.
+
+**4b.3 Record a closed vocabulary, not request-derived text.** An authorization
+denial records the permission that was refused, never the path.
+
+**4b.4 An audit write must never fail an action.** If it could, filling the disk
+would become a way to disable HarborMaster. Log at ERROR and proceed.
+
+**4b.5 Bound every audit field at one choke point.** `prepareAuditEvent` is that
+point. Do not bound at the call site; there are thirty of them and they will
+drift.
 
 ---
 
@@ -295,6 +380,9 @@ has the defect the test was written to catch, and only a time assertion sees it.
 - [ ] Every SQL value bound; every identifier from an allowlist
 - [ ] Every new input validated and bounded
 - [ ] No secret in a response, a log, or the database
+- [ ] Every new route declares an access policy, and a public one says why
+- [ ] Every new state-changing route calls `auditWrite` or is listed as audited
+- [ ] No role compared in a handler; permissions are typed constants
 - [ ] Errors sanitised
 - [ ] Negative tests for each new control
 - [ ] `gofmt`, `go vet`, `go test -race`, `golangci-lint`, `govulncheck` clean

@@ -30,11 +30,17 @@ by the time HarborMaster can change a container it can already undo it.
 > updates, no rollback, no restore, no image deletion or pruning, and no
 > command-execution path of any kind. See [Status](#status) for what is and is
 > not here yet.
+>
+> **Every route requires a session**, and which routes an account can reach
+> depends on its role. There is no setting that turns that off. A fresh
+> installation has no accounts and no default password: it prints a one-time
+> token at startup and you claim it. See [Accounts and access](#accounts-and-access).
 
 ## Contents
 
 - [Quick start](#quick-start)
 - [Deploying on Linux](#deploying-on-linux)
+- [Accounts and access](#accounts-and-access)
 - [Container image](#container-image)
 - [Inventory](#inventory)
 - [Docker events](#docker-events)
@@ -115,10 +121,14 @@ make web-dev  # terminal 2: Vite on 127.0.0.1:5173
 > only calls the Engine's ping endpoint. The `:ro` flag is defence in depth,
 > not a boundary.
 >
-> **HarborMaster has no authentication yet. Do not expose it to the public
-> internet.** Publish it to `127.0.0.1` and reach it over SSH or a VPN, or put
-> an authenticating reverse proxy in front of it. Every command below binds to
-> loopback for exactly this reason.
+> **HarborMaster authenticates every route, but it does not terminate TLS.**
+> Publish it to `127.0.0.1` and reach it over SSH or a VPN, or put a
+> TLS-terminating reverse proxy in front of it — a session cookie is only as
+> safe as the transport carrying it, and the `__Host-` cookie prefix engages
+> only over HTTPS. Every command below binds to loopback for exactly this
+> reason. When you do put a proxy in front, set `HARBORMASTER_COOKIE_SECURE=true`
+> and `HARBORMASTER_TRUSTED_PROXIES`; see
+> [Accounts and access](#accounts-and-access).
 
 ### 1. Find the Docker socket's group ID
 
@@ -178,7 +188,7 @@ What each hardening flag buys you:
 | `--tmpfs /tmp:...,size=16m` | The one writable scratch area, capped, `noexec` and `nosuid` so nothing placed there can run. |
 | `--cap-drop ALL` | Removes every Linux capability. HarborMaster needs none. |
 | `--security-opt no-new-privileges:true` | Blocks privilege escalation through setuid binaries. |
-| `-p 127.0.0.1:8080:8080` | Publishes 8080 on loopback only. `-p 8080:8080` would publish on **every** interface — do not use it without authentication in front. |
+| `-p 127.0.0.1:8080:8080` | Publishes 8080 on loopback only. `-p 8080:8080` would publish on **every** interface — do not use it without TLS in front. |
 | `-v harbormaster-data:/var/lib/harbormaster` | Keeps the SQLite database outside the container, so upgrades preserve history. |
 
 ### 4. Operate it
@@ -260,6 +270,186 @@ signed provenance attestation you can verify:
 ```sh
 gh attestation verify oci://ghcr.io/aznyi/harbormaster:latest -R Aznyi/HarborMaster
 ```
+
+## Accounts and access
+
+Every route in HarborMaster requires a session except four, and there is no
+setting that turns that off. HarborMaster fronts a root-equivalent Docker socket
+and can replace a running container; an "auth off for convenience" switch is a
+switch that ends up on in production.
+
+### The first sign-in
+
+A fresh installation has no accounts and no default password. It prints a
+one-time bootstrap token at startup:
+
+```
+  ==========================================================
+   HarborMaster bootstrap token (valid until 2026-08-06T13:04:11Z)
+
+     kUu3v8Qm1sFo2Zt9dWl4rXcB
+
+   Use it once to create the first administrator. Restarting
+   HarborMaster issues a new token and invalidates this one.
+  ==========================================================
+```
+
+Open the web interface, paste the token, and choose a username and password.
+That is the whole of it.
+
+**Why a token rather than a default account.** Without one, claiming a brand-new
+installation is a race won by whoever reaches the port first, which on an
+exposed port is not you. The token moves the requirement from "be first" to "can
+read the server's log", which is the same bar the rest of the deployment already
+assumes. A default account, meanwhile, is how appliances end up on the internet
+with `admin`/`admin`.
+
+Lost the token? Restart HarborMaster — a new one is printed and the old one
+stops working. Or claim it from the host, where no token is needed because
+filesystem access to the database is a stronger proof:
+
+```sh
+docker exec -it harbormaster /harbormaster admin bootstrap --username admin
+```
+
+Once an administrator exists, the bootstrap endpoint answers `404`. For that
+installation it genuinely no longer exists.
+
+### Roles
+
+Three, and each holds a fixed set of permissions.
+
+| Role | Can | Cannot |
+| --- | --- | --- |
+| **viewer** | Read everything: inventory, events, snapshots, drift, compliance, plans, acquisitions, recreations | Change anything at all |
+| **operator** | Everything a viewer can, plus: refresh the inventory, capture snapshots, annotate drift and violations, request a compliance pass, refresh registry metadata, generate plans, **acquire images**, and **recreate containers** | Edit or withdraw a policy; manage accounts; read the security audit log |
+| **administrator** | Everything | — |
+
+**Policy administration is deliberately not an operator permission.** A policy
+is what blocks an acquisition or a recreation, so an operator able to edit one
+could remove the gate standing in their way.
+
+`GET /api/v1/roles` returns the catalogue with each role's exact permission
+list, and the web interface builds its role picker from it — so the picker and
+the authorization middleware read the same source of truth.
+
+### What a session is
+
+An opaque token in an `HttpOnly`, `SameSite` cookie. It appears in no response
+body, no URL, and no log line, and no script on the page can read it. The
+database stores only a keyed digest, so a copy of the database yields the
+ability to verify a token somebody already holds and nothing else.
+
+Sessions end on sign-out, on a password change, on a role change, on
+disablement, when they go idle, at a hard ceiling regardless of use, and when
+the per-account cap supersedes the oldest. The account behind a session is
+re-read on **every** request, which is what makes a demotion or a disablement
+take effect immediately rather than at the next sign-in.
+
+Every state-changing request additionally carries a CSRF token in the
+`X-HarborMaster-CSRF` header. It is derived from the session token rather than
+stored, so it rotates with the session and there is nothing at rest to steal.
+
+### Passwords
+
+Argon2id, at the OWASP baseline of 64 MiB, 3 iterations, 4 lanes — tunable, and
+stored alongside each hash so raising the cost re-hashes people as they sign in
+rather than invalidating every password at once.
+
+The policy is length and a refusal list, not a character-class mixture:
+twelve characters minimum, not one of the commonly-chosen values, not containing
+the username, and not a single repeated character or a simple run. Composition
+rules push people toward `Password1!`, which is predictable and no stronger than
+a longer passphrase.
+
+**Every sign-in failure looks and takes the same.** An unknown username, a wrong
+password, and a disabled account all answer `401` with the same message, and the
+timing matches because an unknown username is verified against a decoy
+credential. Repeated failures apply an exponential backoff to a bounded ceiling,
+not a lockout — a lockout lets anyone who knows a username deny that account
+service.
+
+### Managing accounts
+
+An administrator creates accounts under **Accounts** in the web interface.
+HarborMaster generates the password and shows it **once**; it is stored only as
+a verifier and cannot be retrieved again. The account must replace it at first
+sign-in.
+
+There is deliberately **no delete**. Disabling preserves the history an audit
+record depends on, and an account that never existed is a different fact from
+one that was turned off. Disabling ends every session on the account
+immediately.
+
+Two refusals are built in and are not configurable:
+
+- An administrator cannot change their own role or disable themselves. The one
+  legitimate case — stepping down — is better done by another administrator.
+- The last active administrator cannot be demoted or disabled. The check runs
+  inside the transaction that performs the change, so two concurrent demotions
+  cannot both succeed.
+
+### Recovering an account
+
+From the host, when nobody can sign in:
+
+```sh
+docker exec -it harbormaster /harbormaster admin reset-password --username admin
+```
+
+It prompts twice with echo off, confirms first (because it ends every session
+that account holds), reactivates a disabled account, and requires the password
+to change at next sign-in. It cannot change a role: a password reset is not a
+privilege grant.
+
+It refuses to run against a database or key file readable beyond its owner
+unless you pass `--force` — recovering an account into a directory anybody on
+the host can read is recovering it for them too.
+
+**These commands are never reachable over HTTP.** They claim an installation
+without the token and set a password without knowing the old one; both are
+correct for somebody holding the database file and catastrophic over a network.
+An architecture test fails the build if the API package so much as names the
+type they are built on.
+
+### The security audit log
+
+Under **Security audit**, for administrators. Every authentication attempt,
+every authorization denial, and every state-changing request, with the account,
+role, session, request id, and source address that caused it.
+
+A record is who, what, to what, from where, and whether it worked. **It is not a
+request log**: no body, no header, no environment value, and no credential
+appears in any record, and no column exists that could hold one. Records are
+append-only — no endpoint edits or deletes one. Security records are retained
+far longer than operational ones, because an inventory refresh from six months
+ago is noise while a failed sign-in from six months ago is the first entry in a
+story.
+
+**The source address is the transport peer**, not a header. `X-Forwarded-For`
+and `Forwarded` are ignored entirely unless you configure
+`HARBORMASTER_TRUSTED_PROXIES` and the request arrives from inside one of those
+ranges — a forwarding header is attacker-controlled text, and believing it
+unconditionally would let anyone spoof the source in the audit log.
+
+### Behind a reverse proxy
+
+Set two things:
+
+```sh
+HARBORMASTER_COOKIE_SECURE=true          # the browser's connection is HTTPS
+HARBORMASTER_TRUSTED_PROXIES=10.0.0.0/8  # only the ranges your proxy uses
+```
+
+`COOKIE_SECURE` matters when the proxy terminates TLS and forwards over plain
+HTTP: the browser's connection was HTTPS and the cookie must be marked to match.
+Setting it on a genuinely plain-HTTP deployment makes the browser discard the
+cookie and nobody can sign in — a loud failure rather than a silent weakening.
+
+Over HTTPS the cookie is also named `__Host-harbormaster_session`. That prefix
+is a browser-enforced guarantee rather than a convention: it stops a sibling
+subdomain overwriting the session cookie, which is the standard session-fixation
+route.
 
 ## Container image
 
@@ -382,8 +572,9 @@ while a leaked secret is not recoverable.
 
 **Raw values are never written to disk.** The persisted configuration holds the
 masked form. There is no API parameter, header, or endpoint that reveals a real
-value, and no UI control to unmask one — with no authentication in front of the
-service, such a switch would be an unauthenticated secret-disclosure API.
+value, and no UI control to unmask one. Such a switch would be a
+secret-disclosure API gated on nothing but a session, and a session is a much
+lower bar than the values behind it deserve.
 
 Raw values do exist in memory during a refresh, where they contribute a
 SHA-256 hash to the inventory checksum. That is what lets a rotated password
@@ -564,7 +755,7 @@ one long write lock. Pruning touches **only** the event table — it can never
 remove a current inventory record.
 
 There is deliberately **no destructive API endpoint** for pruning in this phase.
-An unauthenticated endpoint that deletes history would be exactly the wrong
+An endpoint that deletes history would be exactly the wrong
 thing to add first.
 
 ### Live updates (Server-Sent Events)
@@ -587,7 +778,7 @@ log unchanged, and the browser reconnects on its own.
 - A subscriber that stops reading has events dropped **for it alone**. It never
   blocks event processing or back-pressures the Docker stream.
 
-The endpoint is **unauthenticated**, like the rest of the API, so it carries only
+The endpoint carries only
 already-redacted event data and never a raw Docker payload.
 
 ### Redaction
@@ -714,7 +905,7 @@ The evaluation queue is coalesced per container, hard-capped, and escalates to
 a full sweep on overflow — the same discipline as the event engine's refresh
 scheduler, for the same reason. Drift also gets its **own** diff-engine
 instance, so a background sweep cannot exhaust the concurrency slots the
-unauthenticated comparison endpoint depends on.
+comparison endpoint depends on.
 
 ## Policy engine
 
@@ -749,7 +940,7 @@ path of any kind. Every rule's semantics are fixed at compile time in
 bounded parameter list, and nothing they write is ever interpreted.
 
 That shape is the point. A policy is administrator-supplied input to an
-**unauthenticated API**, and an interpreter would make that input executable.
+network-reachable API, and an interpreter would make that input executable.
 
 | Rule | What it checks |
 | --- | --- |
@@ -853,7 +1044,7 @@ thousand. Containers are processed sequentially and in pages: parallelism would
 queue at the single database writer anyway while multiplying peak memory.
 
 `POST /policy/evaluate` is **asynchronous** and answers 202. A synchronous
-evaluation of a large estate would let an unauthenticated caller hold a request
+evaluation of a large estate would let a caller hold a request
 open for minutes and occupy the single writer at will; the request is coalesced
 through the same queue the scheduled passes use, so calling it in a loop
 produces one pass rather than a backlog.
@@ -987,7 +1178,7 @@ a client that hammers a public registry gets everyone sharing its egress address
 rate-limited.
 
 `POST /images/refresh` is **asynchronous** and answers 202. A synchronous pass
-would let an unauthenticated caller hold a request open across hundreds of
+would let a caller hold a request open across hundreds of
 registry lookups and generate outbound traffic on demand; the request is
 coalesced, so calling it in a loop produces one pass rather than a backlog.
 
@@ -1072,7 +1263,7 @@ hundred is about a hundred queries rather than sixty thousand, and a test counts
 them rather than describing them.
 
 `POST /plans/generate` is **asynchronous** and answers 202, because a synchronous
-pass over a large estate would hold an unauthenticated request open for minutes.
+pass over a large estate would hold a request open for minutes.
 It is coalesced, so calling it in a loop produces one pass rather than a backlog.
 
 ## Safe image acquisition
@@ -1320,7 +1511,7 @@ harbormaster backup <path>       # consistent copy, then verify it
 ```
 
 Both are **commands, not endpoints, and will stay that way while the API is
-unauthenticated**. They report filesystem paths, free space, schema history,
+reachable over HTTP**. They report filesystem paths, free space, schema history,
 and when the daemon was last reachable — what an operator needs and what an
 attacker wants. Requiring shell access is the control, and an architecture test
 fails the build if `internal/api` ever imports the diagnostics package.
@@ -1920,10 +2111,13 @@ Six statements, all of them true today:
    read-only behaviour.** The application only reads, but the socket it holds
    could do anything. Mounting it `:ro` restricts the socket *file*, not the
    Docker *API*. Treat access to this service as equivalent to root on the host.
-3. **Authentication is not implemented.** Anyone who can reach the port can read
-   your entire container inventory — image references, mounts, network layout,
-   labels, the *names* of every environment variable, and the full Docker event
-   history including the live SSE stream.
+3. **Authentication is implemented and cannot be disabled**, but HarborMaster
+   does not terminate TLS. Four routes answer without a session — `GET /health`
+   (reduced to one field for an anonymous caller), `GET /version`,
+   `POST /auth/login`, and `GET /auth/bootstrap` — and nothing else does. What
+   remains your job is the transport: put TLS in front of it, or keep it on
+   loopback. There is also no second factor, so an administrator's password plus
+   network reachability is a compromised installation.
 4. **Event history is observational and incomplete by nature.** It records what
    HarborMaster observed, not what happened. Events emitted while the engine was
    disconnected, or before it first connected, were never seen and are not in
@@ -2026,7 +2220,11 @@ than a public issue.
   removes only the container it replaced, and neither can remove an image or a
   volume.
 - Notifications
-- Authentication and authorization
+- A second authentication factor, single sign-on, LDAP, OIDC, public
+  registration, and password reset by email. Accounts are local, and recovery is
+  another administrator or the console.
+- An audit record of READ access. Writes and authorization decisions are
+  recorded; who looked at what is not.
 - Multi-host management — the schema is keyed by host, but exactly one host row
   exists
 - Distributed event processing. Everything is in-process bounded queues and

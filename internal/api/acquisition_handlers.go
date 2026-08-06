@@ -178,10 +178,6 @@ func (s *Server) handleAcquisitionCreate(w http.ResponseWriter, r *http.Request)
 	}
 	// The same write guard every other state-changing endpoint uses: fetch
 	// metadata, origin, JSON media type, size limit, rate limit.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	var body acquisitionRequestBody
 	if err := decodeJSONBody(w, r, s.cfg.MaxRequestBytes, &body); err != nil {
@@ -211,6 +207,10 @@ func (s *Server) handleAcquisitionCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.auditWrite(r, domain.AuditAcquisitionRequested, domain.AuditTargetAcquisition,
+		acquisition.AcquisitionID, acquisition.ContainerName,
+		"download requested for "+acquisition.Target.Digest)
+
 	writeJSON(w, r, s.logger, http.StatusAccepted, acquisition)
 }
 
@@ -222,10 +222,6 @@ func (s *Server) handleAcquisitionCancel(w http.ResponseWriter, r *http.Request)
 	// The same write guard, minus a body: cancel carries none. guardWrite does
 	// not require a media type -- decodeJSONBody does, and this endpoint has
 	// nothing to decode.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 	acquisitionID, ok := s.acquisitionID(w, r)
 	if !ok {
 		return
@@ -250,6 +246,9 @@ func (s *Server) handleAcquisitionCancel(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+
+	s.auditWrite(r, domain.AuditAcquisitionCancelled, domain.AuditTargetAcquisition,
+		acquisition.AcquisitionID, acquisition.ContainerName, "download cancelled")
 
 	writeJSON(w, r, s.logger, http.StatusOK, acquisition)
 }

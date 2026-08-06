@@ -21,8 +21,28 @@ type HealthChecker interface {
 // the body carries the readiness detail. Returning 503 here would make the
 // frontend unable to distinguish "HarborMaster is down" from "Docker is down",
 // which are very different things for an operator.
+// minimalHealth is what an UNAUTHENTICATED caller sees.
+//
+// A container runtime's HEALTHCHECK cannot hold a session, so this endpoint has
+// to stay public -- but the full report names the database path, the journal
+// mode, the Docker API version, and how long the daemon has been unreachable.
+// That is a reconnaissance gift to anyone who can reach the port.
+//
+// So an anonymous caller gets the one bit a probe needs: is the process serving.
+type minimalHealth struct {
+	Status domain.OverallStatus `json:"status"`
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	report := s.health.Check(r.Context())
+
+	// An authenticated caller gets the whole report; the dashboard needs it.
+	// Anyone else gets the overall status and nothing more.
+	if _, authenticated := IdentityFrom(r.Context()); !authenticated {
+		writeJSON(w, r, s.logger, http.StatusOK, minimalHealth{Status: report.Status})
+		return
+	}
+
 	writeJSON(w, r, s.logger, http.StatusOK, report)
 }
 

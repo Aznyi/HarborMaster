@@ -40,7 +40,7 @@ func testAssets() fstest.MapFS {
 
 func newTestServer(t *testing.T, health HealthChecker) *Server {
 	t.Helper()
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health: health,
 		Logger: discardLogger(),
 		Config: config.Server{MaxRequestBytes: 1024},
@@ -51,7 +51,7 @@ func newTestServer(t *testing.T, health HealthChecker) *Server {
 func do(t *testing.T, srv *Server, method, target string, body io.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(method, target, body))
+	srv.ServeHTTP(rec, authed(httptest.NewRequest(method, target, body)))
 	return rec
 }
 
@@ -176,7 +176,7 @@ func TestRequestIDIsGeneratedAndNotTakenFromTheClient(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, APIPrefix+"/health", nil)
 	req.Header.Set(RequestIDHeader, "attacker-supplied")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	got := rec.Header().Get(RequestIDHeader)
 	if got == "" {
@@ -273,7 +273,7 @@ func TestUnknownPathFallsBackToIndex(t *testing.T) {
 
 // A binary built without a frontend bundle must still serve the API.
 func TestServerWithoutAssetsStillServesAPI(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Logger: discardLogger(),
 		Config: config.Server{MaxRequestBytes: 1024},
@@ -299,7 +299,7 @@ func TestHTTPServerAppliesConfiguredTimeouts(t *testing.T) {
 		WriteTimeout:      config.DefaultWriteTimeout,
 		IdleTimeout:       config.DefaultIdleTimeout,
 	}
-	srv := NewServer(Options{Health: &fakeHealth{}, Logger: discardLogger(), Config: cfg})
+	srv := newAuthedServer(Options{Health: &fakeHealth{}, Logger: discardLogger(), Config: cfg})
 
 	httpServer := srv.HTTPServer()
 

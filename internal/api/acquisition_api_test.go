@@ -167,7 +167,7 @@ func newAcquisitionServer(t *testing.T, acquisitions *fakeAcquisitions) *Server 
 		capability = acquisitions
 	}
 
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health:         &fakeHealth{},
 		Acquisitions:   capability,
 		Logger:         discardLogger(),
@@ -528,7 +528,7 @@ func TestAcquisitionWritesRefuseCrossSiteRequests(t *testing.T) {
 		req.Header.Set("Sec-Fetch-Site", "cross-site")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s: status = %d, want 403", target, rec.Code)
@@ -550,7 +550,7 @@ func TestAcquisitionCreateRequiresJSON(t *testing.T) {
 		strings.NewReader(validAcquisitionBody))
 	req.Header.Set("Content-Type", "text/plain")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("status = %d, want 415", rec.Code)

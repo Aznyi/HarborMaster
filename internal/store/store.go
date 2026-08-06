@@ -99,6 +99,16 @@ type DB struct {
 	// restart recovery reads instead of guessing from the lifecycle state.
 	Executions *ExecutionRepository
 
+	// Users holds accounts, their password verifiers, and the bootstrap state
+	// that says whether this installation has been claimed.
+	Users *UserRepository
+	// Sessions holds server-side sessions. It stores keyed digests of session
+	// tokens and never the tokens themselves.
+	Sessions *SessionRepository
+	// Audit holds the immutable security audit log: who did what, to what, from
+	// where, and whether it worked.
+	Audit *AuditRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -307,6 +317,9 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Plans:        &PlanRepository{db: sqlDB},
 		Acquisitions: &AcquisitionRepository{db: sqlDB},
 		Executions:   &ExecutionRepository{db: sqlDB},
+		Users:        &UserRepository{db: sqlDB},
+		Sessions:     &SessionRepository{db: sqlDB},
+		Audit:        &AuditRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

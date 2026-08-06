@@ -53,6 +53,15 @@ func documentedPaths(t *testing.T) []string {
 // actually serve fails too.
 var routedPaths = []string{
 	APIPrefix + "/acquisitions",
+	APIPrefix + "/audit",
+	APIPrefix + "/audit/summary",
+	APIPrefix + "/auth/bootstrap",
+	APIPrefix + "/auth/login",
+	APIPrefix + "/auth/logout",
+	APIPrefix + "/auth/password",
+	APIPrefix + "/auth/session",
+	APIPrefix + "/auth/sessions",
+	APIPrefix + "/auth/sessions/{id}/revoke",
 	APIPrefix + "/acquisitions/{id}",
 	APIPrefix + "/acquisitions/{id}/cancel",
 	APIPrefix + "/containers",
@@ -96,6 +105,10 @@ var routedPaths = []string{
 	APIPrefix + "/snapshots/{id}",
 	APIPrefix + "/snapshots/{id}/diff",
 	APIPrefix + "/snapshots/{id}/restore-readiness",
+	APIPrefix + "/roles",
+	APIPrefix + "/users",
+	APIPrefix + "/users/{id}",
+	APIPrefix + "/users/{id}/password-reset",
 	APIPrefix + "/version",
 	APIPrefix + "/volumes",
 }
@@ -188,7 +201,12 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/images/refresh",
 			APIPrefix + "/plans/generate",
 			APIPrefix + "/acquisitions/{id}/cancel",
-			APIPrefix + "/executions/{id}/cancel":
+			APIPrefix + "/executions/{id}/cancel",
+			APIPrefix + "/auth/login",
+			APIPrefix + "/auth/logout",
+			APIPrefix + "/auth/password",
+			APIPrefix + "/auth/sessions/{id}/revoke",
+			APIPrefix + "/users/{id}/password-reset":
 			method = http.MethodPost
 		}
 

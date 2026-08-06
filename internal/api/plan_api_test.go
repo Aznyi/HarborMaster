@@ -190,7 +190,7 @@ func newPlanServer(t *testing.T, plans *fakePlans, planner *fakePlanner) *Server
 		generator = planner
 	}
 
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health:         &fakeHealth{},
 		Plans:          reader,
 		Planner:        generator,
@@ -537,7 +537,7 @@ func TestGenerateRefusesACrossSiteRequest(t *testing.T) {
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403: %s", rec.Code, rec.Body.String())

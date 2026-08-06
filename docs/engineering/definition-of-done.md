@@ -27,6 +27,12 @@ where most of the defects in most projects come from.
 - [ ] **No High or Critical dependency vulnerability.**
 - [ ] **No new Docker mutation capability**, unless the phase explicitly adds it.
 - [ ] **No secret value persisted, logged, or returned.**
+- [ ] **Every new route declares an access policy**, and a public one states why
+      in the route table and in the public-surface test.
+- [ ] **Every new state-changing route is attributed**, either by calling
+      `auditWrite` or by being listed as audited in its service.
+- [ ] **No role compared in a handler.** Permissions are typed constants and the
+      decision belongs to the middleware.
 
 **Review items:**
 

@@ -15,6 +15,8 @@ import type {
   EventFilterOptions,
 } from "../api/eventTypes";
 import type { HealthReport, VersionInfo } from "../api/types";
+import type { Role } from "../api/authTypes";
+import { permissionsFor } from "./session";
 
 export const healthyReport: HealthReport = {
   status: "healthy",
@@ -423,7 +425,7 @@ export interface RecordedRequest {
 
 export interface ApiStubOptions {
   health?: HealthReport | Error;
-  inventory?: InventoryStatus | Error;
+  inventory?: InventoryStatus | Error | HttpFailure;
   containers?: ListResponse<ContainerSummary> | Error;
   detail?: ContainerDetail | Error;
   raw?: RawInspection | Error;
@@ -431,6 +433,15 @@ export interface ApiStubOptions {
   filters?: FilterOptions;
   /** Status code and body for POST /inventory/refresh. */
   refresh?: { status: number; body: unknown };
+
+  /** The identity /auth/session returns, or a failure to sign in with. */
+  session?: unknown | Error | HttpFailure;
+  /** The bootstrap status, for the unclaimed-installation path. */
+  bootstrap?: unknown | Error | HttpFailure;
+  /** The response to POST /auth/login. */
+  login?: unknown | Error | HttpFailure;
+  /** The account list and the create/update responses. */
+  users?: unknown | Error | HttpFailure;
 
   events?: ListResponse<DockerEvent> | Error | HttpFailure;
   eventEngine?: EventEngineStatus | Error | HttpFailure;
@@ -445,6 +456,29 @@ export interface ApiStubOptions {
  * the UI actually built -- which is how the filter and pagination tests verify
  * that work happens on the server, not in the browser.
  */
+/**
+ * The signed-in identity every suite gets by default.
+ *
+ * An administrator, so a page under test is not incidentally refused by a
+ * permission check the test was not written to exercise. The authorization
+ * behaviour itself is checked in Session.test.tsx and on the backend.
+ */
+export function sessionResponse(role: Role = "administrator") {
+  return {
+    user: {
+      userId: "usr_test0000000000000000",
+      username: "tester",
+      role,
+      status: "active",
+      permissions: permissionsFor(role),
+      mustChangePassword: false,
+      createdAt: "2026-08-01T09:00:00Z",
+    },
+    csrfToken: "test-csrf-token",
+    expiresAt: "2026-08-10T09:00:00Z",
+  };
+}
+
 export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
   const requests: RecordedRequest[] = [];
 
@@ -474,7 +508,44 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
       const url = String(input);
       requests.push({ url, method: init?.method ?? "GET" });
 
-      // Event routes are matched first: "/event-engine" and "/events" would
+      // Identity first. The app asks who it is talking to before anything
+      // else, and an unanswered /auth/session would leave every suite on the
+      // sign-in page rather than the view under test.
+      if (url.includes("/auth/login")) {
+        return respond(options.login, sessionResponse());
+      }
+      if (url.includes("/auth/session")) {
+        return respond(options.session, sessionResponse());
+      }
+      if (url.includes("/auth/bootstrap")) {
+        return respond(options.bootstrap, { completed: true, tokenRequired: true });
+      }
+      if (url.includes("/users")) {
+        // A created account, or the list. The method distinguishes them.
+        if ((init?.method ?? "GET") === "POST") {
+          return respond(options.users, {
+            user: {
+              userId: "usr_created00000000000000",
+              username: "newoperator",
+              role: "operator",
+              status: "active",
+              permissions: permissionsFor("operator"),
+              mustChangePassword: true,
+              createdAt: "2026-08-05T09:00:00Z",
+            },
+            temporaryPassword: "a-generated-temporary-password",
+          });
+        }
+        return respond(options.users, {
+          items: [sessionResponse().user],
+          pagination: {
+            page: 1, pageSize: 50, totalItems: 1, totalPages: 1,
+            hasNext: false, hasPrevious: false,
+          },
+        });
+      }
+
+      // Event routes are matched next: "/event-engine" and "/events" would
       // both be swallowed by a looser prefix match further down.
       if (url.includes("/event-engine")) {
         return respond(options.eventEngine, eventEngineStatus());

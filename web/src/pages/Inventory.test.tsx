@@ -1,5 +1,6 @@
 ﻿import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { SessionProvider } from "../hooks/useSession";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,7 +22,9 @@ import {
 function renderApp(path = "/") {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <App />
+      <SessionProvider>
+        <App />
+      </SessionProvider>
     </MemoryRouter>,
   );
 }
@@ -54,11 +57,15 @@ beforeEach(() => {
 // ------------------------------------------------------------- dashboard --
 
 describe("Dashboard", () => {
-  it("shows a loading state before the inventory arrives", () => {
+  it("shows a loading state before the inventory arrives", async () => {
     stubApi();
     renderApp();
 
-    expect(screen.getByRole("status", { name: /loading inventory/i })).toBeInTheDocument();
+    // The identity resolves before the shell mounts, so the first status
+    // region belongs to the session check rather than to the inventory.
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: /loading inventory/i })).toBeInTheDocument(),
+    );
   });
 
   it("renders live inventory metrics", async () => {
@@ -574,7 +581,9 @@ describe("navigation", () => {
     stubApi();
     renderApp();
 
-    const nav = screen.getByRole("navigation", { name: /primary/i });
+    const nav = await waitFor(() =>
+      screen.getByRole("navigation", { name: /primary/i }),
+    );
     expect(within(nav).getByRole("link", { name: "Images" })).toBeInTheDocument();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /^inventory$/i })).toBeInTheDocument());

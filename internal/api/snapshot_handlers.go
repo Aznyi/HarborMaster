@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -152,11 +153,6 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
-
 	var body createSnapshotRequest
 	if err := decodeJSONBody(w, r, s.maxRequestBytes(), &body); err != nil {
 		s.writeGuardFailure(w, r, err)
@@ -197,6 +193,11 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if snapshot.Deduplicated {
 		status = http.StatusOK
 	}
+
+	s.auditWrite(r, domain.AuditSnapshotCreated, domain.AuditTargetSnapshot,
+		strconv.FormatInt(snapshot.ID, 10), snapshot.ContainerName,
+		deduplicatedReason(snapshot.Deduplicated))
+
 	writeJSON(w, r, s.logger, status, snapshot)
 }
 

@@ -180,10 +180,6 @@ func (s *Server) handleExecutionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// The same write guard every other state-changing endpoint uses: fetch
 	// metadata, origin, JSON media type, size limit, rate limit.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	var body executionRequestBody
 	if err := decodeJSONBody(w, r, s.cfg.MaxRequestBytes, &body); err != nil {
@@ -213,6 +209,10 @@ func (s *Server) handleExecutionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditWrite(r, domain.AuditExecutionRequested, domain.AuditTargetExecution,
+		execution.ExecutionID, execution.ContainerName,
+		"recreation requested onto "+execution.Target.Digest)
+
 	writeJSON(w, r, s.logger, http.StatusAccepted, execution)
 }
 
@@ -222,10 +222,6 @@ func (s *Server) handleExecutionCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The same write guard, minus a body: cancel carries none.
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 	executionID, ok := s.executionID(w, r)
 	if !ok {
 		return
@@ -255,6 +251,9 @@ func (s *Server) handleExecutionCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+
+	s.auditWrite(r, domain.AuditExecutionCancelled, domain.AuditTargetExecution,
+		execution.ExecutionID, execution.ContainerName, "cancelled before the host was changed")
 
 	writeJSON(w, r, s.logger, http.StatusOK, execution)
 }

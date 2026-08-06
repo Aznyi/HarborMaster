@@ -86,7 +86,7 @@ func TestRequestIDIsServerGeneratedNotEchoed(t *testing.T) {
 	req.Header.Set(RequestIDHeader, forged)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	got := rec.Header().Get(RequestIDHeader)
 	if got == forged {

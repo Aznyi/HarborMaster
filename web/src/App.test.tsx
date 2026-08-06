@@ -1,6 +1,8 @@
 ﻿import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
+
+import { SessionProvider } from "./hooks/useSession";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -44,7 +46,9 @@ function stubApi(health: HealthReport | Error) {
 function renderApp(initialPath = "/") {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
-      <App />
+      <SessionProvider>
+        <App />
+      </SessionProvider>
     </MemoryRouter>,
   );
 }
@@ -61,6 +65,17 @@ async function settle() {
   );
 }
 
+/**
+ * Waits for the shell itself.
+ *
+ * The identity is resolved before anything is rendered, so a test that asserts
+ * on the navigation has to wait for the session to land first. That ordering is
+ * the point: an unauthenticated visitor never sees the shell at all.
+ */
+async function shell() {
+  return waitFor(() => screen.getByRole("navigation", { name: /primary/i }));
+}
+
 describe("App shell", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -70,7 +85,7 @@ describe("App shell", () => {
     stubApi(healthyReport);
     renderApp();
 
-    const nav = screen.getByRole("navigation", { name: /primary/i });
+    const nav = await shell();
     for (const item of NAV_ITEMS) {
       expect(within(nav).getByRole("link", { name: item.label })).toBeInTheDocument();
     }
@@ -81,7 +96,10 @@ describe("App shell", () => {
     stubApi(healthyReport);
     renderApp();
 
-    expect(screen.getByRole("status", { name: /loading/i })).toBeInTheDocument();
+    // The session resolves first, then the dashboard's own data. Both render a
+    // status region, so the assertion is that SOMETHING said "loading" before
+    // any data arrived rather than which of the two it was.
+    expect(screen.getByRole("status", { name: /(checking|loading)/i })).toBeInTheDocument();
     await settle();
   });
 
@@ -152,7 +170,7 @@ describe("App shell", () => {
     const user = userEvent.setup();
     renderApp();
 
-    const nav = screen.getByRole("navigation", { name: /primary/i });
+    const nav = await shell();
     await user.click(within(nav).getByRole("link", { name: "Snapshots" }));
 
     await waitFor(() =>
@@ -197,6 +215,7 @@ describe("App shell", () => {
     const user = userEvent.setup();
     renderApp();
 
+    await shell();
     const toggle = screen.getByRole("button", { name: /menu/i });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 

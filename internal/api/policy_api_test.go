@@ -262,7 +262,7 @@ func sampleViolation() domain.PolicyViolation {
 
 func newPolicyServer(t *testing.T, policies *fakePolicies, engine *fakePolicyEngine) *Server {
 	t.Helper()
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health:       &fakeHealth{},
 		Policies:     policies,
 		PolicyEngine: engine,
@@ -293,7 +293,7 @@ func write(t *testing.T, srv *Server, method, target, body string) *httptest.Res
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	return rec
 }
 
@@ -703,7 +703,7 @@ func TestEveryPolicyWriteIsGuarded(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
+			srv.ServeHTTP(rec, authed(req))
 
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("cross-site request returned %d, want 403", rec.Code)
@@ -731,7 +731,7 @@ func TestPolicyWritesRequireTheJSONMediaType(t *testing.T) {
 			req.Header.Set("Content-Type", contentType)
 		}
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Errorf("Content-Type %q returned %d, want 415", contentType, rec.Code)
@@ -953,7 +953,7 @@ func TestTheContainerPathSegmentWins(t *testing.T) {
 // A deployment with the engine switched off yields a 503 rather than a broken
 // route or a misleading empty list.
 func TestPolicyEndpointsReportWhenDisabled(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Logger: discardLogger(),
 		Config: config.Server{MaxRequestBytes: 4096},
@@ -1015,7 +1015,7 @@ func TestPolicySummaryIsServed(t *testing.T) {
 func TestPolicyWritesUseTheirOwnRateLimit(t *testing.T) {
 	policies := &fakePolicies{policies: []domain.PolicyDefinition{samplePolicy()}}
 
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health:       &fakeHealth{},
 		Policies:     policies,
 		PolicyEngine: &fakePolicyEngine{},

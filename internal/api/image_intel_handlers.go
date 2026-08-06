@@ -292,12 +292,11 @@ func (s *Server) handleImageRefresh(w http.ResponseWriter, r *http.Request) {
 			"image intelligence is not configured")
 		return
 	}
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	s.imageCollector.RequestCollection()
+	s.auditWrite(r, domain.AuditImageRefreshed, domain.AuditTargetSystem, "", "",
+		"registry metadata collection requested")
+
 	writeJSON(w, r, s.logger, http.StatusAccepted, imageRefreshResponse{
 		Requested: true,
 		Engine:    s.imageCollector.Status(r.Context()),

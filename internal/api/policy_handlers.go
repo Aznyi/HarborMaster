@@ -198,10 +198,6 @@ func (s *Server) handlePolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if s.policyUnavailable(w, r) {
 		return
 	}
-	if err := s.guardPolicyWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	var request policyRequest
 	if err := decodeJSONBody(w, r, s.cfg.MaxRequestBytes, &request); err != nil {
@@ -260,16 +256,15 @@ func (s *Server) handlePolicyCreate(w http.ResponseWriter, r *http.Request) {
 	s.requestPolicySweep()
 
 	w.Header().Set("Location", APIPrefix+"/policies/"+created.PolicyID)
+	s.auditWrite(r, domain.AuditPolicyCreated, domain.AuditTargetPolicy,
+		created.PolicyID, created.Name, "policy created")
+
 	writeJSON(w, r, s.logger, http.StatusCreated, created)
 }
 
 // handlePolicyUpdate applies a partial update.
 func (s *Server) handlePolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.policyUnavailable(w, r) {
-		return
-	}
-	if err := s.guardPolicyWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
 		return
 	}
 	policyID, ok := s.policyID(w, r)
@@ -350,6 +345,9 @@ func (s *Server) handlePolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.requestPolicySweep()
+	s.auditWrite(r, domain.AuditPolicyUpdated, domain.AuditTargetPolicy,
+		updated.PolicyID, updated.Name, "policy updated")
+
 	writeJSON(w, r, s.logger, http.StatusOK, updated)
 }
 
@@ -361,10 +359,6 @@ func (s *Server) handlePolicyUpdate(w http.ResponseWriter, r *http.Request) {
 // the truthful record of a rule that no longer applies.
 func (s *Server) handlePolicyDelete(w http.ResponseWriter, r *http.Request) {
 	if s.policyUnavailable(w, r) {
-		return
-	}
-	if err := s.guardPolicyWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
 		return
 	}
 	policyID, ok := s.policyID(w, r)
@@ -382,6 +376,9 @@ func (s *Server) handlePolicyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+
+	s.auditWrite(r, domain.AuditPolicyArchived, domain.AuditTargetPolicy,
+		policyID, "", "policy withdrawn; its history is retained")
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -454,10 +451,6 @@ func (s *Server) handlePolicyViolationPatch(w http.ResponseWriter, r *http.Reque
 	if s.policyUnavailable(w, r) {
 		return
 	}
-	if err := s.guardPolicyWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 	id, ok := s.violationID(w, r)
 	if !ok {
 		return
@@ -498,6 +491,10 @@ func (s *Server) handlePolicyViolationPatch(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+
+	s.auditWrite(r, domain.AuditPolicyAnnotated, domain.AuditTargetViolation,
+		strconv.FormatInt(violation.ID, 10), violation.ContainerName,
+		"status set to "+string(violation.Status))
 
 	writeJSON(w, r, s.logger, http.StatusOK, violation)
 }
@@ -607,12 +604,11 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 			"the policy engine is not configured")
 		return
 	}
-	if err := s.guardPolicyWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	s.policyEngine.RequestSweep()
+	s.auditWrite(r, domain.AuditPolicyEvaluated, domain.AuditTargetPolicy, "", "",
+		"compliance evaluation requested")
+
 	writeJSON(w, r, s.logger, http.StatusAccepted, policyEvaluateResponse{
 		Requested: true,
 		Engine:    s.policyEngine.Status(),

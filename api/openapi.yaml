@@ -34,11 +34,78 @@ info:
     server therefore binds to `127.0.0.1` by default. Expose it beyond loopback
     only behind an authenticating reverse proxy.
 
-    ### Authentication
+    ### Authentication and authorization
 
-    None yet. The API is unauthenticated and is expected to be reachable only
-    from loopback or a trusted proxy. Authentication is planned and will be
-    documented here when it lands.
+    **Every endpoint requires a session except four.** The exceptions are
+    `GET /health` (a container runtime's probe cannot hold a session, and the
+    body is reduced to one field for an anonymous caller), `GET /version`,
+    `POST /auth/login`, and `GET /auth/bootstrap`. Everything else answers
+    `401` without a session and `403` when the account's role does not hold the
+    endpoint's permission.
+
+    There is no setting that disables authentication.
+
+    #### Sessions
+
+    `POST /auth/login` sets an opaque session token in an HttpOnly, SameSite
+    cookie -- `__Host-harbormaster_session` over HTTPS, `harbormaster_session`
+    otherwise. **The token never appears in a response body, a URL, or a log.**
+    The server stores only a keyed digest of it, so a stolen database yields no
+    usable session.
+
+    Sessions expire on idle and again at a hard ceiling regardless of use, and
+    are revoked by sign-out, a password change, a role change, disablement, and
+    the per-account concurrent-session cap.
+
+    #### CSRF
+
+    Every state-changing request needs the `X-HarborMaster-CSRF` header. Its
+    value is returned by `/auth/login`, `/auth/session`, and `/auth/password`,
+    and it is DERIVED from the session token rather than stored -- so it rotates
+    with the session and there is nothing at rest to steal. A cross-site page
+    can make a browser send the cookie but cannot read this value and cannot set
+    a custom header without a preflight that fails.
+
+    `POST /auth/login` and `POST /auth/bootstrap` are exempt because they have
+    no session to derive a token from. Both are still covered by SameSite, the
+    Origin and Fetch Metadata checks, the JSON content-type requirement, and the
+    rate limiter.
+
+    #### Roles
+
+    Three, and a role holds a fixed set of permissions:
+
+    - `viewer` reads. It can change nothing.
+    - `operator` reads, and performs operational actions: refresh, snapshot,
+      annotate, evaluate, generate a plan, acquire an image, recreate a
+      container.
+    - `administrator` additionally manages policies, accounts, and reads the
+      security audit log. Policy administration is at this level deliberately:
+      a policy is what BLOCKS an acquisition or a recreation, so an operator
+      able to edit one could remove the gate standing in their way.
+
+    `GET /roles` returns the catalogue, so a client builds its role picker from
+    the same source of truth the authorization middleware uses.
+
+    #### Claiming an installation
+
+    A fresh installation has no accounts. It prints a one-time bootstrap token
+    at startup; `POST /auth/bootstrap` exchanges that token for the first
+    administrator. Once claimed, that endpoint answers `404` -- for that
+    installation it genuinely no longer exists. Restarting re-mints the token
+    and invalidates the previous one.
+
+    `harbormaster admin bootstrap` does the same from the host filesystem
+    without a token, because filesystem access to the database is a stronger
+    proof than any token. That path is a command, never an endpoint.
+
+    #### Audit
+
+    Every authentication attempt, every authorization denial, and every
+    state-changing request is recorded with the account, session, request id,
+    and source address that caused it. `GET /audit` serves that log to an
+    administrator. **No audit record contains a password, a token, a request
+    body, an environment value, or a registry credential.**
 
     ### Sensitive values
 
@@ -88,6 +155,31 @@ servers:
 tags:
   - name: System
     description: Liveness, readiness, and build metadata.
+  - name: Identity
+    description: |
+      Signing in, signing out, sessions, and claiming a fresh installation.
+
+      The session token lives in an HttpOnly cookie and appears in no response
+      body, URL, or log. The server stores only a keyed digest of it, so a
+      stolen database yields no usable session. The CSRF token is DERIVED from
+      the session token and stored nowhere at all.
+  - name: Accounts
+    description: |
+      Account administration. Requires `user:manage`, which only an
+      administrator holds.
+
+      There is no delete: disabling preserves the history an audit record
+      depends on. Two refusals are built in and not configurable -- an
+      administrator cannot modify their own account, and the last active
+      administrator cannot be demoted or disabled.
+  - name: Security audit
+    description: |
+      Who did what, to what, from where, and whether it worked.
+
+      Append-only: no endpoint edits or deletes a record. It is not a request
+      log -- no body, header, environment value, or credential appears in any
+      record, and no column exists that could hold one. Security records are
+      retained far longer than operational ones.
   - name: Inventory
     description: Inventory status and refresh control.
   - name: Containers
@@ -301,12 +393,19 @@ tags:
       no body and no target, and it schedules a pass over HarborMaster's own
       database.
 
+security:
+  # Applies to every operation. The four public endpoints override it with an
+  # empty requirement, which is the ONLY way an operation becomes reachable
+  # without a session -- and it is visible in the diff when one does.
+  - sessionCookie: []
+
 paths:
   /api/v1/health:
     get:
       tags: [System]
       summary: Report dependency reachability
       operationId: getHealth
+      security: []
       description: |
         Probes every dependency and returns a report.
 
@@ -315,6 +414,14 @@ paths:
         readiness detail. A client must branch on `status`, not on the HTTP
         code, so it can tell "HarborMaster is down" (no response) apart from
         "Docker is down" (`status: degraded`).
+
+        **The body is REDUCED for an unauthenticated caller** -- `status` and
+        nothing else. It has to stay public, because a container runtime's
+        HEALTHCHECK cannot hold a session, and the full report names the
+        database path, the journal mode, the Docker API version, and how long
+        the daemon has been unreachable. That is a reconnaissance gift to
+        anyone who can reach the port. An authenticated caller gets the whole
+        report.
       responses:
         "200":
           description: The health report. Check `status` for the verdict.
@@ -353,6 +460,7 @@ paths:
       tags: [System]
       summary: Report build metadata
       operationId: getVersion
+      security: []
       responses:
         "200":
           description: Build metadata.
@@ -3237,7 +3345,586 @@ paths:
           $ref: "#/components/responses/ExecutionUnavailable"
 
 
+  # ------------------------------------------------------------ identity --
+
+  /api/v1/auth/bootstrap:
+    get:
+      tags: [Identity]
+      summary: Report whether this installation has been claimed
+      operationId: getBootstrapStatus
+      security: []
+      description: |
+        Public, and deliberately says almost nothing: whether an administrator
+        exists, and that claiming needs the one-time token. A client needs this
+        to choose between the sign-in page and the bootstrap page before it
+        holds any credential.
+      responses:
+        "200":
+          description: The bootstrap state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatus"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+    post:
+      tags: [Identity]
+      summary: Create the first administrator
+      operationId: bootstrapInstallation
+      security: []
+      description: |
+        Exchanges the one-time bootstrap token for the first administrator and
+        issues a session.
+
+        **Reachable only while the installation is unclaimed.** Once an
+        administrator exists this answers `404`: for that installation the
+        endpoint genuinely no longer exists, and answering "forbidden" would
+        confirm there is a flow to race.
+
+        The token is printed to the server's output at startup and re-minted on
+        every restart of an unclaimed installation, so claiming requires the
+        ability to read the log rather than merely to reach the port. Both the
+        success and every rejected attempt are audited.
+
+        CSRF-exempt because there is no session to derive a token from; covered
+        instead by SameSite, the Origin and Fetch Metadata checks, the JSON
+        content-type requirement, and the rate limiter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "200":
+          description: |
+            The installation is claimed. The session cookie is set; the body
+            carries the account and the CSRF token, and never the session token.
+          headers:
+            Set-Cookie:
+              description: The session cookie. HttpOnly, SameSite, Path=/.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: The bootstrap token was absent, wrong, or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The installation already has an administrator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/login:
+    post:
+      tags: [Identity]
+      summary: Authenticate and start a session
+      operationId: login
+      security: []
+      description: |
+        **Every credential failure answers `401` with the same code and the same
+        prose** -- an unknown username, a wrong password, and a disabled account
+        are indistinguishable to a client. The server makes the TIMING match too
+        by hashing an unknown username against a decoy, so this endpoint cannot
+        be used as an account directory.
+
+        Repeated failures apply an exponential per-account backoff and a
+        per-address throttle. A backoff rather than a lockout: a lockout would
+        let anyone who knows a username deny that account service.
+
+        The session token is set in an HttpOnly cookie and appears in no
+        response body. The CSRF token IS in the body, because a script has to
+        send it back in a header and it is useless without the cookie a script
+        cannot read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated. The session cookie is set.
+          headers:
+            Set-Cookie:
+              description: The session cookie. HttpOnly, SameSite, Path=/.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          description: |
+            The username or password is incorrect. One response for every cause.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: unauthenticated
+                  message: the username or password is incorrect
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Identity]
+      summary: End this session
+      operationId: logout
+      description: |
+        Revokes the session this request arrived on and expires the cookie. No
+        other session on the account is affected -- ending all of them is what a
+        password change does.
+      responses:
+        "204":
+          description: The session is revoked and the cookie expired.
+          headers:
+            Set-Cookie:
+              description: The expired session cookie.
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/auth/session:
+    get:
+      tags: [Identity]
+      summary: Report the caller's identity
+      operationId: getSession
+      description: |
+        The signed-in account, everything its role permits, and a CSRF token for
+        this session. A client calls this first: it is how an application learns
+        whether it is signed in, and what to render.
+
+        Reachable by an account that must change its password, because
+        otherwise it could not discover that it must.
+      responses:
+        "200":
+          description: The caller's identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /api/v1/auth/password:
+    post:
+      tags: [Identity]
+      summary: Change the caller's own password
+      operationId: changePassword
+      description: |
+        **The current password is required** even though the request is already
+        authenticated. A session is a possession factor and the current password
+        a knowledge factor; requiring both stops a stolen session being upgraded
+        into permanent account control.
+
+        **The session rotates.** Every session on the account is revoked --
+        including any a thief holds, and including this one -- and a fresh
+        cookie replaces it. The response carries a NEW CSRF token, which a
+        client must install or its next write is refused.
+
+        Reachable by an account that must change its password: that is the whole
+        point of the exemption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          description: The password is changed and a replacement session issued.
+          headers:
+            Set-Cookie:
+              description: The replacement session cookie.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          description: |
+            The new password was refused by the policy. The message explains
+            which rule it failed and never echoes the password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: The current password is incorrect.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/auth/sessions:
+    get:
+      tags: [Identity]
+      summary: List the caller's own live sessions
+      operationId: listOwnSessions
+      description: |
+        The caller's OWN. There is no parameter naming another account: an
+        administrator investigating somebody else's sessions does it through the
+        account endpoints, where the permission check is explicit.
+      responses:
+        "200":
+          description: The caller's live sessions, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /api/v1/auth/sessions/{id}/revoke:
+    post:
+      tags: [Identity]
+      summary: End one of the caller's own sessions
+      operationId: revokeOwnSession
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The public session identifier, never the token.
+          schema: { type: string }
+      responses:
+        "204":
+          description: The session is revoked.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ------------------------------------------------------------ accounts --
+
+  /api/v1/users:
+    get:
+      tags: [Accounts]
+      summary: List accounts
+      operationId: listUsers
+      description: Requires `user:manage`.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: The accounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Accounts]
+      summary: Create an account
+      operationId: createUser
+      description: |
+        Requires `user:manage`.
+
+        Omitting `password` makes HarborMaster generate one and return it
+        EXACTLY ONCE, which is the safer default: an administrator never has to
+        invent a password for somebody else and never has one they chose sitting
+        in their clipboard. It is never stored in plaintext and never
+        retrievable again.
+
+        Every new account carries `mustChangePassword`, because the credential
+        was chosen by somebody other than its holder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: |
+            The account, and the generated password if one was generated. The
+            password is in this response and nowhere else, ever.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedUser"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The username is taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Accounts]
+      summary: Read one account
+      operationId: getUser
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicUser"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [Accounts]
+      summary: Change an account's role or status
+      operationId: updateUser
+      description: |
+        Requires `user:manage`.
+
+        **There is deliberately no DELETE.** Disabling preserves the history an
+        audit record depends on, and an account that never existed is a
+        different fact from one that was turned off.
+
+        Two refusals are built in and are not configurable: an administrator
+        cannot modify their own account, and the last active administrator
+        cannot be demoted or disabled. Either change ends every session on the
+        affected account immediately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: The account as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicUser"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The change would remove the last active administrator, or the caller
+            tried to modify their own account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/users/{id}/password-reset:
+    post:
+      tags: [Accounts]
+      summary: Reset an account's password
+      operationId: resetUserPassword
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      description: |
+        Requires `user:manage`.
+
+        Sets a GENERATED temporary password, returns it once, and revokes every
+        session on the account. The password is generated rather than chosen by
+        the administrator: one they picked is one they know.
+      responses:
+        "200":
+          description: The temporary password, returned once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [temporaryPassword]
+                properties:
+                  temporaryPassword:
+                    type: string
+                    description: |
+                      Shown once, stored nowhere, and must be changed at the
+                      account's next sign-in.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/roles:
+    get:
+      tags: [Accounts]
+      summary: List the roles and what each one permits
+      operationId: getRoles
+      description: |
+        The catalogue the authorization middleware itself reads. Fetched rather
+        than hardcoded by a client: a second copy would eventually offer a role
+        the server does not recognise.
+      responses:
+        "200":
+          description: The roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleCatalogue"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ------------------------------------------------------- security audit --
+
+  /api/v1/audit:
+    get:
+      tags: [Security audit]
+      summary: Read the security audit log
+      operationId: listAuditEvents
+      description: |
+        Requires `audit:read`, which only an administrator holds.
+
+        Who did what, to what, from where, and whether it worked. **It is not a
+        request log**: no body, no header, no environment value, and no
+        credential appears in any record. Records are append-only -- nothing in
+        HarborMaster can edit or delete one.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: action
+          in: query
+          description: Repeatable. Values outside the vocabulary are rejected.
+          schema: { type: array, items: { type: string } }
+        - name: outcome
+          in: query
+          description: Repeatable.
+          schema:
+            type: array
+            items: { type: string, enum: [succeeded, failed, denied] }
+        - name: actorUserId
+          in: query
+          schema: { type: string }
+        - name: targetType
+          in: query
+          schema: { type: string }
+        - name: targetId
+          in: query
+          schema: { type: string }
+        - name: securityOnly
+          in: query
+          description: |
+            Restrict to authentication, authorization, and account
+            administration -- the records kept far longer than operational ones.
+          schema: { type: boolean }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: A page of audit records, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditListResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/audit/summary:
+    get:
+      tags: [Security audit]
+      summary: Count audit records by outcome
+      operationId: getAuditSummary
+      responses:
+        "200":
+          description: The counters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditSummary"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
 components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: harbormaster_session
+      description: |
+        An opaque, server-side session token.
+
+        Named `__Host-harbormaster_session` when the request arrived over
+        HTTPS. The `__Host-` prefix is a browser-enforced guarantee rather than
+        a convention: a cookie carrying it MUST be Secure, MUST have `Path=/`,
+        and MUST NOT set a Domain, which stops a sibling subdomain overwriting
+        the session cookie.
+
+        Set by `POST /auth/login` and `POST /auth/bootstrap`. It is HttpOnly, so
+        no script can read it, and it appears in no response body, URL, or log.
+        The server stores only a keyed digest, so a stolen database yields no
+        usable session.
+
+        Every state-changing request additionally needs the
+        `X-HarborMaster-CSRF` header; see `csrfToken`.
+
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-HarborMaster-CSRF
+      description: |
+        The per-session CSRF token, required on POST, PUT, PATCH, and DELETE.
+
+        Returned by `/auth/login`, `/auth/session`, and `/auth/password`. It is
+        DERIVED from the session token rather than stored, so it rotates with
+        the session and nothing at rest can be stolen. A custom header cannot be
+        set by a cross-origin form or a "simple" fetch without a preflight, and
+        no CORS headers are served -- so the preflight fails.
+
+        Declared as a scheme for documentation. The document's global
+        requirement names `sessionCookie` only, because an OpenAPI security
+        requirement cannot express "this applies to write methods".
+
   headers:
     RequestId:
       description: |
@@ -3298,6 +3985,63 @@ components:
       schema: { type: string, maxLength: 256 }
 
   responses:
+    Unauthenticated:
+      description: |
+        No usable session. The session cookie is absent, expired, revoked, or
+        belongs to an account that no longer exists or has been disabled --
+        which of those is deliberately not distinguished.
+
+        A `bootstrap_required` code means the installation has no administrator
+        yet; claim it with `POST /auth/bootstrap`.
+
+        The response clears the session cookie, so a browser holding a dead
+        token stops sending it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            noSession:
+              value:
+                error: { code: unauthenticated, message: authentication is required }
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+            unclaimed:
+              value:
+                error:
+                  code: bootstrap_required
+                  message: this installation has no administrator yet
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
+    Forbidden:
+      description: |
+        Authenticated, but the account's role does not hold this endpoint's
+        permission -- or the account must change its password before doing
+        anything else, or a state-changing request carried no valid CSRF token.
+
+        Every denial is recorded in the security audit log with the PERMISSION
+        that was refused, never the path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            wrongRole:
+              value:
+                error: { code: forbidden, message: your role does not permit this }
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+            csrf:
+              value:
+                error:
+                  code: csrf_required
+                  message: this request needs a valid CSRF token
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+            mustChangePassword:
+              value:
+                error:
+                  code: password_change_required
+                  message: this account must set a new password before doing anything else
+                requestId: 3f8a1c9e7b2d4a6f0c1e5b93
+
     NotFound:
       description: No such resource.
       content:
@@ -7060,3 +7804,342 @@ components:
         lastChecked: { type: integer }
         lastSkipped: { type: integer }
         lastFailed: { type: integer }
+
+    # ------------------------------------------------------------ identity --
+
+    Role:
+      type: string
+      enum: [viewer, operator, administrator]
+      description: |
+        The account's role. A value outside this set holds no permissions at
+        all -- an unrecognised role is never treated as the least privileged
+        one, because a corrupt row must not become a silent grant.
+
+    Permission:
+      type: string
+      description: |
+        One capability. A closed vocabulary; `GET /roles` lists which role holds
+        which.
+      enum:
+        - inventory:read
+        - event:read
+        - snapshot:read
+        - drift:read
+        - policy:read
+        - plan:read
+        - acquisition:read
+        - execution:read
+        - inventory:refresh
+        - snapshot:create
+        - drift:annotate
+        - policy:evaluate
+        - policy:annotate
+        - image:refresh
+        - plan:generate
+        - acquisition:create
+        - acquisition:cancel
+        - execution:create
+        - execution:cancel
+        - policy:manage
+        - user:manage
+        - audit:read
+        - settings:manage
+
+    UserStatus:
+      type: string
+      enum: [active, disabled]
+
+    PublicUser:
+      type: object
+      description: |
+        An account as this API renders it.
+
+        **No credential material appears here in any form** -- no password, no
+        hash, no salt, no Argon2id parameter, and no session token. The server's
+        projection carries none of them.
+      required: [userId, username, role, status, permissions, mustChangePassword, createdAt]
+      properties:
+        userId: { type: string }
+        username:
+          type: string
+          description: |
+            Lowercase ASCII letters, digits, dot, dash, and underscore only.
+            Non-ASCII is refused rather than escaped: two accounts that render
+            identically would make the audit log actively misleading.
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/UserStatus" }
+        permissions:
+          type: array
+          description: Everything the role holds, so a client need not reimplement the matrix.
+          items: { $ref: "#/components/schemas/Permission" }
+        mustChangePassword:
+          type: boolean
+          description: |
+            The credential was chosen by somebody other than the account holder.
+            Until it is replaced, every route except reading the session,
+            changing the password, and signing out answers 403.
+        createdAt: { type: string, format: date-time }
+        lastLoginAt: { type: string, format: date-time }
+
+    SessionResponse:
+      type: object
+      description: |
+        What a client needs to operate.
+
+        **The session token is not here and never will be.** It is in an
+        HttpOnly cookie, which is what stops a script on the page reading it.
+      required: [user, csrfToken]
+      properties:
+        user: { $ref: "#/components/schemas/PublicUser" }
+        csrfToken:
+          type: string
+          description: |
+            Send as `X-HarborMaster-CSRF` on every state-changing request. It is
+            derived from the session token rather than stored, so it rotates
+            with the session, and it is useless without the cookie.
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the session ends regardless of use.
+
+    BootstrapStatus:
+      type: object
+      required: [completed, tokenRequired]
+      properties:
+        completed:
+          type: boolean
+          description: |
+            An administrator exists. Once true, always true: an installation
+            whose administrators were all disabled does not fall back into a
+            flow that lets anyone claim it.
+        tokenRequired:
+          type: boolean
+          description: Always true for the HTTP flow.
+
+    BootstrapRequest:
+      type: object
+      required: [token, username, password]
+      properties:
+        token:
+          type: string
+          description: The one-time value printed at startup.
+        username: { type: string }
+        password: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 64 }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 1024
+          description: |
+            Bounded before hashing. An unbounded password would be an
+            unauthenticated memory amplifier against the one expensive operation
+            this endpoint offers. An over-long value gets the same 401 as a wrong
+            one.
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, maxLength: 1024 }
+        newPassword:
+          type: string
+          minLength: 12
+          maxLength: 1024
+          description: |
+            At least 12 characters, not on the refusal list, not containing the
+            username, and not a single repeated character or a simple run. There
+            is deliberately no character-class requirement: composition rules
+            push people toward predictable manglings.
+
+    SessionSummary:
+      type: object
+      description: |
+        A live session on the caller's own account. `sessionId` is the PUBLIC
+        identifier; it is not the token and grants nothing.
+      required: [sessionId, createdAt, lastSeenAt, idleExpiresAt, absoluteExpiresAt]
+      properties:
+        sessionId: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        idleExpiresAt: { type: string, format: date-time }
+        absoluteExpiresAt: { type: string, format: date-time }
+        userAgent:
+          type: string
+          description: A bounded, sanitised note. Never interpreted as markup.
+        clientAddr:
+          type: string
+          description: |
+            The transport peer, unless a trusted-proxy range was configured and
+            the peer is inside it. A forwarding header is attacker-controlled
+            text and is otherwise ignored.
+        current: { type: boolean }
+
+    SessionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SessionSummary" }
+
+    RoleDescription:
+      type: object
+      required: [role, description, permissions]
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        description: { type: string }
+        permissions:
+          type: array
+          items: { $ref: "#/components/schemas/Permission" }
+
+    RoleCatalogue:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RoleDescription" }
+
+    CreateUserRequest:
+      type: object
+      required: [username, role]
+      properties:
+        username: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 1024
+          description: |
+            Optional. Omit it and HarborMaster generates one and returns it once
+            -- the safer default, because an administrator who picks a password
+            for somebody else knows that password.
+
+    CreatedUser:
+      type: object
+      required: [user]
+      properties:
+        user: { $ref: "#/components/schemas/PublicUser" }
+        temporaryPassword:
+          type: string
+          description: |
+            Present only when HarborMaster generated one. **Returned in this
+            response and nowhere else, ever.** It is not stored in plaintext and
+            cannot be retrieved again.
+
+    UpdateUserRequest:
+      type: object
+      description: |
+        A partial update. Both fields are optional; omitting one leaves it
+        alone. There is no username field: a username reaches every audit
+        record, and renaming an account would rewrite what those records mean.
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/UserStatus" }
+
+    UserListResponse:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PublicUser" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    # ------------------------------------------------------- security audit --
+
+    AuditOutcome:
+      type: string
+      enum: [succeeded, failed, denied]
+      description: |
+        `denied` is an authorization refusal, which is a different security
+        event from an action that was permitted and then failed.
+
+    AuditEvent:
+      type: object
+      description: |
+        One record: who did what, to what, from where, and whether it worked.
+
+        Every field is either a closed vocabulary or a bounded, sanitised string
+        the server itself wrote. **There is no request body, header, cookie,
+        environment value, or credential anywhere in this schema**, and no
+        column exists that could hold one.
+      required: [eventId, action, outcome, occurredAt]
+      properties:
+        eventId: { type: string }
+        action:
+          type: string
+          description: |
+            The action, from a closed vocabulary -- `auth.login.succeeded`,
+            `execution.requested`, and so on.
+        outcome: { $ref: "#/components/schemas/AuditOutcome" }
+        actorUserId: { type: string }
+        actorUsername: { type: string }
+        actorRole: { $ref: "#/components/schemas/Role" }
+        actorSessionId:
+          type: string
+          description: The session the action was taken from. Not the token.
+        targetType: { type: string }
+        targetId:
+          type: string
+          description: |
+            What was acted on. For an authorization denial this is the
+            PERMISSION that was refused, never the path -- a permission is a
+            closed vocabulary; a path is request-derived text.
+        targetName: { type: string }
+        requestId:
+          type: string
+          description: Correlates with the access log's `X-Request-ID`.
+        clientAddr: { type: string }
+        reason:
+          type: string
+          description: |
+            A short, server-authored explanation. Never a supplied value, and
+            never a credential.
+        occurredAt: { type: string, format: date-time }
+
+    AuditListResponse:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    AuditSummary:
+      type: object
+      description: |
+        Counters over a recent window, plus the whole-log total.
+
+        `failedLogins` and `deniedActions` are the two numbers an administrator
+        opens this page for: one is somebody trying to get in, the other is
+        somebody already in trying to reach further than their role allows.
+      required: [total, failedLogins, deniedActions, privilegedActions, windowHours]
+      properties:
+        total:
+          type: integer
+          description: Every record retained, not only those in the window.
+        failedLogins: { type: integer }
+        deniedActions: { type: integer }
+        privilegedActions:
+          type: integer
+          description: |
+            Host-changing actions in the window -- an image acquired or a
+            container replaced.
+        windowHours:
+          type: integer
+          description: How far back the windowed counters look.
+        byAction:
+          type: object
+          additionalProperties: { type: integer }
+        byOutcome:
+          type: object
+          additionalProperties: { type: integer }
+        lastEventAt: { type: string, format: date-time }
+

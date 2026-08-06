@@ -146,7 +146,7 @@ func sampleIntel() domain.ImageIntel {
 
 func newImageServer(t *testing.T, intel *fakeImageIntel, collector *fakeCollector) *Server {
 	t.Helper()
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Images: &fakeImages{usages: []store.ImageUsage{{
 			Image:          domain.Image{ID: "sha256:" + strings.Repeat("1", 64)},
@@ -343,7 +343,7 @@ func TestImageRefreshSchedulesAndTakesNoTarget(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, APIPrefix+"/images/refresh", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
@@ -376,7 +376,7 @@ func TestNoRefreshParameterCanSupplyADestination(t *testing.T) {
 	} {
 		req := httptest.NewRequest(http.MethodPost, target, nil)
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		// Accepted and ignored: the parameters are not read at all, which is a
 		// stronger property than rejecting them. There is no field on
@@ -402,7 +402,7 @@ func TestImageRefreshIsGuarded(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, APIPrefix+"/images/refresh", nil)
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("cross-site refresh returned %d, want 403", rec.Code)
@@ -431,7 +431,7 @@ func TestImageMethodsAreConstrained(t *testing.T) {
 	for _, tc := range cases {
 		req := httptest.NewRequest(tc.method, tc.target, nil)
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s returned %d, want 405", tc.method, tc.target, rec.Code)
@@ -479,7 +479,7 @@ func TestThereIsNoImageMutationRoute(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader("{}"))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, authed(req))
 
 		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s returned %d; there must be no image mutation route", target, rec.Code)
@@ -493,7 +493,7 @@ func TestThereIsNoImageMutationRoute(t *testing.T) {
 // misleading empty list. The image endpoints that predate this phase keep
 // working.
 func TestImageIntelEndpointsReportWhenDisabled(t *testing.T) {
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health: &fakeHealth{},
 		Images: &fakeImages{usages: []store.ImageUsage{{
 			Image: domain.Image{ID: "sha256:abc"},
@@ -516,7 +516,7 @@ func TestImageIntelEndpointsReportWhenDisabled(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, APIPrefix+"/images/refresh", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("POST /images/refresh returned %d, want 503", rec.Code)
 	}

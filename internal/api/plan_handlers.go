@@ -228,12 +228,11 @@ func (s *Server) handlePlanGenerate(w http.ResponseWriter, r *http.Request) {
 			"change planning is not configured")
 		return
 	}
-	if err := s.guardWrite(r); err != nil {
-		s.writeGuardFailure(w, r, err)
-		return
-	}
 
 	s.planner.RequestGeneration()
+	s.auditWrite(r, domain.AuditPlanGenerated, domain.AuditTargetPlan, "", "",
+		"plan generation requested")
+
 	writeJSON(w, r, s.logger, http.StatusAccepted, planGenerateResponse{
 		Requested: true,
 		Planner:   s.planner.Status(),

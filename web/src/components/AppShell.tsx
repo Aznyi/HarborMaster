@@ -4,29 +4,57 @@ import type { ReactNode } from "react";
 
 import type { ResourceState } from "../hooks/useApiResource";
 import type { HealthReport } from "../api/types";
+import type { Permission, PublicUser } from "../api/authTypes";
+import { useSession } from "../hooks/useSession";
 import { ConnectivityIndicator } from "./ConnectivityIndicator";
 
 export interface NavItem {
   label: string;
   path: string;
+  /**
+   * The permission a role must hold for this destination to be listed.
+   *
+   * Omitted for the pages every signed-in account can reach: the dashboard,
+   * their own account, and settings.
+   *
+   * # Hiding a link is NOT the access control
+   *
+   * The server refuses the request regardless of what is rendered here, and an
+   * operator who types the URL gets a 403 from the API rather than a page. This
+   * exists so the navigation reflects what the account can actually do, which
+   * is a usability property -- offering a link that always fails is a bad
+   * interface, not an insecure one.
+   */
+  permission?: Permission;
 }
 
 /** Primary navigation. Order is the operator's expected workflow. */
 export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Dashboard", path: "/" },
-  { label: "Containers", path: "/containers" },
-  { label: "Images", path: "/images" },
-  { label: "Updates", path: "/images/updates" },
-  { label: "Snapshots", path: "/snapshots" },
-  { label: "Drift", path: "/drift" },
-  { label: "Change plans", path: "/plans" },
-  { label: "Acquisitions", path: "/acquisitions" },
-  { label: "Recreations", path: "/executions" },
-  { label: "Compliance", path: "/compliance" },
-  { label: "Policies", path: "/policies" },
-  { label: "Events", path: "/events" },
+  { label: "Containers", path: "/containers", permission: "inventory:read" },
+  { label: "Images", path: "/images", permission: "inventory:read" },
+  { label: "Updates", path: "/images/updates", permission: "inventory:read" },
+  { label: "Snapshots", path: "/snapshots", permission: "snapshot:read" },
+  { label: "Drift", path: "/drift", permission: "drift:read" },
+  { label: "Change plans", path: "/plans", permission: "plan:read" },
+  { label: "Acquisitions", path: "/acquisitions", permission: "acquisition:read" },
+  { label: "Recreations", path: "/executions", permission: "execution:read" },
+  { label: "Compliance", path: "/compliance", permission: "policy:read" },
+  { label: "Policies", path: "/policies", permission: "policy:read" },
+  { label: "Events", path: "/events", permission: "event:read" },
+  { label: "Accounts", path: "/users", permission: "user:manage" },
+  { label: "Security audit", path: "/audit", permission: "audit:read" },
+  { label: "Your account", path: "/account" },
   { label: "Settings", path: "/settings" },
 ] as const;
+
+/** The destinations one account may see. */
+export function visibleNavItems(user: PublicUser | null): readonly NavItem[] {
+  if (!user) return [];
+  return NAV_ITEMS.filter(
+    (item) => !item.permission || user.permissions.includes(item.permission),
+  );
+}
 
 /**
  * The responsive application shell.
@@ -43,6 +71,8 @@ export function AppShell({
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
+  const session = useSession();
+  const items = visibleNavItems(session.user);
 
   // Navigating away must close the drawer, or the overlay traps the new page.
   useEffect(() => setDrawerOpen(false), [location.pathname]);
@@ -57,7 +87,11 @@ export function AppShell({
       </a>
 
       <div className="lg:grid lg:grid-cols-[16rem_1fr]">
-        <Sidebar open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+        <Sidebar
+          open={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          items={items}
+        />
 
         <div className="flex min-h-screen flex-col">
           <header className="sticky top-0 z-20 flex flex-wrap items-center gap-3 border-b border-border-subtle bg-surface-raised/95 px-4 py-3 backdrop-blur sm:px-6">
@@ -76,6 +110,24 @@ export function AppShell({
             </h1>
 
             <ConnectivityIndicator health={health} />
+
+            <div className="flex items-center gap-2 text-sm">
+              <span className="hidden text-content-muted sm:inline">
+                {session.user?.username}
+              </span>
+              {session.user ? (
+                <span className="rounded bg-accent-soft px-1.5 py-0.5 text-xs text-accent">
+                  {session.user.role}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void session.signOut()}
+                className="rounded-lg border border-border-subtle px-3 py-1.5 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </div>
           </header>
 
           <main
@@ -86,8 +138,8 @@ export function AppShell({
           </main>
 
           <footer className="border-t border-border-subtle px-4 py-4 text-xs text-content-muted sm:px-6">
-            HarborMaster &mdash; read-only inventory and snapshot foundation. No
-            container is created, changed, or removed by this build.
+            HarborMaster &mdash; every action is authenticated and recorded
+            against the account that performed it.
           </footer>
         </div>
       </div>
@@ -110,7 +162,15 @@ function pageTitle(pathname: string): string {
   return parent?.label ?? "HarborMaster";
 }
 
-function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+function Sidebar({
+  open,
+  onClose,
+  items,
+}: {
+  open: boolean;
+  onClose: () => void;
+  items: readonly NavItem[];
+}) {
   return (
     <>
       {open ? (
@@ -142,7 +202,7 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
           </div>
 
           <nav aria-label="Primary" className="flex flex-col gap-1">
-            {NAV_ITEMS.map((item) => (
+            {items.map((item) => (
               <NavLink
                 key={item.path}
                 to={item.path}

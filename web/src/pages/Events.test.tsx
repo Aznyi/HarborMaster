@@ -1,5 +1,6 @@
 ﻿import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { SessionProvider } from "../hooks/useSession";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -420,7 +421,9 @@ describe("Dashboard event engine panel", () => {
   function renderApp(path = "/") {
     return render(
       <MemoryRouter initialEntries={[path]}>
-        <App />
+        <SessionProvider>
+          <App />
+        </SessionProvider>
       </MemoryRouter>,
     );
   }

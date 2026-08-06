@@ -1,6 +1,6 @@
 # HarborMaster Threat Model
 
-**Status:** current as of the Phase 3 security audit
+**Status:** current as of the Phase 9.5 security audit
 **Scope:** the whole repository — backend, frontend, container image, CI/CD
 **Method:** asset-driven, with STRIDE applied per trust boundary
 
@@ -125,26 +125,70 @@ everything HarborMaster could protect.
 
 | Boundary | Between | Crossing controls |
 | --- | --- | --- |
-| **TB1** | Network → HTTP API | **No authentication.** Loopback bind by default, security headers, strict input validation, rate limiting, body/pagination limits |
+| **TB1** | Network → HTTP API | **Authenticated by default and by construction.** Server-side sessions in HttpOnly cookies, role-based authorization decided in one place, CSRF on every write, loopback bind, security headers, strict input validation, rate limiting, body/pagination limits |
+| **TB1a** | Anonymous network → the four public routes | `GET /health` (reduced body), `GET /version`, `POST /auth/login`, `GET /auth/bootstrap`. Nothing else answers without a session; an architecture test fails the build if a fifth appears |
 | **TB2** | HarborMaster → Docker socket | Seven read-only methods; architecture test; SDK confined to `internal/docker`; all errors sanitised |
 | **TB3** | Process → SQLite | Parameterised queries only; sort allowlists; no plaintext secrets; `0750` directory |
 | **TB4** | CI → registry | SHA-pinned actions, least-privilege tokens, OIDC keyless attestation, SBOM, provenance |
 
-**TB1 is the weakest boundary in the system, and it is weak by design in this
-phase.** Authentication is deliberately out of scope until a later phase. The
-compensating control is deployment guidance — loopback binding by default — and
-that is a weaker control than authentication would be. This is the single
-largest residual risk in the product.
+**TB1 was the weakest boundary in the system until Phase 9.5, and it is the one
+that phase exists to close.** It is now an authenticated boundary: every route
+except four requires a server-side session, and every route that changes
+something additionally requires a permission its role must hold and a CSRF token
+its session derives.
+
+Two things about it are worth stating precisely.
+
+**There is no setting that turns it off.** HarborMaster fronts a root-equivalent
+socket, and an "auth off for convenience" switch is a switch that ends up on in
+production. Authentication is not a feature flag; it is the shape of the
+routing.
+
+**Default deny is a property of the type system, not of diligence.** Every route
+declares an access policy, the zero value of that policy is invalid rather than
+"public", and a route registered without one is refused at runtime and fails
+`TestEveryRouteDeclaresAnAccessPolicy` at build time. "I forgot" and "I meant
+public" have to look different, and with a zero value that means public they do
+not.
+
+**What TB1 still does not do** is authenticate the operator to anything other
+than HarborMaster, terminate TLS, or federate with an identity provider. A
+deployment beyond loopback still wants a TLS-terminating proxy — see R9 — and
+`__Host-` cookie prefixing only engages over HTTPS.
 
 ---
 
 ## 5. Attack surface
 
-### Network-reachable (unauthenticated)
+### Network-reachable without a session
+
+Four routes, and each has a stated reason. This list is the whole of
+HarborMaster's unauthenticated surface, and
+`TestThePublicSurfaceIsExactlyTheDocumentedRoutes` fails the build if a fifth
+appears.
+
+| Surface | Methods | Why it must be public | What it discloses |
+| --- | --- | --- | --- |
+| `GET /api/v1/health` | GET | A container runtime's HEALTHCHECK cannot hold a session | **One field**: the overall status. The full report — database path, journal mode, Docker API version, how long the daemon has been unreachable — is returned only to an authenticated caller |
+| `GET /api/v1/version` | GET | Deployment identification by tooling that holds no credential | A version, a commit, a build date. Non-sensitive by construction |
+| `POST /api/v1/auth/login` | POST | It is how a session is obtained | One 401 for every credential failure, with matching timing. It is not an account directory |
+| `GET /api/v1/auth/bootstrap` | GET | A client must choose between the sign-in page and the bootstrap page before it holds anything | One boolean: whether an administrator exists |
+
+`POST /api/v1/auth/bootstrap` is a fifth route with a policy of its own: it
+answers only while the installation is unclaimed, needs the one-time token
+printed at startup, and answers `404` once an administrator exists.
+
+Everything else answers `401` without a session and `403` when the account's
+role does not hold the route's permission. The SPA shell and its static assets
+are served without a session because they contain no data — the bundle's first
+act is to call an authenticated endpoint, so an unauthenticated visitor gets a
+sign-in page and nothing else.
+
+### Network-reachable with a session
 
 | Surface | Methods | Notes |
 | --- | --- | --- |
-| 40 REST endpoints under `/api/v1` | Mostly GET | Full list in `api/openapi.yaml`; a test fails the build if the router and the document disagree |
+| 55 REST endpoints under `/api/v1` | Mostly GET | Full list in `api/openapi.yaml`; a test fails the build if the router and the document disagree |
 | `POST /api/v1/inventory/refresh` | POST | Drives a full Docker sweep |
 | `POST /api/v1/snapshots` | POST | Writes to the database |
 | `PATCH /api/v1/drift/{id}` | PATCH | Moves a drift record's status. Cannot reach Docker, a container, or a snapshot; cannot set `active` or `resolved` |
@@ -164,20 +208,25 @@ largest residual risk in the product.
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
 
-**The policy write surface is the notable change in this phase**, so it is worth
-being explicit about what an anonymous caller can do with it: create, edit, and
-withdraw HarborMaster's own compliance rules, and ask for a compliance pass. It
-cannot change a container, cannot reach the Docker socket, cannot destroy
-violation history, and cannot supply anything that is interpreted as code. The
-bounds on policy size, rule count, value count, and pattern shape are what stop
-it being used to make evaluation expensive; the per-process rate limit and the
-asynchronous evaluate endpoint are what stop it being used to occupy the
-process. Under R1 (no authentication) an attacker who can reach the port can
-also **disable a policy and hide non-compliance from the dashboard** — the
-definition and its history survive, but the report stops being trustworthy.
+**Policy administration is an ADMINISTRATOR permission, not an operator one**,
+and the reason is worth stating: a policy is what blocks an acquisition or a
+recreation, so an operator able to edit one could remove the gate standing in
+their way. Creating, editing, and withdrawing a rule needs `policy:manage`;
+annotating a violation and requesting a pass need only `policy:annotate` and
+`policy:evaluate`, which an operator holds.
 
-**The acquisition surface is the significant change in Phase 8**, and it is
-worth being explicit about what an anonymous caller can do with it under R1.
+The write surface itself is unchanged: it acts on HarborMaster's own rows, it
+cannot change a container, it cannot reach the Docker socket, it cannot destroy
+violation history, and it cannot supply anything that is interpreted as code.
+The bounds on policy size, rule count, value count, and pattern shape are what
+stop it being used to make evaluation expensive; the per-process rate limit and
+the asynchronous evaluate endpoint are what stop it being used to occupy the
+process.
+
+**The acquisition surface was the significant change in Phase 8**, and it is
+worth being explicit about what an OPERATOR can do with it. It is no longer
+reachable anonymously: `acquisition:create` is an operator-or-above permission,
+and every request is recorded against the account that made it.
 
 They can cause HarborMaster to download an image to the host — but only an image
 that a current change plan recommends, for a container that exists, from a
@@ -195,9 +244,11 @@ image. An attacker who can reach the port can also **cancel a legitimate
 download**, which is a nuisance rather than a compromise: nothing is left in a
 partial state that HarborMaster reports as acquired.
 
-The disk-consumption risk is real and is recorded as R25. The mitigation an
-operator has today is the one that matters most everywhere else in this document:
-do not expose the port.
+The disk-consumption risk is real and is recorded as R25. It is now an
+ATTRIBUTABLE abuse rather than an anonymous one: every acquisition and every
+recreation carries the account, session, request id, and source address that
+caused it, which is the difference between an incident you can investigate and
+one you can only observe.
 
 **The recreation surface is the significant change in Phase 9**, and it is the
 most consequential thing in this document after R1 itself.
@@ -298,18 +349,28 @@ well-meaning "show the diagnosis in the UI" change.
 
 | Threat | Vector | Mitigation | Residual |
 | --- | --- | --- | --- |
-| **S**poofing | No identity exists to spoof | N/A — no authentication in this phase | **Anyone reachable is fully trusted** |
+| **S**poofing | Guessing or stuffing a credential | Argon2id verification, exponential per-account backoff, per-address throttle, one indistinguishable 401 for every failure with matching timing via a decoy hash, minimum password length with a refusal list | Low |
+| **S**poofing | Stealing a session token | HttpOnly + SameSite cookie, `__Host-` prefix over HTTPS, keyed digest at rest so a database copy yields nothing usable, idle and absolute expiry, revocation on password change, role change, and disablement | Low |
+| **S**poofing | Forging the source address in the audit log | Forwarding headers ignored entirely unless a trusted-proxy CIDR is configured AND the peer is inside it; the chain is walked right to left and stops at the first untrusted hop | Low |
+| **S**poofing | Racing the first administrator on a fresh installation | Claiming needs the one-time token printed at startup, so it requires log or filesystem access rather than being first to the port; the token is re-minted on every restart, stored as a keyed digest, and compared in constant time; both success and every rejection are audited | Low |
 | **T**ampering | Malicious JSON to a POST | Strict decoding, unknown fields rejected, single object enforced, UTF-8 and control-character validation, size limits | Low |
-| **T**ampering | Cross-origin write from a malicious page | `Content-Type: application/json` required (forces preflight), `Sec-Fetch-Site`/`Origin` checks, rate limiting | Low |
+| **T**ampering | Cross-origin write from a malicious page | A per-session CSRF token in a custom header (which a cross-origin form cannot set without a preflight that fails), `SameSite` on the cookie, `Content-Type: application/json` required, `Sec-Fetch-Site`/`Origin` checks, rate limiting. Only login and bootstrap are CSRF-exempt, because they have no session to derive a token from | Low |
+| **T**ampering | Privilege escalation by editing one's own account | The account endpoints refuse an administrator modifying their own role or status, and refuse removing the last active administrator; both checks run inside the transaction that performs the change | Low |
 | **R**epudiation | Forged log correlation | Client `X-Request-ID` ignored; server generates 12 random bytes | Low |
+| **R**epudiation | Denying an action | Every authentication attempt, every authorization denial, and every state-changing request is recorded with the account, session, request id, and source address. Records are append-only: no endpoint edits or deletes one, and security records are retained far longer than operational ones | Low |
 | **I**nfo disclosure | Secret in an API response | Digest fields unserialisable; sensitive values never stored | Low |
 | **I**nfo disclosure | Stack trace or path in an error | All errors mapped to stable codes and generic messages; tested | Low |
-| **I**nfo disclosure | Reconnaissance of the host estate | **None — this is the product's purpose** | **High if exposed** |
+| **I**nfo disclosure | Reconnaissance of the host estate | A session is required for every estate endpoint; the public health body is reduced to one field | Low |
+| **I**nfo disclosure | Enumerating which accounts exist | One 401 for every credential failure, with the timing matched by hashing against a decoy; the per-address throttle is applied before the username is looked up so query timing is not a side channel either | Low |
+| **I**nfo disclosure | A password or token in a log, a response, or the audit table | No column exists that could hold one; the API's account projection carries no credential field; `TestCredentialMaterialIsConfinedToStoreAndService` fails the build if the verifier type reaches the HTTP layer, and `TestNoAuditRowEverContainsASecret` sweeps a real recorded log for every secret that was in scope | Low |
 | **D**enial of service | Unbounded pagination | `pageSize` capped at 200, rejected not clamped | Low |
 | **D**enial of service | Expensive diffs | 4 concurrent max, 5s timeout, 1000-entry cap, 429 not queued | Low |
 | **D**enial of service | Snapshot flooding | Rate limit, `(container_id, checksum)` dedup index, per-container capture lock | Low |
 | **D**enial of service | SSE connection exhaustion | Subscriber cap with `Retry-After`; bounded per-subscriber queues | Low |
 | **D**enial of service | Refresh flooding against the socket | Rate limit, single-flight refresh lock | Low |
+| **D**enial of service | Locking a legitimate operator out by guessing at their username | Exponential backoff to a bounded ceiling rather than a hard lockout; a lockout would turn an authentication control into a denial-of-service tool | Low |
+| **D**enial of service | Making the server hash unbounded input from an anonymous endpoint | Password length bounded before hashing and refused with the same 401 as a wrong password; Argon2id parameters bounds-checked at construction and again per credential, so a corrupt row cannot request a gigabyte | Low |
+| **D**enial of service | Unbounded session or audit growth | Per-account session cap with oldest-first eviction in the same transaction as the insert; a bounded sweeper expires and prunes; audit retention runs on two cutoffs with a bounded batch | Low |
 | **D**enial of service | Recreation flooding to take containers down | Off by default; one active recreation per container (database index) and `EXECUTION_MAX_CONCURRENT` at 1 by default, 4 maximum; every recreation consumes a single-use acquisition that itself needed a recommending plan; write rate limiter | **Medium if enabled — see R28** |
 | **E**levation | Reaching Docker through the API | The API layer holds NO mutation capability. Architecture tests fail the build if `internal/api` names the image acquirer or the container mutator, so a handler cannot bypass the preflight even by importing the adapter | Low |
 
@@ -424,11 +485,11 @@ Ordered by severity. These are accepted, not solved.
 
 | # | Risk | Severity | Why accepted | Mitigation available today |
 | --- | --- | --- | --- | --- |
-| R1 | **No authentication.** Anyone who can reach the port gets the full inventory and can drive both POST endpoints | **High** | Out of scope until a later phase | Loopback bind by default; authenticating reverse proxy; network policy |
+| R1 | ~~**No authentication.**~~ **RESOLVED in Phase 9.5.** Every route except four requires a server-side session; there is no setting that disables it | — | — | Retained here rather than deleted, because R1 is referenced throughout this document's history and because "this was once true" is what a reader of an older deployment needs to know |
 | R2 | **Docker socket access is root-equivalent.** A compromise of the process is close to a host compromise | **High** | Inherent to the product's purpose | Read-only adapter, distroless non-root image, dropped capabilities, `no-new-privileges`, resource ceilings |
 | R3 | **HMAC key beside the database.** An attacker with the data volume gets both | **Medium** | Convenient default for standalone use | Supply the key via `..._KEY_FILE` and a Docker secret |
 | R4 | **Base images pinned by tag, not digest** | **Medium** | Digest pinning needs registry lookups and regular rotation | Dependabot `docker` ecosystem is configured to keep them current |
-| R5 | **No RBAC.** No notion of a user, so no least privilege among operators | **Medium** | Follows from R1 | Proxy-level access control |
+| R5 | ~~**No RBAC.**~~ **RESOLVED in Phase 9.5.** Three roles with fixed permission sets; every route declares the permission it needs and a route without a policy fails the build | — | — | — |
 | R6 | **Value length disclosure** | **Low** | Needed for restore readiness | None; documented |
 | R7 | **Name-based secret classification** | **Low** | Value scanning is worse | `all-sensitive` mode |
 | R8 | **SQLite single writer** | **Low** | Right choice for a single-host tool | Bounded batches; retention |
@@ -441,13 +502,13 @@ Ordered by severity. These are accepted, not solved.
 | R19 | **A compromised or hostile registry serves HarborMaster arbitrary bytes.** It can report a false digest, a false tag list, or misleading annotations | **Medium** | Any client of a registry has this exposure, and HarborMaster's is read-only: the worst outcome is a wrong badge on a dashboard, not a changed container | Responses bounded and parsed into a fixed shape; digests COMPUTED rather than believed; annotations allowlisted, bounded and control-character free; no registry string reaches a log, an error, or a column |
 | R20 | **Update verdicts are advisory and can be wrong.** A publisher who reuses tags unconventionally, or a repository with more tags than the page budget, can produce a missed or mislabelled update | **Low** | Tag conventions are not standardised and cannot be inferred reliably; the parser is deliberately conservative and refuses more than it accepts | Missed updates are the chosen failure direction; a truncated listing reports `unknown` rather than `none`; the digest comparison is always available and always true |
 | R21 | **Anonymous rate limits are shared by egress address.** A busy host can exhaust a public registry's anonymous quota for everything behind the same address | **Low** | Authenticating would mean holding registry credentials, which is a larger risk than the one it solves | Bounded concurrency and batch size, jittered scheduling, per-host backoff, and `Retry-After` honoured; the whole feature can be disabled |
-| R15 | **Anyone who can reach the API can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Medium** | Follows from R1; the policy surface has no separate authentication because HarborMaster has none | The definition and every violation it found are retained, so the change is visible and reversible rather than destructive; loopback bind and an authenticating proxy |
+| R15 | **An administrator can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Low** | Somebody has to be able to change the rules, and the alternative — rules nobody can withdraw — makes a wrong rule permanent | Requires `policy:manage`, which an operator deliberately does not hold, so the person a policy blocks cannot remove it; the definition and every violation it found are retained; the change is recorded in the audit log against the account that made it |
 | R16 | **A policy is only as good as the configuration HarborMaster can see.** Capability rules evaluate declared `capAdd` and cannot see the daemon's default set; `networkAllowlist` evaluates attached networks and cannot distinguish `container:<id>` namespace sharing from having no network | **Medium** | The alternative is hardcoding a claim about a daemon HarborMaster has not asked, which would be confidently wrong rather than honestly narrow | Stated in each rule's catalogue description, in the violation's reason, and in the editor; the network rule fails closed on an empty attachment set |
 | R17 | **Compliance reflects the last inventory refresh, not the live host.** A container changed between refreshes is reported against stale configuration until the next pass | **Low** | Evaluating against the daemon on demand would put a Docker call behind an unauthenticated endpoint | A pass runs after every successful refresh and after a targeted refresh commits; the inventory generation is recorded on every violation |
-| R25 | **An anonymous caller can cause image downloads.** Under R1, anyone who can reach the port can request acquisitions and consume disk space and uplink bandwidth | **Medium** | Follows from R1. The alternative -- requiring a credential HarborMaster does not have a concept of -- is authentication, which is the fix for R1 itself | Off by default; every acquisition needs a plan that independently recommends it; global and per-registry concurrency limits, a pull timeout, a write rate limiter, and a duplicate-work index; loopback bind and an authenticating proxy |
+| R25 | **An authenticated operator can cause image downloads** and consume disk space and uplink bandwidth | **Low** | Downloading an approved image is the feature. Requiring a second approval for each would make the capability unusable without making it safer | Off by default; needs `acquisition:create`, which a viewer does not hold; every acquisition needs a plan that independently recommends it; global and per-registry concurrency limits, a pull timeout, a write rate limiter, and a duplicate-work index; every request is attributed in the audit log |
 | R26 | **A pulled image consumes disk that HarborMaster does not reclaim.** There is no delete or prune capability, so acquired images accumulate until an operator removes them | **Low** | Adding image deletion would be a second, larger mutation capability -- one that can destroy something rather than add to it -- and is a worse trade than accumulation | Concurrency limits bound the rate; `docker image prune` is an operator's tool; every acquisition is recorded, so what was downloaded is always attributable |
 | R27 | **A digest mismatch means unapproved content is on the host.** Verification catches it and records it, but the layers are already in the local store | **Low** | The bytes arrive before anything can inspect them; catching it afterwards is the only point at which it CAN be caught | Never reported as acquired, never retried automatically, logged at error level with the evidence; no container is changed, so nothing runs it |
-| R28 | **An anonymous caller can take a container down.** Under R1, with `EXECUTION_ENABLED=true`, anyone who can reach the port can spend a succeeded acquisition on a recreation and interrupt the service for as long as the startup verification takes | **High if enabled** | Follows from R1 and is the reason the feature is off by default. The alternative — requiring a credential HarborMaster has no concept of — is authentication, which is the fix for R1 itself | Off by default, and refused at startup unless acquisition is also on; each recreation consumes a single-use acquisition that itself needed a recommending plan; one active recreation per container; `EXECUTION_MAX_CONCURRENT` defaults to 1; the original is preserved through every failure; loopback bind and an authenticating proxy |
+| R28 | **An operator can take a container down.** With `EXECUTION_ENABLED=true`, an account holding `execution:create` can spend a succeeded acquisition on a recreation and interrupt the service for as long as the startup verification takes | **Medium if enabled** | Recreating a container is the feature, and the account that can do it is the account an administrator decided should. What remains is that an operator's mistake, or a compromised operator session, reaches a running service | Off by default, and refused at startup unless acquisition is also on; needs `execution:create`, which a viewer does not hold; each recreation consumes a single-use acquisition that itself needed a recommending plan; one active recreation per container; `EXECUTION_MAX_CONCURRENT` defaults to 1; the original is preserved through every failure; the request is logged at WARN and recorded against the account, session, and address that made it |
 | R29 | **A container is unavailable while its replacement is verified.** Up to `EXECUTION_STARTUP_TIMEOUT` — five minutes by default — plus the stop and create | **Medium** | Removing the wait would mean removing the verification, which is the only thing that establishes the replacement works. A recreation that reported success on an unproved container would be worse than a slow one | Tune `EXECUTION_STARTUP_TIMEOUT` down for fast-starting services; a container with a health check gets a verdict as soon as the daemon has one rather than waiting out the clock; an explicit `unhealthy` fails immediately |
 | R30 | **A failed recreation leaves two containers on the host and does not restore service by itself** | **Medium** | Deliberate. An automatic rollback is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong | The original is never removed before the replacement is fully proved; the failed replacement is stopped and renamed off the production name; the record carries a `recovery` plan naming both containers by name and id with the exact commands; the summary counts these separately as `needsAttention`, and retention never prunes them |
 | R31 | **A recreation interrupted between a mutation and its checkpoint leaves HarborMaster uncertain what it did** | **Low** | Certainty here would need a two-phase commit against the Docker daemon, which the Engine API does not offer | The window is one Docker call wide; the pipeline stops rather than acting again on an uncertain record; recovery reports the uncertainty as uncertainty and tells the operator which single question to answer, rather than guessing in either direction |
@@ -455,6 +516,12 @@ Ordered by severity. These are accepted, not solved.
 | R22 | **A risk score is a judgement, not a measurement.** The weights are chosen by people and can be wrong for a given estate; a plan that reads "proceed" is not a guarantee the change is safe | **Medium** | Any risk model has this property, and the alternative — no assessment — leaves an operator with the same decision and less information. Making the weights configurable would make plans irreproducible between deployments, which costs more than it gains | Every factor names the rule that produced it and its contribution, so a verdict is auditable rather than opaque; the planner version is recorded on every plan and a rule change forces regeneration; nothing acts on a plan automatically |
 | R23 | **A plan is only as fresh as its inputs.** It rests on the last inventory refresh, the last registry lookup, and the last drift and policy passes, so a world that moved since any of those is assessed against stale evidence | **Low** | Reading live state would put a Docker call and a registry call behind an unauthenticated endpoint, which is a larger risk than staleness | A pass runs after every successful inventory refresh; each plan records when it was generated and the registry status it rested on; the UI reports a non-OK registry status as `cannot advise` rather than as a verdict |
 | R24 | **The freshness rule can act on a stale clock.** The evaluation time is excluded from the fingerprint deliberately, so an image crossing the 48-hour freshness boundary does not by itself produce a new plan | **Low** | Including a clock would make every fingerprint unique and defeat duplicate suppression entirely, which is what keeps the table from growing on every refresh | Documented at the fingerprint; the next genuine input change regenerates the plan, and the factor is worth 8 points of 100 |
+| R33 | **A stolen session is usable until it expires or is revoked.** HarborMaster has no device binding, no re-authentication step for a privileged action, and no second factor | **Medium** | A second factor is a substantially larger feature — enrolment, recovery codes, a lost-device path — and shipping half of one is worse than shipping none. Device binding is unreliable behind proxies and NAT | HttpOnly and SameSite cookies with `__Host-` prefixing over HTTPS, a CSRF token a script cannot read, idle and absolute expiry, a per-account session cap, and immediate revocation on password change, role change, or disablement; an operator can see and end their own sessions, and an administrator can reset a password to end all of them |
+| R34 | **The installation key is a single point of failure for every session.** Session and bootstrap digests are keyed with the same installation key the snapshots use; replacing it signs everyone out | **Low** | A second key would be a second thing to back up, a second thing to lose, and a second way for a restore to half-work. Being signed out is the correct consequence of a key that no longer exists — honouring a digest that cannot be verified would mean not verifying it | Domain-separated purposes so a snapshot digest and a session digest are not interchangeable; the key file's permissions are checked at startup and by the console commands; documented in the reliability runbook |
+| R35 | **Anyone who can read the server's log or its data directory can claim an unclaimed installation.** The bootstrap token is printed to standard output | **Low** | The alternative is a default account, which is how appliances end up on the internet with admin/admin. Filesystem or log access is a stronger bar than being first to the port, and somebody with it can already edit the database | The token is one-time, expires, is re-minted on every restart, is stored only as a keyed digest, and is compared in constant time; every rejected attempt is audited; the window closes permanently the moment an administrator exists |
+| R36 | **A console operator can reset any password without knowing it.** `harbormaster admin reset-password` takes filesystem access as its authority | **Low** | Every authentication system needs an answer to "the only administrator left", and the alternatives — a default password, a permanent recovery account, a support endpoint — are backdoors that are always present. This one is only available to somebody who could already rewrite the users table by hand | Never reachable over HTTP, and an architecture test fails the build if `internal/api` so much as names the type; refuses to run against a world-readable database or key file without `--force`; the destructive session revocation is confirmed; every console operation is audited as coming from the local console rather than from an account |
+| R37 | **A browser XSS would be able to act as the signed-in operator.** The session cookie is HttpOnly, so a script cannot read the token — but it can make requests that carry it, and it can read the CSRF token | **Low** | This is inherent to cookie-based sessions in a browser. Any scheme in which JavaScript can make an authenticated request is a scheme in which injected JavaScript can too | React escapes by default and the app contains no `dangerouslySetInnerHTML`; a strict Content-Security-Policy with no inline script; every operator-supplied string reaches the DOM as a text node; the CSRF token is held in a module variable rather than web storage, so it does not survive the page |
+| R38 | **HarborMaster has no password-reset-by-email, no account recovery, and no SSO.** An operator who forgets their password needs another administrator or a console | **Low** | Deliberate scope. Email introduces an outbound channel and a delivery dependency; SSO introduces a second identity system and a much larger attack surface. Neither belongs in a single-host tool before the basics are solid | Any administrator can reset any other account's password; the console can reset any account including the last administrator |
 | R14 | **A wedged background task can be abandoned at shutdown** once the grace period elapses | **Low** | An unbounded wait is not recoverable; an abandoned SQLite transaction is rolled back by the database | Logged at error level with what was abandoned; raise `SHUTDOWN_TIMEOUT` |
 
 ---
@@ -463,12 +530,20 @@ Ordered by severity. These are accepted, not solved.
 
 If any of these is false, this model does not hold.
 
-1. The operator does not expose HarborMaster to an untrusted network without an
-   authenticating proxy.
+1. The operator does not expose HarborMaster to an untrusted network without
+   TLS. Authentication is now HarborMaster's own, but the session cookie is only
+   as safe as the transport carrying it, and the `__Host-` prefix engages only
+   over HTTPS.
 2. The host's Docker daemon is not already compromised.
 3. The data volume is not readable by untrusted users on the host.
 4. The HMAC key is backed up and is not stored in the same backup as the
-   database, if key hygiene matters to the deployment.
+   database, if key hygiene matters to the deployment. It now also keys every
+   session digest: losing it signs everyone out, and replacing it does the same.
+5. The bootstrap token is treated as a credential. Anyone who can read the
+   startup log of an unclaimed installation can claim it.
+6. An administrator's account is protected at least as well as the host. There
+   is no second factor, so a compromised administrator password plus network
+   reachability is a compromised installation.
 5. Operators verify image attestations before deploying.
 6. GitHub's OIDC and attestation infrastructure is trustworthy.
 
@@ -478,15 +553,21 @@ If any of these is false, this model does not hold.
 
 Roughly in the order it should be done.
 
-1. **Authentication** — closes R1, the largest residual risk. Until it exists,
-   every other network control is compensating for its absence.
-2. **Authorization / RBAC** — closes R5; only meaningful after (1).
+1. **A second authentication factor** — closes the largest part of R33. TOTP is
+   the smallest useful shape; it needs enrolment, recovery codes, and a
+   lost-device path, which is why it is a phase rather than an afternoon.
+2. **Re-authentication for privileged actions** — requiring the password again
+   for `execution:create` would bound what a stolen session reaches, at the cost
+   of friction on the action operators perform under time pressure. Worth
+   measuring before adopting.
 3. **Secure secret injection** — the prerequisite for restore. Restoring a
    container with secrets requires values HarborMaster deliberately does not
    hold.
 4. **Digest-pinned base images** — closes R4.
 5. **HMAC key rotation tooling** — the metadata exists; the tooling does not.
-6. **Audit log of read access** — who looked at what, once identity exists.
+6. **Audit log of read access** — who looked at what. The identity now exists;
+   what is missing is a decision about volume, because recording every GET would
+   make the table grow far faster than the security records that matter most.
 7. **Optional host validation provider** — the interface exists and answers
    `unverifiable`; a real implementation must be opt-in and carefully bounded.
 
@@ -497,7 +578,10 @@ Roughly in the order it should be done.
 Revisit this document when any of the following happens:
 
 - HarborMaster gains **any** ability to modify a Docker resource.
-- Authentication or authorization is added.
+- The authentication or authorization model changes: a new role, a new
+  permission, a new public route, or any change to how a session is issued,
+  stored, or revoked.
+- A second identity source is introduced (SSO, LDAP, a proxy-asserted header).
 - A new network listener, protocol, or endpoint appears.
 - The secret handling design changes.
 - A new trust boundary is introduced (a second host, an agent, a plugin).

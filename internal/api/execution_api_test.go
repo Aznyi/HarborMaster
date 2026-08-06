@@ -176,7 +176,7 @@ func newExecutionServer(t *testing.T, executions *fakeExecutions) *Server {
 		capability = executions
 	}
 
-	return NewServer(Options{
+	return newAuthedServer(Options{
 		Health:         &fakeHealth{},
 		Executions:     capability,
 		Logger:         discardLogger(),
@@ -473,7 +473,7 @@ func TestExecutionWritesGoThroughTheSameGuardAsEveryOtherWrite(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("cross-site POST: status = %d, want 403", rec.Code)
 	}
@@ -483,7 +483,7 @@ func TestExecutionWritesGoThroughTheSameGuardAsEveryOtherWrite(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, APIPrefix+"/executions", strings.NewReader(validExecutionBody))
 	req.Header.Set("Content-Type", "text/plain")
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, authed(req))
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("text/plain POST: status = %d, want 415", rec.Code)
 	}
@@ -503,7 +503,7 @@ func TestExecutionWritesGoThroughTheSameGuardAsEveryOtherWrite(t *testing.T) {
 func TestExecutionWritesAreRateLimited(t *testing.T) {
 	executions := &fakeExecutions{created: sampleExecution(), enabled: true}
 
-	srv := NewServer(Options{
+	srv := newAuthedServer(Options{
 		Health:         &fakeHealth{},
 		Executions:     executions,
 		Logger:         discardLogger(),

@@ -1,9 +1,17 @@
-﻿import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Route, Routes } from "react-router";
+import type { ReactNode } from "react";
 
+import type { Permission } from "./api/authTypes";
 import { AppShell } from "./components/AppShell";
+import { DisconnectedState, EmptyState, LoadingState } from "./components/States";
 import { useHealth } from "./hooks/useHealth";
+import { useSession } from "./hooks/useSession";
+import { Account } from "./pages/Account";
 import { AcquisitionDetail } from "./pages/AcquisitionDetail";
 import { Acquisitions } from "./pages/Acquisitions";
+import { Audit } from "./pages/Audit";
+import { ChangePassword } from "./pages/ChangePassword";
+import { ClaimInstallation } from "./pages/ClaimInstallation";
 import { ExecutionDetail } from "./pages/ExecutionDetail";
 import { Executions } from "./pages/Executions";
 import { ChangePlans } from "./pages/ChangePlans";
@@ -21,45 +29,184 @@ import { ContainerPolicy } from "./pages/ContainerPolicy";
 import { Policies } from "./pages/Policies";
 import { PolicyViolations } from "./pages/PolicyViolations";
 import { Settings } from "./pages/Settings";
+import { SignIn } from "./pages/SignIn";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
 import { Snapshots } from "./pages/Snapshots";
+import { Users } from "./pages/Users";
 
 /**
- * Health is polled once at the shell level and passed down, so every view
- * agrees on connectivity and the app makes one request per interval rather
- * than one per mounted component.
+ * The application root.
+ *
+ * # Nothing about the estate renders before a session exists
+ *
+ * The four pre-session states -- loading, unclaimed, anonymous, and
+ * password-change -- return BEFORE the shell is constructed, so no navigation,
+ * no connectivity indicator, and no data hook is mounted for a visitor who has
+ * not signed in. Hiding those with CSS, or mounting them and letting each
+ * request 401, would leak both structure and traffic.
+ *
+ * This is a usability boundary rather than the security boundary: the API
+ * refuses an unauthenticated request whatever the browser renders. The two are
+ * checked against each other by TestOnlyTheFourPublicRoutesAnswerWithoutASession
+ * on the backend.
  */
 export function App() {
+  const session = useSession();
+
+  switch (session.status) {
+    case "loading":
+      return (
+        <div className="grid min-h-screen place-items-center p-6">
+          <LoadingState label="Checking your session" />
+        </div>
+      );
+
+    case "disconnected":
+      return (
+        <div className="grid min-h-screen place-items-center p-6">
+          <DisconnectedState />
+        </div>
+      );
+
+    case "unclaimed":
+      return <ClaimInstallation />;
+
+    case "anonymous":
+      return <SignIn />;
+
+    case "passwordChange":
+      return <ChangePassword />;
+
+    case "authenticated":
+      return <AuthenticatedApp />;
+  }
+}
+
+/** The signed-in application. */
+function AuthenticatedApp() {
+  // Health is polled once at the shell level and passed down, so every view
+  // agrees on connectivity and the app makes one request per interval rather
+  // than one per mounted component.
   const health = useHealth();
 
   return (
     <AppShell health={health}>
       <Routes>
         <Route path="/" element={<Dashboard health={health} />} />
-        <Route path="/containers" element={<Containers />} />
-        <Route path="/containers/:id" element={<ContainerDetailPage />} />
-        <Route path="/images" element={<Images />} />
-        <Route path="/images/updates" element={<ImageUpdates />} />
-        <Route path="/images/:id" element={<ImageDetailPage />} />
-        <Route path="/snapshots" element={<Snapshots />} />
-        <Route path="/snapshots/:id" element={<SnapshotDetailPage />} />
-        <Route path="/snapshots/:id/readiness" element={<SnapshotReadinessPage />} />
-        <Route path="/drift" element={<Drift />} />
-        <Route path="/drift/container/:id" element={<ContainerDrift />} />
-        <Route path="/policies" element={<Policies />} />
-        <Route path="/compliance" element={<PolicyViolations />} />
-        <Route path="/policy/container/:id" element={<ContainerPolicy />} />
-        <Route path="/plans" element={<ChangePlans />} />
-        <Route path="/plans/container/:id" element={<ContainerPlan />} />
-        <Route path="/acquisitions" element={<Acquisitions />} />
-        <Route path="/acquisitions/:id" element={<AcquisitionDetail />} />
-        <Route path="/executions" element={<Executions />} />
-        <Route path="/executions/:id" element={<ExecutionDetail />} />
-        <Route path="/events" element={<Events />} />
+
+        <Route
+          path="/containers"
+          element={<Guard permission="inventory:read"><Containers /></Guard>}
+        />
+        <Route
+          path="/containers/:id"
+          element={<Guard permission="inventory:read"><ContainerDetailPage /></Guard>}
+        />
+        <Route
+          path="/images"
+          element={<Guard permission="inventory:read"><Images /></Guard>}
+        />
+        <Route
+          path="/images/updates"
+          element={<Guard permission="inventory:read"><ImageUpdates /></Guard>}
+        />
+        <Route
+          path="/images/:id"
+          element={<Guard permission="inventory:read"><ImageDetailPage /></Guard>}
+        />
+
+        <Route
+          path="/snapshots"
+          element={<Guard permission="snapshot:read"><Snapshots /></Guard>}
+        />
+        <Route
+          path="/snapshots/:id"
+          element={<Guard permission="snapshot:read"><SnapshotDetailPage /></Guard>}
+        />
+        <Route
+          path="/snapshots/:id/readiness"
+          element={<Guard permission="snapshot:read"><SnapshotReadinessPage /></Guard>}
+        />
+
+        <Route path="/drift" element={<Guard permission="drift:read"><Drift /></Guard>} />
+        <Route
+          path="/drift/container/:id"
+          element={<Guard permission="drift:read"><ContainerDrift /></Guard>}
+        />
+
+        <Route
+          path="/policies"
+          element={<Guard permission="policy:read"><Policies /></Guard>}
+        />
+        <Route
+          path="/compliance"
+          element={<Guard permission="policy:read"><PolicyViolations /></Guard>}
+        />
+        <Route
+          path="/policy/container/:id"
+          element={<Guard permission="policy:read"><ContainerPolicy /></Guard>}
+        />
+
+        <Route path="/plans" element={<Guard permission="plan:read"><ChangePlans /></Guard>} />
+        <Route
+          path="/plans/container/:id"
+          element={<Guard permission="plan:read"><ContainerPlan /></Guard>}
+        />
+
+        <Route
+          path="/acquisitions"
+          element={<Guard permission="acquisition:read"><Acquisitions /></Guard>}
+        />
+        <Route
+          path="/acquisitions/:id"
+          element={<Guard permission="acquisition:read"><AcquisitionDetail /></Guard>}
+        />
+
+        <Route
+          path="/executions"
+          element={<Guard permission="execution:read"><Executions /></Guard>}
+        />
+        <Route
+          path="/executions/:id"
+          element={<Guard permission="execution:read"><ExecutionDetail /></Guard>}
+        />
+
+        <Route path="/events" element={<Guard permission="event:read"><Events /></Guard>} />
+
+        <Route path="/users" element={<Guard permission="user:manage"><Users /></Guard>} />
+        <Route path="/audit" element={<Guard permission="audit:read"><Audit /></Guard>} />
+
+        <Route path="/account" element={<Account />} />
         <Route path="/settings" element={<Settings health={health} />} />
+
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>
+  );
+}
+
+/**
+ * Renders a page only when the account holds the permission.
+ *
+ * The refusal is a page rather than a redirect: an operator who followed a link
+ * from a colleague should be told their role does not include it, not silently
+ * bounced to the dashboard wondering whether the link was wrong.
+ */
+function Guard({
+  permission,
+  children,
+}: {
+  permission: Permission;
+  children: ReactNode;
+}) {
+  const session = useSession();
+  if (session.can(permission)) return <>{children}</>;
+
+  return (
+    <EmptyState
+      title="Not permitted"
+      description={`Your role does not include ${permission}. Ask an administrator if you need it — HarborMaster enforces this on the server, so this page would not load anyway.`}
+    />
   );
 }
