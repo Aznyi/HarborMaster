@@ -35,9 +35,17 @@ import (
 // so a test cannot accidentally prove that an illegal target is acceptable.
 
 const (
-	acqTestDigest  = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
-	acqOtherDigest = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
-	acqPlanID      = "plan_00112233445566778899"
+	// acqTestDigest is the PROPOSED tag's digest, acqCurrentDigest the digest
+	// of the tag the container runs now, and acqOtherDigest an unrelated one
+	// used to move the world after a plan was written.
+	//
+	// Three distinct values, deliberately: a fixture that used one digest for
+	// the current and proposed tags could not tell a correct pairing from a
+	// crossed one, which is how the original defect survived its own tests.
+	acqTestDigest    = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
+	acqOtherDigest   = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
+	acqCurrentDigest = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333"
+	acqPlanID        = "plan_00112233445566778899"
 )
 
 // ------------------------------------------------------------- evidence --
@@ -132,12 +140,23 @@ func healthyEvidence(now time.Time) *fakeEvidence {
 		current: plan,
 		present: true,
 		intel: domain.ImageIntel{
-			Reference:     "docker.io/library/nginx:1.27.0",
-			Familiar:      "nginx:1.27.0",
-			Registry:      "docker.io",
-			Repository:    "library/nginx",
-			Tag:           "1.27.0",
-			RemoteDigest:  acqTestDigest,
+			Reference:  "docker.io/library/nginx:1.27.0",
+			Familiar:   "nginx:1.27.0",
+			Registry:   "docker.io",
+			Repository: "library/nginx",
+			Tag:        "1.27.0",
+			// The CURRENT tag's digest, which is deliberately NOT the one the
+			// plan proposes. Before Phase 10.1 these were the same value,
+			// because the planner paired a newer tag with the current tag's
+			// digest -- so a fixture that used one digest for both looked
+			// coherent while encoding the defect.
+			RemoteDigest: acqCurrentDigest,
+			LocalDigest:  acqCurrentDigest,
+			// The newer tag and ITS OWN digest, resolved together. This pair is
+			// what the plan proposes and what acquisition re-checks.
+			Update:        domain.UpdatePatch,
+			LatestTag:     "1.27.1",
+			LatestDigest:  acqTestDigest,
 			Platform:      domain.Platform{OS: "linux", Architecture: "amd64"},
 			Status:        domain.CheckOK,
 			LastSuccessAt: &checked,
@@ -698,9 +717,24 @@ func TestThePreflightRefusesEachUnsafeSituation(t *testing.T) {
 			},
 			want: domain.AcquisitionRefusalDigestUnavailable,
 		},
-		"the digest moved after approval": {
-			mutate: func(h *acquisitionHarness) { h.evidence.intel.RemoteDigest = acqOtherDigest },
+		"the proposed tag's digest moved after approval": {
+			mutate: func(h *acquisitionHarness) { h.evidence.intel.LatestDigest = acqOtherDigest },
 			want:   domain.AcquisitionRefusalDigestChanged,
+		},
+		// A DIFFERENT newer tag appeared, so the plan's reference is no longer
+		// what is on offer even though its digest may still resolve. Before
+		// Phase 10.1 the reference was not part of this comparison at all, so a
+		// re-pointed proposal would have been accepted.
+		"a different newer tag appeared after approval": {
+			mutate: func(h *acquisitionHarness) { h.evidence.intel.LatestTag = "1.27.9" },
+			want:   domain.AcquisitionRefusalDigestChanged,
+		},
+		// The newer tag is still on offer but can no longer be pinned. An
+		// unpinnable target must refuse rather than fall back to the current
+		// tag's digest, which is exactly what the old code did.
+		"the proposed tag can no longer be pinned": {
+			mutate: func(h *acquisitionHarness) { h.evidence.intel.LatestDigest = "" },
+			want:   domain.AcquisitionRefusalDigestUnavailable,
 		},
 		"the registry has never been checked": {
 			mutate: func(h *acquisitionHarness) {
@@ -788,9 +822,15 @@ func TestAWorldThatMovesAfterTheRequestIsCaughtBeforeThePull(t *testing.T) {
 
 	acquisition := harness.request(t)
 
-	// The tag moved between approval and the worker picking the job up.
+	// The PROPOSED tag was republished between approval and the worker picking
+	// the job up, so the digest the plan pinned is no longer what that tag
+	// serves.
+	//
+	// The proposed tag's digest is the one that matters here. Moving the
+	// current tag's digest would be a different event -- and before Phase 10.1
+	// the two were the same field, so this test could not tell them apart.
 	harness.evidence.mu.Lock()
-	harness.evidence.intel.RemoteDigest = acqOtherDigest
+	harness.evidence.intel.LatestDigest = acqOtherDigest
 	harness.evidence.mu.Unlock()
 
 	harness.runOnce(t)
@@ -1440,7 +1480,7 @@ func TestEligibilityUsesTheSameChecksAsARequest(t *testing.T) {
 	}
 
 	harness.evidence.mu.Lock()
-	harness.evidence.intel.RemoteDigest = acqOtherDigest
+	harness.evidence.intel.LatestDigest = acqOtherDigest
 	harness.evidence.mu.Unlock()
 
 	_, refusal, err = harness.service.Eligible(t.Context(), acqPlanID)

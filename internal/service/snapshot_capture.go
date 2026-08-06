@@ -81,6 +81,10 @@ type SnapshotService struct {
 	versions   HostVersions
 	cfg        config.Snapshots
 	logger     *slog.Logger
+	// readiness evaluates the restore readiness of a freshly captured
+	// snapshot. Optional: nil leaves the verdict unevaluated, which is what
+	// every snapshot used to be.
+	readiness *ReadinessRecorder
 
 	// mu guards capturing only. It is never held across a database write, so a
 	// running capture cannot block an unrelated one.
@@ -100,6 +104,11 @@ type SnapshotOptions struct {
 	Config     config.Snapshots
 	Logger     *slog.Logger
 	Now        func() time.Time
+
+	// Readiness evaluates a captured snapshot's restore readiness. Optional;
+	// nil leaves every verdict at `unknown`, which is what the planner then
+	// charges risk points for.
+	Readiness *ReadinessRecorder
 }
 
 // NewSnapshotService builds a SnapshotService.
@@ -121,6 +130,7 @@ func NewSnapshotService(opts SnapshotOptions) *SnapshotService {
 		versions:   opts.Versions,
 		cfg:        opts.Config,
 		logger:     logger,
+		readiness:  opts.Readiness,
 		capturing:  make(map[string]time.Time),
 		now:        now,
 	}
@@ -219,6 +229,14 @@ func (s *SnapshotService) Capture(ctx context.Context, req CaptureRequest) (doma
 		slog.String("containerId", domain.ShortenID(containerID)),
 		slog.String("trigger", string(trigger)),
 		slog.Bool("deduplicated", stored.Deduplicated))
+
+	// Evaluate the restore readiness, off the request's critical path.
+	//
+	// A deduplicated capture returns an EXISTING snapshot whose verdict is
+	// already current, so re-evaluating it would be work for no answer.
+	if !stored.Deduplicated {
+		s.readiness.RecordDetached(ctx, stored.ID)
+	}
 
 	return stored, nil
 }

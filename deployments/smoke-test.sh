@@ -20,6 +20,18 @@
 
 set -euo pipefail
 
+# ------------------------------------------------------- Git Bash / MSYS2 --
+#
+# Under Git Bash on Windows, MSYS2 rewrites anything that looks like a Unix
+# path before it reaches a native .exe. `docker exec ... /usr/local/bin/...`
+# arrives as `C:/Program Files/Git/usr/local/bin/...`, and every in-container
+# path assertion fails for a reason that has nothing to do with the image.
+#
+# Disabling the conversion for this script is the whole fix. Harmless
+# everywhere else: the variables mean nothing to a non-MSYS shell.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
 IMAGE="${IMAGE:-harbormaster:smoke}"
 BUILD="${BUILD:-0}"
 PORT="${PORT:-18080}"
@@ -27,6 +39,11 @@ CONTAINER="${CONTAINER:-harbormaster-smoke}"
 VOLUME="${VOLUME:-harbormaster-smoke-data}"
 HELPER_IMAGE="${HELPER_IMAGE:-busybox:1.37}"
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
+
+# The account the smoke test claims the installation with. Disposable: the
+# container and its volume are destroyed on exit.
+SMOKE_USER="${SMOKE_USER:-smoketest}"
+SMOKE_PASSWORD="${SMOKE_PASSWORD:-Smoke-Test-Passphrase-42}"
 
 BASE_URL="http://127.0.0.1:${PORT}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,14 +84,115 @@ check_contains() {
   esac
 }
 
-# http_status <method> <path>
-http_status() {
-  curl -s -o /dev/null -w '%{http_code}' -X "$1" "${BASE_URL}${2}"
+# status_of <curl args...> -- prints an HTTP status, or "CURL_<n>" on failure.
+#
+# # Why the body is discarded in the shell rather than with `-o /dev/null`
+#
+# Path conversion is disabled for this script (see the top), so under Git Bash
+# a native curl receives the literal string `/dev/null` -- which is not a path
+# on Windows. curl still performs the request and still reports the status, but
+# exits 23 (write error). In a bare assignment that aborts the whole run under
+# `set -e`, which is how this script used to stop halfway with no summary.
+#
+# Appending the status to the body and taking the last line needs no special
+# file at all, so it behaves the same on every platform.
+#
+# It also never returns non-zero. A harness must REPORT a transport failure as
+# a failed assertion, not become one.
+status_of() {
+  local out rc=0
+  out="$(curl -s -w '\n%{http_code}' "$@" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'CURL_%s' "$rc"
+    return 0
+  fi
+  printf '%s' "${out##*$'\n'}"
 }
 
-# http_body <path>
+# body_of <curl args...> -- prints a response body, empty on transport failure.
+body_of() {
+  curl -s "$@" 2>/dev/null || true
+}
+
+# http_status <method> <path> -- unauthenticated.
+http_status() {
+  status_of -X "$1" "${BASE_URL}${2}"
+}
+
+# http_body <path> -- unauthenticated.
 http_body() {
-  curl -s "${BASE_URL}${1}"
+  body_of "${BASE_URL}${1}"
+}
+
+# ------------------------------------------------------------ auth helpers --
+#
+# Every route but four needs a session, and every WRITE additionally needs the
+# CSRF token derived from it. These wrap that so an assertion reads as what it
+# is testing rather than as curl plumbing.
+#
+# The cookie jar lives in a temporary directory that the cleanup trap removes.
+
+COOKIE_DIR="$(mktemp -d)"
+COOKIE_JAR="${COOKIE_DIR}/cookies.txt"
+
+# Under Git Bash, curl is usually a NATIVE Windows binary while the path above
+# is an MSYS one. Path conversion is disabled for this script (see the top), so
+# the two disagree and curl cannot write its jar -- it exits 23 and, under
+# `set -e`, takes the whole run with it.
+#
+# cygpath is the translation MSYS itself uses. Absent everywhere else, where
+# the path is already correct.
+if command -v cygpath >/dev/null 2>&1; then
+  COOKIE_JAR="$(cygpath -w "$COOKIE_JAR")"
+fi
+
+CSRF=""
+
+# auth_post <path> <body> -- unauthenticated POST, used for bootstrap and login.
+auth_post() {
+  body_of -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -X POST -d "$2" "${BASE_URL}${1}"
+}
+
+# auth_post_status <path> <body>
+auth_post_status() {
+  status_of -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -X POST -d "$2" "${BASE_URL}${1}"
+}
+
+# authed_status <method> <path> [body] -- session cookie plus CSRF on writes.
+authed_status() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ "$method" = "GET" ]; then
+    status_of -b "$COOKIE_JAR" -X GET "${BASE_URL}${path}"
+  else
+    status_of -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+      -H 'Content-Type: application/json' \
+      -H "X-HarborMaster-CSRF: ${CSRF}" \
+      -X "$method" ${body:+-d "$body"} "${BASE_URL}${path}"
+  fi
+}
+
+# authed_body <path>
+authed_body() {
+  body_of -b "$COOKIE_JAR" "${BASE_URL}${1}"
+}
+
+# nocsrf_status <method> <path> <body> -- a cookie with no CSRF header at all.
+nocsrf_status() {
+  status_of -b "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -X "$1" -d "$3" "${BASE_URL}${2}"
+}
+
+# badcsrf_status <method> <path> <body> -- a cookie with the WRONG CSRF header.
+badcsrf_status() {
+  status_of -b "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -H 'X-HarborMaster-CSRF: 0000000000000000000000000000000000000000000000000000000000000000' \
+    -X "$1" -d "$3" "${BASE_URL}${2}"
 }
 
 json_field() {
@@ -114,6 +232,8 @@ docker_top_uid() {
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true
+  # The jar holds a live session token until the volume above is gone.
+  rm -rf "$COOKIE_DIR" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -256,7 +376,10 @@ else
   fail "could not determine the running process's UID by any available method"
 fi
 
-info "API endpoints"
+info "The anonymous surface"
+
+# Exactly four routes answer without a session. Everything else must be 401,
+# and this section is what would fail if a fifth ever appeared.
 
 check "GET /api/v1/version returns 200" "200" "$(http_status GET /api/v1/version)"
 version_body="$(http_body /api/v1/version)"
@@ -267,13 +390,84 @@ check "GET /api/v1/health returns 200" "200" "$(http_status GET /api/v1/health)"
 health_body="$(http_body /api/v1/health)"
 health_status="$(json_field "$health_body" '.status' '"status":"[a-z]*"')"
 check_contains "health reports degraded without Docker" "degraded" "$health_status"
-check_contains "health reports the database as up" '"status":"up"' "$health_body"
 
-# The event engine must be reachable and must report itself honestly with no
-# Docker socket: connecting is impossible, so anything but a live stream is the
-# correct answer.
-check "GET /api/v1/event-engine returns 200" "200" "$(http_status GET /api/v1/event-engine)"
-engine_body="$(http_body /api/v1/event-engine)"
+# The anonymous health body is REDUCED to the overall status. Component detail
+# -- the database, the Docker connection, versions -- is for an authenticated
+# caller, because it describes the host.
+if printf '%s' "$health_body" | grep -q '"database"'; then
+  fail "the anonymous health response discloses component detail"
+else
+  pass "the anonymous health response is reduced to the overall status"
+fi
+
+check "GET /api/v1/auth/bootstrap returns 200" "200" "$(http_status GET /api/v1/auth/bootstrap)"
+check_contains "bootstrap status says whether an administrator exists" \
+  '"completed"' "$(http_body /api/v1/auth/bootstrap)"
+
+for guarded in /api/v1/containers /api/v1/events /api/v1/event-engine \
+  /api/v1/snapshots /api/v1/images /api/v1/plans /api/v1/audit; do
+  check "anonymous GET $guarded returns 401" "401" "$(http_status GET "$guarded")"
+done
+
+info "Bootstrap and sign in"
+
+# The one-time token is printed to the log at startup and never stored in
+# recoverable form, so reading it from the log is the only way in -- which is
+# itself the property under test.
+# Anchored to the banner rather than "any 32-character run in the log": request
+# ids, digests, and timestamps are all long alphanumeric runs, and matching one
+# of those instead produced a confusing cascade of authentication failures.
+bootstrap_token="$(docker logs "$CONTAINER" 2>&1 |
+  awk '/HarborMaster bootstrap token/ {found = 1; next}
+       found && $1 ~ /^[A-Za-z0-9_-]{24,}$/ {print $1; exit}' || true)"
+
+if [ -n "$bootstrap_token" ]; then
+  pass "a one-time bootstrap token was issued at startup"
+else
+  fail "no bootstrap token was found in the startup log"
+fi
+
+bootstrap_body="$(auth_post /api/v1/auth/bootstrap \
+  "{\"token\":\"${bootstrap_token}\",\"username\":\"${SMOKE_USER}\",\"password\":\"${SMOKE_PASSWORD}\"}")"
+check_contains "bootstrap creates the first administrator" '"administrator"' "$bootstrap_body"
+check_contains "bootstrap returns a CSRF token" '"csrfToken"' "$bootstrap_body"
+
+CSRF="$(json_field "$bootstrap_body" '.csrfToken' '[0-9a-f]\{64\}')"
+if [ -n "$CSRF" ] && [ "$CSRF" != "NOT_FOUND" ] && [ "$CSRF" != "JQ_ERROR" ]; then
+  pass "a CSRF token was issued with the session"
+else
+  fail "no CSRF token was issued with the session"
+fi
+
+# The token is single use: the installation is claimed and cannot be claimed
+# again, whatever the caller presents.
+replay_status="$(auth_post_status /api/v1/auth/bootstrap \
+  "{\"token\":\"${bootstrap_token}\",\"username\":\"intruder\",\"password\":\"${SMOKE_PASSWORD}\"}")"
+if [ "$replay_status" = "200" ]; then
+  fail "the bootstrap token was accepted a second time"
+else
+  pass "the bootstrap token cannot be replayed (status $replay_status)"
+fi
+
+check "sign in with the wrong password returns 401" "401" \
+  "$(auth_post_status /api/v1/auth/login \
+    "{\"username\":\"${SMOKE_USER}\",\"password\":\"not-the-password\"}")"
+
+info "Authenticated reads"
+
+check "GET /api/v1/containers returns 200 with a session" "200" "$(authed_status GET /api/v1/containers)"
+check_contains "container list returns a paginated envelope" '"pagination"' \
+  "$(authed_body /api/v1/containers)"
+
+check "GET /api/v1/health returns component detail to a session" "200" \
+  "$(authed_status GET /api/v1/health)"
+check_contains "the authenticated health response names the database" '"database"' \
+  "$(authed_body /api/v1/health)"
+
+# The event engine must report itself honestly with no Docker socket:
+# connecting is impossible, so anything but a live stream is the correct answer.
+check "GET /api/v1/event-engine returns 200" "200" "$(authed_status GET /api/v1/event-engine)"
+engine_body="$(authed_body /api/v1/event-engine)"
 check_contains "event-engine payload carries a connection state" '"state"' "$engine_body"
 check_contains "event-engine payload carries counters" '"counters"' "$engine_body"
 if printf '%s' "$engine_body" | grep -q '"state":"connected"'; then
@@ -282,13 +476,56 @@ else
   pass "the event engine does not claim a live stream without Docker"
 fi
 
-check "GET /api/v1/events returns 200" "200" "$(http_status GET /api/v1/events)"
-check_contains "event list returns a paginated envelope" '"pagination"' "$(http_body /api/v1/events)"
+check "GET /api/v1/events returns 200" "200" "$(authed_status GET /api/v1/events)"
+check_contains "event list returns a paginated envelope" '"pagination"' "$(authed_body /api/v1/events)"
 
 # Read-only: no event endpoint may accept a write, and no prune endpoint exists.
-check "POST /api/v1/events returns 405" "405" "$(http_status POST /api/v1/events)"
-check "DELETE /api/v1/events/1 returns 405" "405" "$(http_status DELETE /api/v1/events/1)"
-check "POST /api/v1/events/stream returns 405" "405" "$(http_status POST /api/v1/events/stream)"
+check "POST /api/v1/events returns 405" "405" "$(authed_status POST /api/v1/events)"
+check "DELETE /api/v1/events/1 returns 405" "405" "$(authed_status DELETE /api/v1/events/1)"
+check "POST /api/v1/events/stream returns 405" "405" "$(authed_status POST /api/v1/events/stream)"
+
+info "CSRF"
+
+# A session cookie alone is not authority to write. The CSRF token is derived
+# from the session token and must be presented in a header a cross-site caller
+# cannot set.
+check "a cookie-authenticated write with no CSRF token returns 403" "403" \
+  "$(nocsrf_status POST /api/v1/inventory/refresh '{}')"
+check "a write with a wrong CSRF token returns 403" "403" \
+  "$(badcsrf_status POST /api/v1/inventory/refresh '{}')"
+
+info "Docker mutation features are absent by default"
+
+# This container was started with no acquisition, execution, or rollback
+# settings, so all three must report themselves off. When they are off the
+# capability is never wired at all, which is what these 503s represent.
+for guarded in /api/v1/acquisitions /api/v1/executions /api/v1/rollbacks; do
+  status="$(authed_status GET "$guarded")"
+  case "$status" in
+  503) pass "$guarded reports the feature unavailable (503)" ;;
+  200)
+    # Executions and acquisitions answer 200 with summary.enabled=false so
+    # stored history stays readable. Either is correct; claiming enabled is not.
+    if printf '%s' "$(authed_body "$guarded")" | grep -q '"enabled":true'; then
+      fail "$guarded reports itself enabled with no capability configured"
+    else
+      pass "$guarded reports the feature switched off"
+    fi
+    ;;
+  *) fail "$guarded returned $status, want 503 or a disabled 200" ;;
+  esac
+done
+
+check "POST /api/v1/executions is refused without the capability" "503" \
+  "$(authed_status POST /api/v1/executions '{"acquisitionId":"acq_0011223344556677889a"}')"
+check "POST /api/v1/rollbacks is refused without the capability" "503" \
+  "$(authed_status POST /api/v1/rollbacks '{"executionId":"exec_00112233445566778899"}')"
+
+info "Sign out"
+
+check "POST /api/v1/auth/logout returns 204" "204" "$(authed_status POST /api/v1/auth/logout)"
+check "the session no longer reads a protected route" "401" \
+  "$(authed_status GET /api/v1/containers)"
 
 info "Frontend serving"
 

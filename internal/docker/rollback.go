@@ -239,7 +239,7 @@ func (c *Client) StopReplacement(ctx context.Context, request RollbackStopReques
 	defer cancel()
 
 	seconds := int(grace.Round(time.Second) / time.Second)
-	if _, err := c.api.ContainerStop(ctx, request.ReplacementID, client.ContainerStopOptions{
+	if _, err := c.mutateAPI.ContainerStop(ctx, request.ReplacementID, client.ContainerStopOptions{
 		Timeout: &seconds,
 	}); err != nil {
 		return classifyMutationError(ctx, err)
@@ -256,7 +256,7 @@ func (c *Client) ParkReplacement(ctx context.Context, request RollbackParkReques
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	if _, err := c.api.ContainerRename(ctx, request.ReplacementID, client.ContainerRenameOptions{
+	if _, err := c.mutateAPI.ContainerRename(ctx, request.ReplacementID, client.ContainerRenameOptions{
 		NewName: request.ParkedName,
 	}); err != nil {
 		return classifyMutationError(ctx, err)
@@ -273,7 +273,7 @@ func (c *Client) RestoreOriginalName(ctx context.Context, request RollbackRestor
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	if _, err := c.api.ContainerRename(ctx, request.OriginalID, client.ContainerRenameOptions{
+	if _, err := c.mutateAPI.ContainerRename(ctx, request.OriginalID, client.ContainerRenameOptions{
 		NewName: request.Name,
 	}); err != nil {
 		return classifyMutationError(ctx, err)
@@ -290,7 +290,7 @@ func (c *Client) StartOriginal(ctx context.Context, request RollbackStartRequest
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	if _, err := c.api.ContainerStart(ctx, request.OriginalID,
+	if _, err := c.mutateAPI.ContainerStart(ctx, request.OriginalID,
 		client.ContainerStartOptions{}); err != nil {
 		return classifyMutationError(ctx, err)
 	}

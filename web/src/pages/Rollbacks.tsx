@@ -109,6 +109,21 @@ function SummaryCards({
   // Tolerate a null or malformed payload rather than throwing.
   if (!summary) return <LoadingState label="Loading rollbacks" />;
 
+  // A deployment that has not opted in is stated explicitly, so an empty list
+  // is not read as "nothing has ever been rolled back".
+  if (!summary.enabled) {
+    return (
+      <p
+        role="status"
+        className="rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm text-content-muted"
+      >
+        Manual rollback is switched off in this deployment. HarborMaster holds
+        no ability to stop a serving container and start the one it replaced,
+        and records already stored remain readable.
+      </p>
+    );
+  }
+
   return (
     <section
       aria-label="Rollback summary"

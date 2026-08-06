@@ -206,6 +206,13 @@ func (s *Server) handleAcquisitionCreate(w http.ResponseWriter, r *http.Request)
 		RequestedBy: s.requesterFrom(r),
 	})
 	if err != nil {
+		// A refusal is recorded too. Without this a caller could probe the
+		// endpoint indefinitely and leave the security log looking idle.
+		var refused service.ErrAcquisitionRefused
+		if errors.As(err, &refused) {
+			s.auditRefusal(r, domain.AuditAcquisitionRequested,
+				domain.AuditTargetPlan, planID, string(refused.Refusal))
+		}
 		s.writeAcquisitionError(w, r, err)
 		return
 	}
@@ -280,7 +287,7 @@ func (s *Server) writeAcquisitionError(w http.ResponseWriter, r *http.Request, e
 			// Retry later, and say so with the status that means exactly
 			// that. CodeConflict is the code the shared write limiter already
 			// uses for a 429, so a client branching on it sees one vocabulary.
-			status, code = http.StatusTooManyRequests, CodeConflict
+			status, code = http.StatusTooManyRequests, CodeRateLimited
 		}
 
 		s.writeRefusal(w, r, status, code, refused.Refusal)

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,8 +19,12 @@ import (
 // The local image row already holds size, layers, local labels, and the
 // content-addressable id, and the container row already holds the reference. A
 // row here holds only what the REGISTRY knows and what the scheduler needs, and
-// links to the others by id. Container counts and local digests are read back
-// by join at query time rather than copied at write time.
+// links to the others by id.
+//
+// The two exceptions are the local digest and the container count, which ARE
+// copied at write time. Both depend on normalizing a raw image reference into
+// its canonical form, and that mapping exists only in Go -- deriving either by
+// join produced silently wrong answers for years. See selectImageIntelColumns.
 //
 // # Bounded reads
 //
@@ -84,22 +89,29 @@ type ImageIntelFilter struct {
 	Page      Page
 }
 
-// container_count is a correlated subquery rather than a join with a GROUP BY:
-// one query serves the page whatever its size, and the count stays correct when
-// no container references the image at all.
+// container_count is a STORED column, written by the inventory sync.
+//
+// It used to be a correlated subquery joining `containers.image_ref` to
+// `image_intel.reference`. Those hold different spellings of the same thing --
+// the raw reference a container declares (`nginx:1.27.0-alpine`) and the
+// canonical form (`docker.io/library/nginx:1.27.0-alpine`) -- so the join never
+// matched and every image reported zero containers affected.
+//
+// The mapping between the two is produced by domain.NormalizeImageRef during
+// the sync and is not reconstructable in SQL, which is why the count is now
+// computed there and stored rather than derived here.
 const selectImageIntelColumns = `
 	SELECT i.id, i.reference, i.familiar, i.registry_kind, i.registry,
 	       i.namespace, i.repository, i.tag,
-	       i.local_digest, i.remote_digest, i.pinned,
+	       i.local_digest, i.local_digest_detail, i.remote_digest, i.pinned,
 	       i.platform_os, i.platform_arch, i.platform_variant, i.platform_missing,
 	       i.image_id,
-	       i.update_type, i.latest_tag, i.update_reason,
+	       i.update_type, i.latest_tag, i.latest_digest, i.update_reason,
 	       i.check_status, i.status_detail,
 	       i.first_seen_at, i.last_checked_at, i.last_success_at,
 	       i.next_check_at, i.failure_count,
 	       i.published_at, i.vendor, i.source, i.labels, i.etag,
-	       (SELECT COUNT(*) FROM containers c
-	         WHERE c.present = 1 AND c.image_ref = i.reference) AS container_count
+	       i.container_count
 	FROM image_intel i`
 
 // ImageReferenceSeed is one reference observed in the inventory.
@@ -114,11 +126,20 @@ type ImageReferenceSeed struct {
 	Repository string
 	Tag        string
 
-	// LocalDigest is what the daemon reports for this reference, and ImageID
-	// the local image row it resolved to.
+	// LocalDigest is the digest of the image this reference is actually
+	// running, and ImageID the local image row it resolved to.
+	//
+	// For a digest-pinned reference it comes from the reference. For a
+	// tag-referenced one it comes from the local image's RepoDigests, matched
+	// to this exact repository -- see domain.SelectRepoDigest.
 	LocalDigest string
-	ImageID     string
-	Pinned      bool
+	// LocalDigestDetail says why LocalDigest is empty when it is, from a fixed
+	// set of phrases.
+	LocalDigestDetail string
+	ImageID           string
+	// ContainerCount is how many present containers run this reference.
+	ContainerCount int
+	Pinned         bool
 
 	Platform domain.Platform
 
@@ -218,10 +239,11 @@ func upsertImageIntel(
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO image_intel
 			(reference, familiar, registry_kind, registry, namespace, repository, tag,
-			 local_digest, pinned, platform_os, platform_arch, platform_variant,
+			 local_digest, local_digest_detail, container_count, pinned,
+			 platform_os, platform_arch, platform_variant,
 			 image_id, check_status, status_detail, first_seen_at, next_check_at,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (reference) DO UPDATE SET
 			familiar         = excluded.familiar,
 			registry_kind    = excluded.registry_kind,
@@ -230,6 +252,8 @@ func upsertImageIntel(
 			repository       = excluded.repository,
 			tag              = excluded.tag,
 			local_digest     = excluded.local_digest,
+			local_digest_detail = excluded.local_digest_detail,
+			container_count  = excluded.container_count,
 			pinned           = excluded.pinned,
 			platform_os      = excluded.platform_os,
 			platform_arch    = excluded.platform_arch,
@@ -254,7 +278,7 @@ func upsertImageIntel(
 		RETURNING created_at`,
 		seed.Reference, seed.Familiar, string(seed.Kind), seed.Registry,
 		seed.Namespace, seed.Repository, seed.Tag,
-		seed.LocalDigest, pinned,
+		seed.LocalDigest, seed.LocalDigestDetail, seed.ContainerCount, pinned,
 		seed.Platform.OS, seed.Platform.Architecture, seed.Platform.Variant,
 		seed.ImageID, status, seed.Detail, stamp, nextCheck, stamp, stamp,
 	).Scan(&createdAt)
@@ -275,13 +299,22 @@ func (r *ImageIntelRepository) InventoryReferences(ctx context.Context, limit in
 		limit = 10000
 	}
 
+	// repo_digests and the container count come from the same GROUP BY that
+	// already reads the reference.
+	//
+	// The digests are what let a TAG-referenced container report the image it is
+	// actually running -- see domain.SelectRepoDigest. The count is computed
+	// HERE, where the mapping from a raw reference to a canonical one is still
+	// known, because that mapping is not recoverable in SQL afterwards.
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT c.image_ref,
 		       MAX(c.image_id),
 		       MAX(c.image_digest),
 		       MAX(COALESCE(im.architecture, '')),
 		       MAX(COALESCE(im.os, '')),
-		       MAX(COALESCE(im.variant, ''))
+		       MAX(COALESCE(im.variant, '')),
+		       MAX(COALESCE(im.repo_digests, '[]')),
+		       COUNT(*)
 		FROM containers c
 		LEFT JOIN images im ON im.id = c.image_id
 		WHERE c.present = 1 AND c.image_ref <> ''
@@ -295,10 +328,19 @@ func (r *ImageIntelRepository) InventoryReferences(ctx context.Context, limit in
 
 	references := make([]InventoryReference, 0, 64)
 	for rows.Next() {
-		var reference InventoryReference
+		var (
+			reference   InventoryReference
+			repoDigests string
+		)
 		if err := rows.Scan(&reference.Reference, &reference.ImageID, &reference.Digest,
-			&reference.Architecture, &reference.OS, &reference.Variant); err != nil {
+			&reference.Architecture, &reference.OS, &reference.Variant,
+			&repoDigests, &reference.ContainerCount); err != nil {
 			return nil, fmt.Errorf("scan inventory reference: %w", err)
+		}
+		// A malformed column is an absent list, not a failure: the reference is
+		// still worth tracking, it just has no local digest to compare.
+		if repoDigests != "" {
+			_ = json.Unmarshal([]byte(repoDigests), &reference.RepoDigests)
 		}
 		references = append(references, reference)
 	}
@@ -309,8 +351,19 @@ func (r *ImageIntelRepository) InventoryReferences(ctx context.Context, limit in
 type InventoryReference struct {
 	Reference string
 	ImageID   string
-	// Digest is the manifest digest the daemon reports, when it has one.
-	Digest       string
+	// Digest is the manifest digest the REFERENCE carries, which is set only
+	// when the container was started from a digest-pinned reference.
+	Digest string
+	// RepoDigests are the registry manifest references the local image is known
+	// by. For a tag-referenced container this is the only place the running
+	// image's digest can be found -- see domain.SelectRepoDigest, which is what
+	// decides whether any of them may be used.
+	RepoDigests []string
+	// ContainerCount is how many present containers declare this exact
+	// reference. Summed across raw references when several normalize to one
+	// canonical reference.
+	ContainerCount int
+
 	Architecture string
 	OS           string
 	Variant      string
@@ -379,6 +432,10 @@ type CheckOutcome struct {
 	RemoteDigest string
 	Update       domain.UpdateType
 	LatestTag    string
+	// LatestDigest is the manifest digest of LatestTag, resolved in the same
+	// check. Empty whenever LatestTag is, and the two are written together so a
+	// tag can never be persisted without the digest that pins it.
+	LatestDigest string
 	UpdateReason string
 
 	Platform domain.Platform
@@ -445,6 +502,7 @@ func (r *ImageIntelRepository) RecordCheck(ctx context.Context, outcome CheckOut
 				remote_digest    = ?,
 				update_type      = ?,
 				latest_tag       = ?,
+				latest_digest    = ?,
 				update_reason    = ?,
 				check_status     = ?,
 				status_detail    = ?,
@@ -463,7 +521,8 @@ func (r *ImageIntelRepository) RecordCheck(ctx context.Context, outcome CheckOut
 				failure_count    = 0,
 				updated_at       = ?
 			WHERE reference = ?`,
-			outcome.RemoteDigest, string(update), outcome.LatestTag, outcome.UpdateReason,
+			outcome.RemoteDigest, string(update), outcome.LatestTag, outcome.LatestDigest,
+			outcome.UpdateReason,
 			string(status), outcome.Detail,
 			outcome.Platform.OS, outcome.Platform.OS,
 			outcome.Platform.Architecture, outcome.Platform.Architecture,
@@ -733,13 +792,17 @@ func (r *ImageIntelRepository) Summary(ctx context.Context) (domain.ImageIntelSu
 	// Containers are counted through the reference, so a hundred containers on
 	// one outdated image report as a hundred affected containers -- which is the
 	// number an operator actually plans around.
+	//
+	// SUM of the stored container_count, not a join. The join this replaced
+	// matched `containers.image_ref` (raw, `busybox:1.36`) against
+	// `image_intel.reference` (canonical, `docker.io/library/busybox:1.36`) and
+	// so never matched anything: the headline card read "0 containers affected"
+	// over a list whose rows named several. See selectImageIntelColumns.
 	if err := r.db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE((SELECT COUNT(*) FROM containers WHERE present = 1 AND image_ref <> ''), 0),
-			COALESCE((SELECT COUNT(*) FROM containers c
-			           JOIN image_intel i ON i.reference = c.image_ref
-			          WHERE c.present = 1
-			            AND i.update_type NOT IN ('none', 'unknown')), 0)`,
+			COALESCE((SELECT SUM(container_count) FROM image_intel
+			          WHERE update_type NOT IN ('none', 'unknown')), 0)`,
 	).Scan(&summary.Containers, &summary.ContainersAffected); err != nil {
 		return summary, fmt.Errorf("count affected containers: %w", AsError(err))
 	}
@@ -1054,10 +1117,10 @@ func scanImageIntel(rows *sql.Rows) ([]domain.ImageIntel, error) {
 		if err := rows.Scan(
 			&record.ID, &record.Reference, &record.Familiar, &kind, &record.Registry,
 			&record.Namespace, &record.Repository, &record.Tag,
-			&record.LocalDigest, &record.RemoteDigest, &pinned,
+			&record.LocalDigest, &record.LocalDigestDetail, &record.RemoteDigest, &pinned,
 			&record.Platform.OS, &record.Platform.Architecture, &record.Platform.Variant,
 			&noPlatform, &record.ImageID,
-			&updateType, &record.LatestTag, &record.UpdateReason,
+			&updateType, &record.LatestTag, &record.LatestDigest, &record.UpdateReason,
 			&status, &record.StatusDetail,
 			&firstSeen, &lastChecked, &lastSuccess, &nextCheck, &record.FailureCount,
 			&published, &record.Vendor, &record.Source, &labels, &record.ETag,

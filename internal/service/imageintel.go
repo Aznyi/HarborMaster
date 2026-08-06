@@ -242,11 +242,27 @@ func (s *ImageIntelService) seed(reference store.InventoryReference) store.Image
 		}
 	}
 
-	// The digest the daemon reports. Validated rather than trusted: it reaches
-	// a comparison and a UI, and a malformed one would be neither.
+	// The digest of the image this container is actually running.
+	//
+	// Two sources, in order of directness:
+	//
+	//  1. The REFERENCE itself, when the container was started from a
+	//     digest-pinned one. Unambiguous: the container names the content.
+	//  2. The local image's RepoDigests, for the ordinary tag-referenced case.
+	//     Only an entry naming THIS registry and repository is eligible, and
+	//     anything ambiguous resolves to empty rather than to a guess -- see
+	//     domain.SelectRepoDigest.
+	//
+	// Validated rather than trusted in both cases: this value reaches a
+	// comparison, a change plan, and a UI, and a malformed one would be none of
+	// those.
 	local := reference.Digest
 	if local != "" && !domain.ValidImageDigest(local) {
 		local = ""
+	}
+	digestSource := domain.RepoDigestResolved
+	if local == "" {
+		local, digestSource = domain.SelectRepoDigest(reference.RepoDigests, normalized)
 	}
 
 	return store.ImageReferenceSeed{
@@ -258,10 +274,15 @@ func (s *ImageIntelService) seed(reference store.InventoryReference) store.Image
 		Repository:  normalized.Path,
 		Tag:         normalized.Tag,
 		LocalDigest: local,
-		ImageID:     reference.ImageID,
-		Pinned:      normalized.Pinned(),
-		Platform:    platform,
-		Supported:   true,
+		// Why the local digest is missing, when it is. Carried so the change
+		// plan can say "this image was built here" rather than the bare
+		// "no registry digest" that used to be the only available phrasing.
+		LocalDigestDetail: digestSource.Explain(),
+		ImageID:           reference.ImageID,
+		ContainerCount:    reference.ContainerCount,
+		Pinned:            normalized.Pinned(),
+		Platform:          platform,
+		Supported:         true,
 	}
 }
 
@@ -423,8 +444,64 @@ func (s *ImageIntelService) check(ctx context.Context, record domain.ImageIntel)
 	outcome.LatestTag = assessment.Tag
 	outcome.UpdateReason = assessment.Reason
 
+	// A newer TAG is only actionable with its OWN digest.
+	//
+	// The tag came from a listing; the digest has to come from that tag's
+	// manifest. Resolving it here, from the same check and the same registry
+	// evidence, is what lets the planner propose the pair together instead of
+	// pairing a new tag with the current tag's digest.
+	if assessment.Tag != "" {
+		digest, resolveErr := s.resolveTagDigest(ctx, normalized, assessment.Tag)
+		if resolveErr == nil {
+			outcome.LatestDigest = digest
+		} else {
+			// The tag exists but cannot be pinned. Reported as an update whose
+			// size is unknown rather than as a proposal: acquisition is
+			// digest-pinned, so an unpinnable tag is not something an operator
+			// can be offered.
+			outcome.LatestTag = ""
+			outcome.Update = domain.UpdateUnknown
+			outcome.UpdateReason = "a newer tag was published but its digest could not be " +
+				"resolved, so the change cannot be pinned"
+			s.logger.WarnContext(ctx, "a newer tag could not be resolved to a digest",
+				slog.String("reference", record.Reference),
+				slog.String("latestTag", assessment.Tag))
+		}
+	}
+
 	outcome.NextCheckAt = s.nextCheck(0)
 	return outcome
+}
+
+// resolveTagDigest reads the manifest digest of one specific tag.
+//
+// The reference is rebuilt from the NORMALIZED current one with only the tag
+// replaced, so the registry, repository, and platform are carried over
+// unchanged and the lookup cannot be redirected somewhere else by the tag
+// listing's contents. The tag itself is re-validated by NormalizeImageRef
+// before it reaches a URL.
+func (s *ImageIntelService) resolveTagDigest(
+	ctx context.Context,
+	current domain.NormalizedRef,
+	tag string,
+) (string, error) {
+	target, err := domain.NormalizeImageRef(current.Host + "/" + current.Path + ":" + tag)
+	if err != nil {
+		return "", err
+	}
+	// Belt and braces: normalization must not have moved the repository.
+	if target.Host != current.Host || target.Path != current.Path {
+		return "", domain.ErrTargetCrossed
+	}
+
+	manifest, err := s.registry.Manifest(ctx, registry.ManifestRequest{Ref: target})
+	if err != nil {
+		return "", err
+	}
+	if manifest.Digest == "" || !domain.ValidImageDigest(manifest.Digest) {
+		return "", domain.ErrTargetDigestInvalid
+	}
+	return manifest.Digest, nil
 }
 
 // assess decides what update, if any, is available.

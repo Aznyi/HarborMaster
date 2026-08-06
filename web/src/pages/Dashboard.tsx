@@ -15,6 +15,8 @@ import {
   LoadingState,
 } from "../components/States";
 import { SnapshotSummary } from "../components/SnapshotSummary";
+import { useDriftSummary } from "../hooks/useDrift";
+import { usePolicySummary } from "../hooks/usePolicies";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
 /** Outcome of a manual refresh, shown until the next attempt. */
@@ -52,10 +54,97 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
       <ConnectionCards status={inventory.data} health={health} />
       <EventEnginePanel />
       <SnapshotSummary />
+      <EstateHealthPanel />
       <ContainerMetrics status={inventory.data} />
       <CatalogMetrics status={inventory.data} />
       <WarningsPanel status={inventory.data} />
     </div>
+  );
+}
+
+/**
+ * Compliance and drift, side by side.
+ *
+ * # Why this is on the dashboard
+ *
+ * It was not, and that was the gap: an estate with open policy violations and
+ * open configuration drift showed a dashboard reporting inventory, events,
+ * snapshots, and container counts, and nothing at all about either. The two
+ * "something is wrong" signals were the only ones an operator had to go
+ * looking for.
+ *
+ * Both numbers link to the page that explains them, because a count with no
+ * route to the detail is a number nobody can act on.
+ */
+function EstateHealthPanel() {
+  const policy = usePolicySummary();
+  const drift = useDriftSummary();
+
+  const violations = policy.data?.open ?? 0;
+  const evaluated = policy.data?.containersEvaluated ?? 0;
+  const drifted = drift.data?.open ?? 0;
+  const driftedContainers = drift.data?.containersWithDrift ?? 0;
+
+  return (
+    <section
+      aria-labelledby="estate-health-heading"
+      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
+    >
+      <h2 id="estate-health-heading" className="text-lg font-semibold">
+        Compliance and drift
+      </h2>
+      <p className="mt-1 text-sm text-content-muted">
+        What HarborMaster has found wrong with the estate. Both are
+        observations — nothing here changes a container.
+      </p>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <Link
+          to="/compliance"
+          className={`rounded-lg border p-4 ${
+            violations > 0 ? "border-danger/40" : "border-border-subtle"
+          }`}
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Open policy violations
+          </p>
+          <p className="mt-1 text-2xl font-semibold text-content">{violations}</p>
+          <p className="mt-1 text-xs text-content-muted">
+            {evaluated === 0
+              ? "No container has been evaluated yet"
+              : `Across ${evaluated} evaluated container${evaluated === 1 ? "" : "s"}`}
+          </p>
+        </Link>
+
+        <Link
+          to="/drift"
+          className={`rounded-lg border p-4 ${
+            drifted > 0 ? "border-warn/40" : "border-border-subtle"
+          }`}
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Open configuration drift
+          </p>
+          <p className="mt-1 text-2xl font-semibold text-content">{drifted}</p>
+          <p className="mt-1 text-xs text-content-muted">
+            {driftedContainers === 0
+              ? "No container has moved from its baseline"
+              : `Across ${driftedContainers} container${driftedContainers === 1 ? "" : "s"}`}
+          </p>
+        </Link>
+      </div>
+
+      {policy.data && policy.data.policiesTotal === 0 ? (
+        <p className="mt-3 text-sm text-content-muted">
+          No policies are defined, so nothing has been checked. An empty
+          compliance page is not a clean bill of health —{" "}
+          <Link to="/policies" className="underline underline-offset-2">
+            define a policy
+          </Link>{" "}
+          to start evaluating.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -421,8 +510,8 @@ function ContainerMetrics({ status }: { status: InventoryStatus }) {
       {counts.absent > 0 ? (
         <p className="mt-3 text-sm text-content-muted">
           {counts.absent} container{counts.absent === 1 ? "" : "s"} seen previously
-          {counts.absent === 1 ? " is" : " are"} no longer present. Their records are
-          retained.
+          {counts.absent === 1 ? " is" : " are"} no longer present.{" "}
+          {counts.absent === 1 ? "Its record is" : "Their records are"} retained.
         </p>
       ) : null}
     </section>

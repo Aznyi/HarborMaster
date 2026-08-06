@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"time"
 )
 
@@ -282,12 +283,57 @@ type ChangePlan struct {
 	Superseded bool `json:"superseded"`
 }
 
+// ErrPlanTargetCrossed reports a plan whose proposed reference and proposed
+// digest were not resolved for each other.
+var ErrPlanTargetCrossed = errors.New(
+	"a change plan proposes a reference and a digest that do not belong together")
+
+// ValidTarget reports whether the proposed pair is internally consistent.
+//
+// # What this catches
+//
+// A plan that names a reference but carries no digest, or carries a digest that
+// is not a digest. Both are unpinnable, and acquisition is digest-pinned.
+//
+// # What it deliberately cannot catch
+//
+// Whether the digest is genuinely the one the registry serves for that
+// reference. Nothing at this layer can know that -- only the registry lookup
+// can, which is why the pair is built by domain.NewProposedTarget at the moment
+// both are resolved and re-checked against a fresh lookup before any pull. This
+// is the last cheap structural gate before persistence, not a substitute for
+// either.
+//
+// A plan with NO proposal is valid: "nothing is on offer" is a legitimate
+// assessment and the common one on a settled estate.
+func (p ChangePlan) ValidTarget() bool {
+	if p.ProposedImage == "" && p.ProposedDigest == "" {
+		return true
+	}
+	if p.ProposedImage == "" || p.ProposedDigest == "" {
+		return false
+	}
+	return ValidImageDigest(p.ProposedDigest)
+}
+
 // PlanSchemaVersion is the current plan shape.
 //
 // Bumped when the stored plan gains or loses a field, so an older row is
 // recognisable. Distinct from PlannerVersion, which changes when the RULES
 // change even though the shape does not.
-const PlanSchemaVersion = 1
+//
+// # Why this is 2
+//
+// Version 1 rows can carry a CROSSED proposed pair: a newer tag paired with the
+// digest resolved for the tag it replaces. Those rows are not merely stale,
+// they are wrong in the one field the whole acquisition path pins on, and an
+// acquisition built from one would pull the old image and report the new one.
+//
+// Bumping the schema makes every stored fingerprint stale, which forces the
+// next pass to regenerate every plan from evidence gathered by the fixed code.
+// That is the migration: there is no way to repair a v1 row in place, because
+// the digest it needed was never resolved.
+const PlanSchemaVersion = 2
 
 // ChangePlanSummary is the dashboard aggregate.
 type ChangePlanSummary struct {

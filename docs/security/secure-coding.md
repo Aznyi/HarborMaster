@@ -69,6 +69,20 @@ All four verifications must read `passed` — an `unknown` is not a pass — and
 success record must have been written. If either is missing, preserve both
 containers and fail closed.
 
+**1.10a Never pair a reference with a digest resolved for another one.**
+Build the pair with `domain.NewProposedTarget`, which takes the reference the
+registry was actually asked about and refuses a mismatch. Two loose strings is
+how a change plan came to read `busybox:1.36 -> busybox:1.38` while carrying
+1.36's digest: acquisition is digest-pinned, so it would have pulled the OLD
+image, verified it against the digest the plan called approved, and recorded an
+update that never happened.
+
+**1.10b Resolve the local digest from RepoDigests, matched to the repository.**
+A tag-referenced container carries no digest in its reference. The daemon's
+RepoDigests do, but one image can carry entries for several repositories, so
+only an exact registry-and-repository match is eligible and anything ambiguous
+reports unknown. Never take "the first one". See `domain.SelectRepoDigest`.
+
 **1.11 Never add a remove capability to the rollback interface.**
 `docker.ContainerRollbacker` has four methods and none of them destroys
 anything. The replacement a rollback displaces is the evidence of why the

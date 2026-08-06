@@ -512,18 +512,29 @@ func (s *AcquisitionService) preflight(
 		return decision, nil
 	}
 
-	// THE TOCTOU CHECK. The digest currently on offer must be the one the plan
-	// recorded, and -- on the second run -- the one the operator approved. A
-	// tag that moved between planning and pulling lands here.
-	if intel.RemoteDigest == "" || !domain.ValidImageDigest(intel.RemoteDigest) {
+	// THE TOCTOU CHECK. What is on offer NOW must be exactly what the plan
+	// recorded, and -- on the second run -- what the operator approved.
+	//
+	// The comparison is over the REFERENCE AND DIGEST TOGETHER, rebuilt by the
+	// same function the planner used. That matters for two reasons:
+	//
+	//   - The pair is what acquisition acts on. Checking the digest alone would
+	//     pass a plan whose reference had since been re-pointed at a different
+	//     tag, which is the crossing this phase exists to make impossible.
+	//   - One definition of "what is on offer" means the planner and this check
+	//     cannot drift apart. They used to: the planner paired a newer tag with
+	//     the CURRENT tag's digest, and this check compared that same current
+	//     digest against itself and passed vacuously.
+	onOffer := proposedChange(intel)
+	if !onOffer.Valid() {
 		decision.Refusal = domain.AcquisitionRefusalDigestUnavailable
 		return decision, nil
 	}
-	if intel.RemoteDigest != plan.ProposedDigest {
+	if onOffer.Reference() != plan.ProposedImage || onOffer.Digest() != plan.ProposedDigest {
 		decision.Refusal = domain.AcquisitionRefusalDigestChanged
 		return decision, nil
 	}
-	if approvedDigest != "" && approvedDigest != intel.RemoteDigest {
+	if approvedDigest != "" && approvedDigest != onOffer.Digest() {
 		decision.Refusal = domain.AcquisitionRefusalDigestChanged
 		return decision, nil
 	}
@@ -545,18 +556,33 @@ func (s *AcquisitionService) preflight(
 		return decision, nil
 	}
 
+	// The registry and repository come from the PROPOSED reference, not the
+	// current one. They are then required to match the current reference's,
+	// because a proposal is a new tag in the same repository and never a move
+	// to a different one -- a repository change here would be a pull from
+	// somewhere the plan never assessed.
+	proposedRef, proposedNormalised := normalisedReference(onOffer.Reference())
+	if !proposedNormalised {
+		decision.Refusal = domain.AcquisitionRefusalTargetRefused
+		return decision, nil
+	}
+	if proposedRef.Host != reference.Host || proposedRef.Path != reference.Path {
+		decision.Refusal = domain.AcquisitionRefusalTargetRefused
+		return decision, nil
+	}
+
 	decision.Target = domain.AcquisitionTarget{
-		Registry:   reference.APIHost,
-		Repository: reference.Path,
-		Digest:     intel.RemoteDigest,
-		Reference:  plan.ProposedImage,
+		// Docker Hub's canonical host is what a pull reference must name; the
+		// API host is where the distribution API lives and is not always the
+		// same string. Using the wrong one produces a reference the daemon
+		// cannot resolve, so the reference host is taken from the normalised
+		// reference.
+		Registry:   proposedRef.Host,
+		Repository: proposedRef.Path,
+		Digest:     onOffer.Digest(),
+		Reference:  onOffer.Reference(),
 		Platform:   intel.Platform,
 	}
-	// Docker Hub's canonical host is what a pull reference must name; the API
-	// host is where the distribution API lives and is not always the same
-	// string. Using the wrong one produces a reference the daemon cannot
-	// resolve, so the reference host is taken from the normalised reference.
-	decision.Target.Registry = reference.Host
 
 	if !decision.Target.Valid() {
 		decision.Refusal = domain.AcquisitionRefusalTargetRefused

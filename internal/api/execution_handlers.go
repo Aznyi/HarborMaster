@@ -230,6 +230,12 @@ func (s *Server) handleExecutionCreate(w http.ResponseWriter, r *http.Request) {
 		RequestedBy: s.requesterFrom(r),
 	})
 	if err != nil {
+		// A refusal is recorded too. See Server.auditRefusal.
+		var refused service.ErrExecutionRefused
+		if errors.As(err, &refused) {
+			s.auditRefusal(r, domain.AuditExecutionRequested,
+				domain.AuditTargetAcquisition, acquisitionID, string(refused.Refusal))
+		}
 		s.writeExecutionError(w, r, err)
 		return
 	}
@@ -307,7 +313,7 @@ func (s *Server) writeExecutionError(w http.ResponseWriter, r *http.Request, err
 			status, code = http.StatusNotFound, CodeNotFound
 		case domain.ExecutionRefusalLimit:
 			// Retry later, and say so with the status that means exactly that.
-			status, code = http.StatusTooManyRequests, CodeConflict
+			status, code = http.StatusTooManyRequests, CodeRateLimited
 		}
 
 		s.writeExecutionRefusal(w, r, status, code, refused.Refusal)

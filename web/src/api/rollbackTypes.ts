@@ -184,6 +184,11 @@ export interface RollbackSummary {
   failed: number;
   /** Failures that left containers on this host. The number that matters. */
   needsAttention: number;
+  /**
+   * Whether rollback is switched on at all, so an empty list is not read as
+   * "nothing has ever been rolled back".
+   */
+  enabled: boolean;
 }
 
 /**

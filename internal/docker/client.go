@@ -47,6 +47,29 @@ type Pinger interface {
 // Client is a Runtime backed by the official Engine SDK.
 type Client struct {
 	api *client.Client
+	// mutateAPI is a third SDK client built WITHOUT a transport timeout, used
+	// by every operation that CHANGES a container.
+	//
+	// # Why the timeout has to come off
+	//
+	// A container stop asks the daemon to send SIGTERM, wait out a grace
+	// period, and only then SIGKILL. With a 30-second grace -- the default,
+	// matching Docker's own -- the HTTP request is held open for 30 seconds by
+	// design. The main client's 10-second transport timeout cut that off at
+	// ten, and no amount of care with contexts at the call site could help:
+	// the transport deadline is below them all.
+	//
+	// The visible symptom was severe. Recreating any container that does not
+	// exit promptly on SIGTERM -- an extremely common shape -- failed with
+	// `timeout` after ten seconds, having already issued the stop. The
+	// container ended up stopped, the checkpoint empty, and the record saying
+	// HarborMaster did not know what it had done.
+	//
+	// Every mutation still has a deadline; it just comes from the CONTEXT the
+	// call site computes from the configured timeouts, which is where a bound
+	// that has to know about grace periods belongs.
+	mutateAPI *client.Client
+
 	// streamAPI is a second SDK client built WITHOUT a request timeout, used
 	// only for the event stream.
 	//
@@ -116,7 +139,23 @@ func New(opts Options) (*Client, error) {
 		return nil, errors.New("create docker client: invalid engine endpoint")
 	}
 
-	return &Client{api: api, streamAPI: streamAPI, timeout: opts.Timeout, masker: opts.Masker}, nil
+	// See Client.mutateAPI.
+	mutateAPI, err := client.New(
+		client.WithHost(opts.Host),
+	)
+	if err != nil {
+		_ = api.Close()
+		_ = streamAPI.Close()
+		return nil, errors.New("create docker client: invalid engine endpoint")
+	}
+
+	return &Client{
+		api:       api,
+		streamAPI: streamAPI,
+		mutateAPI: mutateAPI,
+		timeout:   opts.Timeout,
+		masker:    opts.Masker,
+	}, nil
 }
 
 // Ping verifies the Engine is reachable.
@@ -155,7 +194,7 @@ func (c *Client) Ping(ctx context.Context) (Info, error) {
 // Close is the last step, after the event engine has stopped.
 func (c *Client) Close() error {
 	var firstErr error
-	for _, api := range []*client.Client{c.api, c.streamAPI} {
+	for _, api := range []*client.Client{c.api, c.streamAPI, c.mutateAPI} {
 		if api == nil {
 			continue
 		}

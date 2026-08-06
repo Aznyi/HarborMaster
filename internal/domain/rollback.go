@@ -774,6 +774,14 @@ type RollbackSummary struct {
 	// NeedsAttention counts failures that left containers on the host for an
 	// operator to settle. The number that matters most on this page.
 	NeedsAttention int `json:"needsAttention"`
+	// Enabled reports whether rollback is switched on at all, so an empty list
+	// is not read as "nothing has ever been rolled back".
+	//
+	// The same field ExecutionSummary carries, for the same reason. Its
+	// absence here meant a disabled Rollbacks page fell to a generic error
+	// state while the Recreations page next to it said plainly that the
+	// feature was off.
+	Enabled bool `json:"enabled"`
 }
 
 // ------------------------------------------------------------------- names --

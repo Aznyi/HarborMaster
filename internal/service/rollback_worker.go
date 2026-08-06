@@ -48,12 +48,32 @@ const (
 // retention.
 func (s *RollbackService) Run(ctx context.Context) {
 	if !s.Enabled() {
-		// The capability is absent. Waiting on the context rather than
-		// returning keeps the caller's WaitGroup accounting uniform across
-		// every background service.
+		// Stated once at startup, and stated distinctly from a
+		// misconfiguration: a deployment that has not opted in is a supported
+		// configuration, not a fault.
+		//
+		// Said at all because it used not to be. Acquisition and recreation
+		// each announced their state and rollback announced nothing, so the
+		// only way to tell whether the second capability that can stop a
+		// running container was live was to call the API and read a 503.
+		s.logger.Info("manual rollback disabled by configuration",
+			slog.Bool("configured", s.cfg.Enabled),
+			slog.Bool("capabilityWired", s.rollbacker != nil))
+
+		// Waiting on the context rather than returning keeps the caller's
+		// WaitGroup accounting uniform across every background service.
 		<-ctx.Done()
 		return
 	}
+
+	// Logged at WARN, matching recreation. This process can now stop the
+	// container that is currently serving, which belongs at a level a default
+	// log configuration shows.
+	s.logger.Warn("manual rollback ENABLED: this HarborMaster can stop a serving container and start the one it replaced",
+		slog.Int("maxConcurrent", s.cfg.MaxConcurrent),
+		slog.Duration("startupTimeout", s.cfg.StartupTimeout),
+		slog.Duration("stabilityPeriod", s.cfg.StabilityPeriod),
+		slog.Duration("stopTimeout", s.cfg.StopTimeout))
 
 	// Interrupted work is settled BEFORE anything new is claimed, so a queue
 	// that was mid-flight at shutdown is reconciled before the process starts

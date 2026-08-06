@@ -92,12 +92,25 @@ func (r *AuditRecorder) Record(ctx context.Context, event domain.AuditEvent) {
 	// Privileged actions are ALSO logged, at a level a default configuration
 	// shows. An operator watching logs should not have to open a page to notice
 	// that a container was replaced.
+	//
+	// The two free-form fields are sanitised HERE rather than relied upon to
+	// have been sanitised by the caller. The store does its own sanitising on
+	// the way to a column, but that happens after this line, so a log record
+	// would otherwise depend on a guarantee established downstream of it.
+	//
+	// In practice every value reaching this point is a server-generated
+	// identifier or a username the account service already constrained. That is
+	// exactly why it is worth bounding here: the property is currently true by
+	// the good behaviour of every call site, and this makes it true by
+	// construction at the point where a log line is written.
 	if event.Action.Privileged() && event.Outcome == domain.AuditSucceeded {
 		r.logger.WarnContext(ctx, "privileged action performed",
 			slog.String("action", string(event.Action)),
-			slog.String("actor", event.ActorUsername),
+			slog.String("actor",
+				domain.SanitiseDisplayText(event.ActorUsername, domain.MaxAuditActorBytes)),
 			slog.String("targetType", string(event.TargetType)),
-			slog.String("targetId", event.TargetID))
+			slog.String("targetId",
+				domain.SanitiseDisplayText(event.TargetID, domain.MaxAuditTargetIDBytes)))
 	}
 }
 

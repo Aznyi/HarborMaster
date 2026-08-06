@@ -36,6 +36,15 @@ const (
 	CodeUnavailable ErrorCode = "service_unavailable"
 	// CodeDisabled marks a feature switched off by configuration.
 	CodeDisabled ErrorCode = "feature_disabled"
+	// CodeRateLimited marks a request refused by a rate limiter, always with
+	// HTTP 429 and a Retry-After header.
+	//
+	// Distinct from CodeConflict, which it used to share. The two call for
+	// opposite responses: a conflict means the request will keep failing until
+	// the world changes, a rate limit means the same request will succeed if
+	// it is simply made again later. A client that could not tell them apart
+	// either gave up on retryable work or hammered unretryable work.
+	CodeRateLimited ErrorCode = "rate_limited"
 )
 
 // Pagination describes the page a list response returned.

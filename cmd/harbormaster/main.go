@@ -321,19 +321,6 @@ func run() error {
 
 	hasher := service.NewHasher(snapshotKey)
 
-	snapshots := service.NewSnapshotService(service.SnapshotOptions{
-		Containers: db.Containers,
-		Snapshots:  db.Snapshots,
-		Inventory:  db.Inventory,
-		Hasher:     hasher,
-		Versions: service.HostVersions{
-			HarborMaster: build.Version,
-			DockerAPI:    dockerAPIVersion,
-		},
-		Config: cfg.Snapshots,
-		Logger: logger,
-	})
-
 	readiness := service.NewReadinessEngine(service.ReadinessOptions{
 		Inventory: service.StoreReadinessInventory{
 			Inventory: db.Inventory,
@@ -345,6 +332,25 @@ func run() error {
 		// The null provider: Phase 3 inspects no filesystem at all.
 		Host:   service.NewNullHostValidation(),
 		Config: cfg.Snapshots,
+	})
+
+	// One recorder, used by both the capture path and the readiness endpoint,
+	// so a verdict is persisted whichever produced it.
+	readinessRecorder := service.NewReadinessRecorder(readiness,
+		service.StoreReadinessSections{Snapshots: db.Snapshots}, logger)
+
+	snapshots := service.NewSnapshotService(service.SnapshotOptions{
+		Containers: db.Containers,
+		Snapshots:  db.Snapshots,
+		Inventory:  db.Inventory,
+		Hasher:     hasher,
+		Versions: service.HostVersions{
+			HarborMaster: build.Version,
+			DockerAPI:    dockerAPIVersion,
+		},
+		Config:    cfg.Snapshots,
+		Logger:    logger,
+		Readiness: readinessRecorder,
 	})
 
 	diffs := service.NewDiffEngine(cfg.Snapshots)
@@ -712,7 +718,7 @@ func run() error {
 		Snapshots: db.Snapshots,
 		Capture:   snapshots,
 		Diffs:     diffs,
-		Readiness: readiness,
+		Readiness: readinessRecorder,
 		// Renders a container's CURRENT configuration for a diff against the
 		// present. In memory only: a GET must not write a snapshot.
 		SnapshotSpecBuilder: func(detail domain.ContainerDetail) domain.SnapshotSpec {

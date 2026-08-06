@@ -242,6 +242,44 @@ func (s *Server) auditWrite(
 		domain.AuditSucceeded, targetType, targetID, targetName, reason)
 }
 
+// auditRefusal records a privileged request that a preflight turned down.
+//
+// # Why a refusal is worth a row
+//
+// The three host-changing requests -- acquire, recreate, roll back -- used to
+// be audited only AFTER their preflight passed. A caller could ask for a
+// rollback of every execution on the host, be refused every time, and leave no
+// trace at all: the security log showed an idle system.
+//
+// That is the pattern the log exists to make visible. Somebody enumerating
+// what they are allowed to do looks exactly like this, and so does an
+// integration stuck in a retry loop.
+//
+// # What it records, and what it cannot
+//
+// The action, the outcome as DENIED rather than failed, the account, and the
+// closed-vocabulary refusal name. The target is the PLAN or EXECUTION the
+// caller named, which is a server-generated identifier they had to know --
+// never a container, because a refused request never resolved one.
+//
+// `denied` rather than `failed` is deliberate: it groups with authorization
+// denials, which is what a refusal is. A failure is HarborMaster not managing
+// something; a denial is HarborMaster declining to.
+func (s *Server) auditRefusal(
+	r *http.Request,
+	action domain.AuditAction,
+	targetType domain.AuditTargetType,
+	targetID string,
+	refusal string,
+) {
+	if s.audit == nil {
+		return
+	}
+	s.audit.RecordAction(r.Context(), s.actorFrom(r), action,
+		domain.AuditDenied, targetType, targetID, "",
+		"refused by preflight: "+refusal)
+}
+
 // deduplicatedReason renders whether a snapshot capture created a new row.
 //
 // The audit log records the OUTCOME an operator cares about: a capture that

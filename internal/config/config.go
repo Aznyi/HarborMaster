@@ -139,12 +139,28 @@ const (
 	DefaultSnapshotMaxDiffEntries     = 1000
 	DefaultSnapshotMaxGroupEntries    = 5000
 
-	// Write-endpoint limits. Per-process rather than per-client: there is no
-	// authentication and therefore no trustworthy client identity to key on,
-	// and a per-IP bucket would be trivially evaded while implying a precision
-	// HarborMaster does not have.
-	DefaultWriteRateLimit = 6.0 // requests per minute
-	DefaultWriteRateBurst = 3
+	// Write-endpoint limits. Per-process rather than per-client: a per-IP
+	// bucket would be keyed on an address that, in the supported container
+	// deployment, is the Docker bridge gateway for every operator alike.
+	//
+	// # Why these are not 6/minute any more
+	//
+	// They were, with a burst of 3, chosen when every endpoint was
+	// unauthenticated and the threat was an anonymous caller. Phase 9.5 closed
+	// that: a write now needs a session, a permission, and a CSRF token.
+	//
+	// What the old numbers actually bounded was the OPERATOR. Capturing a
+	// snapshot of a six-container estate -- one of the most ordinary things
+	// this product does -- failed halfway through and took over a minute of
+	// deliberate pacing to complete. On a fifty-container host it was
+	// unusable, and the project's own smoke test could not sign out.
+	//
+	// 60/minute with a burst of 20 matches the policy endpoints, which were
+	// raised for the same reason. It still bounds a runaway client to
+	// something a single SQLite writer absorbs comfortably, and every write
+	// path remains individually bounded regardless.
+	DefaultWriteRateLimit = 60.0 // requests per minute
+	DefaultWriteRateBurst = 20
 
 	// DefaultSnapshotMaxReasonBytes bounds the operator-supplied capture reason.
 	DefaultSnapshotMaxReasonBytes = 500

@@ -335,18 +335,23 @@ func (s *PlannerService) planOne(
 	drift := batch.Drift[candidate.ContainerID]
 	policy := batch.Policy[candidate.ContainerID]
 
-	proposedImage, proposedDigest := proposedChange(reference, intel)
+	// The reference and digest to move onto, resolved together. An invalid
+	// target means nothing is proposed, and the plan says so rather than
+	// pairing a reference with a digest that was resolved for another one.
+	target := proposedChange(intel)
+	proposedImage, proposedDigest := target.Reference(), target.Digest()
 
 	inputs := domain.PlanInputs{
 		ContainerID:   candidate.ContainerID,
 		ContainerName: candidate.ContainerName,
 
-		CurrentImage:   intel.Familiar,
-		ProposedImage:  proposedImage,
-		CurrentDigest:  intel.LocalDigest,
-		ProposedDigest: proposedDigest,
-		CurrentTag:     reference.Tag,
-		UpdateType:     intel.Update,
+		CurrentImage:        intel.Familiar,
+		ProposedImage:       proposedImage,
+		CurrentDigest:       intel.LocalDigest,
+		CurrentDigestDetail: intel.LocalDigestDetail,
+		ProposedDigest:      proposedDigest,
+		CurrentTag:          reference.Tag,
+		UpdateType:          intel.Update,
 
 		SnapshotID:       baseline.SnapshotID,
 		RestoreReadiness: readinessOrUnknown(baseline),
@@ -418,20 +423,61 @@ func (s *PlannerService) planOne(
 // reference, while a moved digest names the same reference resolving to
 // different content. Reporting the second as a reference change would suggest
 // editing something that does not need editing.
-func proposedChange(reference domain.NormalizedRef, intel domain.ImageIntel) (image, digest string) {
-	digest = intel.RemoteDigest
-
+//
+// # Each shape uses the digest resolved for ITS OWN reference
+//
+// This function used to return intel.RemoteDigest for both. RemoteDigest is the
+// digest the registry serves for the CURRENT tag, so a newer-tag proposal was
+// rendered with the old tag's digest -- and acquisition, being digest-pinned,
+// would have pulled the old image and called it the new one.
+//
+// A newer tag is now paired with intel.LatestDigest, which the image check
+// resolved from that tag's own manifest. When it is absent the tag is NOT
+// proposed: an unpinnable change is not something an operator can be offered,
+// and falling back to the current digest is the original defect.
+//
+// The returned target is a domain.ProposedTarget rather than two strings,
+// because two strings are what got crossed.
+func proposedChange(intel domain.ImageIntel) domain.ProposedTarget {
 	if intel.LatestTag != "" {
+		if intel.LatestDigest == "" {
+			// A newer tag with no digest of its own. Nothing is proposed.
+			return domain.ProposedTarget{}
+		}
 		// The familiar form with the tag replaced, so an operator reads
 		// "nginx:1.26" rather than a canonical path.
 		base := intel.Familiar
 		if index := lastIndexByte(base, ':'); index > lastIndexByte(base, '/') {
 			base = base[:index]
 		}
-		return base + ":" + intel.LatestTag, digest
+		reference := base + ":" + intel.LatestTag
+		target, err := domain.NewProposedTarget(reference, intel.LatestDigest, reference)
+		if err != nil {
+			return domain.ProposedTarget{}
+		}
+		return target
 	}
-	// No newer tag: the same reference, resolving to different content.
-	return intel.Familiar, digest
+
+	// No newer tag. The same reference resolving to different content is a
+	// real proposal -- but ONLY when the check actually established that the
+	// digest moved.
+	//
+	// Any other verdict here means the evidence was incomplete: a tag listing
+	// that exceeded its budget, a registry that did not answer, an image built
+	// on this host. Proposing the current reference in those cases produced
+	// plans that read "nginx:1.27.0-alpine -> nginx:1.27.0-alpine", which
+	// invites an operator to act on a change that does not exist.
+	if intel.Update != domain.UpdateDigest {
+		return domain.ProposedTarget{}
+	}
+
+	// The digest here IS the one resolved for this reference, so the pair is
+	// correct by construction.
+	target, err := domain.NewProposedTarget(intel.Familiar, intel.RemoteDigest, intel.Familiar)
+	if err != nil {
+		return domain.ProposedTarget{}
+	}
+	return target
 }
 
 // lastIndexByte returns the last index of b in s, or -1.

@@ -204,6 +204,12 @@ func (s *Server) handleRollbackCreate(w http.ResponseWriter, r *http.Request) {
 		RequestedBy: s.requesterFrom(r),
 	})
 	if err != nil {
+		// A refusal is recorded too. See Server.auditRefusal.
+		var refused service.RollbackRefusedError
+		if errors.As(err, &refused) {
+			s.auditRefusal(r, domain.AuditRollbackRequested,
+				domain.AuditTargetExecution, executionID, string(refused.Refusal))
+		}
 		s.writeRollbackError(w, r, err)
 		return
 	}
@@ -271,18 +277,27 @@ func (s *Server) writeRollbackError(w http.ResponseWriter, r *http.Request, err 
 	var refused service.RollbackRefusedError
 	if errors.As(err, &refused) {
 		status := http.StatusConflict
+		code := CodeConflict
 		switch refused.Refusal {
 		case domain.RollbackRefusalDisabled:
 			status = http.StatusServiceUnavailable
+			code = CodeDisabled
 		case domain.RollbackRefusalExecutionMissing:
 			status = http.StatusNotFound
+			code = CodeNotFound
 		case domain.RollbackRefusalDockerUnavailable:
 			status = http.StatusServiceUnavailable
+			code = CodeUnavailable
+		case domain.RollbackRefusalLimit:
+			// Retryable: the same request succeeds once a slot frees. A
+			// conflict code would tell a client to stop trying.
+			status = http.StatusTooManyRequests
+			code = CodeRateLimited
 		}
 
 		writeJSON(w, r, s.logger, status, rollbackRefusalResponse{
 			Error: ErrorBody{
-				Code:    CodeConflict,
+				Code:    code,
 				Message: refused.Refusal.Explain(),
 			},
 			Refusal:   refused.Refusal,

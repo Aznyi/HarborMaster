@@ -384,7 +384,7 @@ func (s *Server) guardWriteWith(r *http.Request, limiter *rateLimiter) error {
 		if allowed, retryAfter := limiter.allow(); !allowed {
 			return writeGuardError{
 				status:     http.StatusTooManyRequests,
-				code:       CodeConflict,
+				code:       CodeRateLimited,
 				message:    "too many write requests; slow down",
 				retryAfter: retryAfter,
 			}

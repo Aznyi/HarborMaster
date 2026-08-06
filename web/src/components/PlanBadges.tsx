@@ -145,13 +145,31 @@ export function SupersededBadge({ plan }: { plan: ChangePlan }) {
 /**
  * The proposed change, rendered as a before and after.
  *
- * When the reference is unchanged, the change is in the DIGEST — the publisher
- * republished the tag. Rendering that as an arrow between two identical strings
- * would suggest editing something that does not need editing, so it is said in
- * words instead.
+ * # Three cases, and only one of them is "the publisher republished the tag"
+ *
+ * This component used to have two: the reference moved, or it did not — and it
+ * explained "did not" as a republished tag every time. That sentence was
+ * printed over images whose tag listing had simply exceeded its budget, and
+ * over `harbormaster:local`, an image that has never been in a registry at all.
+ * A confident wrong explanation is worse than none, because an operator acts on
+ * it.
+ *
+ * So the cases are now distinguished by the UPDATE TYPE, which is the field
+ * that actually knows:
+ *
+ *  - `digest` — the reference is the same and the content moved. The only case
+ *    where the republished-tag sentence is true.
+ *  - nothing proposed — no target reference at all. Say that, and let the
+ *    plan's own reason explain why the evidence was insufficient.
+ *  - otherwise — a genuine reference change, rendered as an arrow.
+ *
+ * An arrow between two identical strings is never rendered: it would suggest
+ * editing something that does not need editing.
  */
 export function ProposedChange({ plan }: { plan: ChangePlan }) {
-  const referenceMoved = plan.proposedImage !== plan.currentImage;
+  const proposed = plan.proposedImage ?? "";
+  const referenceMoved = proposed !== "" && proposed !== plan.currentImage;
+  const republished = !referenceMoved && plan.updateType === "digest";
 
   return (
     <div className="space-y-1">
@@ -163,14 +181,19 @@ export function ProposedChange({ plan }: { plan: ChangePlan }) {
               →
             </span>
             <span className="sr-only"> becomes </span>
-            {plan.proposedImage}
+            {proposed}
           </>
         )}
       </p>
-      {!referenceMoved && (
+      {republished && (
         <p className="text-xs text-content-muted">
           The reference does not change. The publisher republished this tag, so
           the content moved underneath it.
+        </p>
+      )}
+      {!referenceMoved && !republished && (
+        <p className="text-xs text-content-muted">
+          No target was proposed, so there is nothing to move onto yet.
         </p>
       )}
     </div>

@@ -4697,6 +4697,10 @@ components:
         - conflict
         - service_unavailable
         - feature_disabled
+        # Always paired with HTTP 429 and a Retry-After header. Distinct from
+        # `conflict`, which it used to share: a conflict keeps failing until
+        # the world changes, a rate limit succeeds if simply retried later.
+        - rate_limited
 
     ErrorResponse:
       type: object
@@ -6998,7 +7002,22 @@ components:
         tag: { type: string }
         localDigest:
           type: string
-          description: The manifest digest the local daemon reports.
+          description: |
+            The manifest digest of the image this reference is actually
+            running.
+
+            For a digest-pinned reference it comes from the reference itself.
+            For an ordinary TAG-referenced one it is resolved from the local
+            image's RepoDigests, restricted to entries naming this exact
+            registry and repository — a digest belonging to any other
+            repository is never used, and an ambiguous set resolves to empty
+            rather than to a guess.
+        localDigestDetail:
+          type: string
+          description: |
+            Why `localDigest` is empty, when it is: an image built on this
+            host, a repository the local image reports ambiguously, or a
+            reference naming no registry. A fixed set of phrases.
         remoteDigest:
           type: string
           description: |
@@ -7021,6 +7040,17 @@ components:
           description: |
             The newer tag found by version comparison. Absent for a digest-only
             update, which has no newer tag to name.
+        latestDigest:
+          type: string
+          description: |
+            The manifest digest of `latestTag`, resolved from the SAME registry
+            lookup that found the tag.
+
+            **Never `remoteDigest`.** That is the digest of the tag the
+            container runs NOW, and pairing it with a newer tag is how a
+            digest-pinned pipeline ends up pulling the old image while
+            reporting the new one. Empty means the newer tag could not be
+            pinned, in which case no change is proposed at all.
         updateReason:
           type: string
           description: |
@@ -8198,6 +8228,13 @@ components:
           description: |
             Failures that left containers on this host for an operator to
             settle. The number that matters most on this page.
+        enabled:
+          type: boolean
+          description: |
+            Whether rollback is switched on at all, so an empty list is not
+            read as "nothing has ever been rolled back". A property of the
+            PROCESS, not of the rows: a database restored onto a deployment
+            that has not opted in reads as switched off.
 
     RollbackEligibility:
       type: object
@@ -8910,4 +8947,3 @@ components:
           type: object
           additionalProperties: { type: integer }
         lastEventAt: { type: string, format: date-time }
-

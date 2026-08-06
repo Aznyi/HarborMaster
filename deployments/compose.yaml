@@ -8,8 +8,9 @@
 #
 #   docker compose -f deployments/compose.yaml -f deployments/compose.build.yaml up --build
 #
-# Copy .env.example to .env first and set HARBORMASTER_DOCKER_GID to the host's
-# docker group.
+# Copy .env.example to .env first and set HARBORMASTER_DOCKER_GID for your host
+# — see "Docker socket group" below, which differs between native Linux and
+# Docker Desktop.
 #
 # ---------------------------------------------------------------------------
 # Docker socket access is privileged
@@ -20,10 +21,38 @@
 # needs — can create a privileged container and take over the host. The `:ro`
 # flag is defence in depth, not a security boundary.
 #
-# What actually keeps this deployment read-only is the application:
-# HarborMaster only calls the Engine's ping endpoint. Treat access to this
-# service as equivalent to root on the host, and keep it off the public
-# internet until authentication exists.
+# Treat access to this service as equivalent to root on the host.
+#
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+# Every route requires a session except four: `GET /health` (reduced to one
+# field for an anonymous caller), `GET /version`, `POST /auth/login`, and
+# `GET /auth/bootstrap`. There is no setting that turns that off.
+#
+# A fresh installation has no accounts and no default password. It prints a
+# one-time bootstrap token to the log at startup; use it once to create the
+# first administrator:
+#
+#   docker compose -f deployments/compose.yaml logs harbormaster | grep -A3 "bootstrap token"
+#
+# What remains YOUR job is the transport. HarborMaster does not terminate TLS.
+# Keep the published port on loopback, or put a TLS-terminating reverse proxy
+# in front and set HARBORMASTER_TRUSTED_PROXIES and HARBORMASTER_COOKIE_SECURE.
+#
+# ---------------------------------------------------------------------------
+# What this file exposes, and why it is long
+# ---------------------------------------------------------------------------
+# Every setting HarborMaster reads is listed in .env.example. This file forwards
+# the ones a deployment realistically needs to change, INCLUDING the three that
+# grant Docker write access.
+#
+# It used to forward only the inventory settings, which meant an operator
+# following the supported deployment could not enable image acquisition,
+# container recreation, or rollback at all: the variables were documented, the
+# compose file simply had no environment entry for them, so they never reached
+# the process. Anything not listed here can still be set by adding it to this
+# `environment:` block.
 
 name: harbormaster
 
@@ -33,9 +62,11 @@ services:
     container_name: harbormaster
     restart: unless-stopped
 
-    # Published to the host's loopback interface by default. HarborMaster is
-    # unauthenticated, so change HARBORMASTER_BIND only behind an
-    # authenticating reverse proxy.
+    # Published to the host's loopback interface by default. HarborMaster
+    # authenticates every route, but the session cookie is only as safe as the
+    # transport carrying it — change HARBORMASTER_BIND only behind a
+    # TLS-terminating reverse proxy, and set HARBORMASTER_COOKIE_SECURE=true
+    # when you do.
     ports:
       - "${HARBORMASTER_BIND:-127.0.0.1}:${HARBORMASTER_PORT:-8080}:8080"
 
@@ -44,19 +75,92 @@ services:
     user: "65532:65532"
 
     environment:
+      # ---- server ------------------------------------------------------
       HARBORMASTER_HTTP_ADDR: 0.0.0.0:8080
       HARBORMASTER_DB_PATH: /var/lib/harbormaster/harbormaster.db
       HARBORMASTER_DOCKER_HOST: unix:///var/run/docker.sock
       HARBORMASTER_LOG_LEVEL: ${HARBORMASTER_LOG_LEVEL:-info}
       HARBORMASTER_LOG_FORMAT: ${HARBORMASTER_LOG_FORMAT:-json}
+      HARBORMASTER_SHUTDOWN_TIMEOUT: ${HARBORMASTER_SHUTDOWN_TIMEOUT:-30s}
 
-      # Read-only inventory engine. See .env.example for the full description
-      # of each setting.
+      # ---- identity and the proxy in front of it -----------------------
+      #
+      # TRUSTED_PROXIES is what makes X-Forwarded-For and X-Forwarded-Proto
+      # believable. Leave it EMPTY unless a proxy you control is in front:
+      # without it those headers are ignored, which is the safe default.
+      #
+      # It also decides what the audit log records as the client address. In a
+      # container the peer is always the Docker bridge gateway, so without a
+      # trusted proxy every audit row carries the same address.
+      HARBORMASTER_TRUSTED_PROXIES: ${HARBORMASTER_TRUSTED_PROXIES:-}
+      HARBORMASTER_COOKIE_SECURE: ${HARBORMASTER_COOKIE_SECURE:-}
+      HARBORMASTER_COOKIE_SAMESITE_LAX: ${HARBORMASTER_COOKIE_SAMESITE_LAX:-false}
+      HARBORMASTER_SESSION_IDLE_TTL: ${HARBORMASTER_SESSION_IDLE_TTL:-72h}
+      HARBORMASTER_SESSION_ABSOLUTE_TTL: ${HARBORMASTER_SESSION_ABSOLUTE_TTL:-168h}
+      HARBORMASTER_SESSION_MAX_PER_USER: ${HARBORMASTER_SESSION_MAX_PER_USER:-10}
+      HARBORMASTER_BOOTSTRAP_TOKEN_TTL: ${HARBORMASTER_BOOTSTRAP_TOKEN_TTL:-1h}
+      HARBORMASTER_AUDIT_RETENTION: ${HARBORMASTER_AUDIT_RETENTION:-2160h}
+      HARBORMASTER_AUDIT_SECURITY_RETENTION: ${HARBORMASTER_AUDIT_SECURITY_RETENTION:-8760h}
+
+      # ---- shared write rate limit -------------------------------------
+      HARBORMASTER_WRITE_RATE_LIMIT: ${HARBORMASTER_WRITE_RATE_LIMIT:-60}
+      HARBORMASTER_WRITE_RATE_BURST: ${HARBORMASTER_WRITE_RATE_BURST:-20}
+
+      # ---- read-only inventory engine ----------------------------------
       HARBORMASTER_INVENTORY_ENABLED: ${HARBORMASTER_INVENTORY_ENABLED:-true}
       HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP: ${HARBORMASTER_INVENTORY_REFRESH_ON_STARTUP:-true}
       HARBORMASTER_INVENTORY_REFRESH_INTERVAL: ${HARBORMASTER_INVENTORY_REFRESH_INTERVAL:-60s}
       HARBORMASTER_INVENTORY_WORKERS: ${HARBORMASTER_INVENTORY_WORKERS:-8}
       HARBORMASTER_INVENTORY_ABSENT_RETENTION: ${HARBORMASTER_INVENTORY_ABSENT_RETENTION:-168h}
+
+      # ---- observation features (all read-only, all on by default) -----
+      HARBORMASTER_EVENTS_ENABLED: ${HARBORMASTER_EVENTS_ENABLED:-true}
+      HARBORMASTER_SNAPSHOTS_ENABLED: ${HARBORMASTER_SNAPSHOTS_ENABLED:-true}
+      HARBORMASTER_SNAPSHOT_RETENTION_COUNT: ${HARBORMASTER_SNAPSHOT_RETENTION_COUNT:-20}
+      HARBORMASTER_DRIFT_ENABLED: ${HARBORMASTER_DRIFT_ENABLED:-true}
+      HARBORMASTER_POLICY_ENABLED: ${HARBORMASTER_POLICY_ENABLED:-true}
+      HARBORMASTER_PLANNER_ENABLED: ${HARBORMASTER_PLANNER_ENABLED:-true}
+
+      # ---- image intelligence (HarborMaster's only outbound egress) ----
+      HARBORMASTER_IMAGE_INTEL_ENABLED: ${HARBORMASTER_IMAGE_INTEL_ENABLED:-true}
+      HARBORMASTER_IMAGE_INTEL_REFRESH_INTERVAL: ${HARBORMASTER_IMAGE_INTEL_REFRESH_INTERVAL:-6h}
+      HARBORMASTER_IMAGE_INTEL_MAX_CONCURRENT_REQUESTS: ${HARBORMASTER_IMAGE_INTEL_MAX_CONCURRENT_REQUESTS:-4}
+      HARBORMASTER_IMAGE_INTEL_MAX_TAG_PAGES: ${HARBORMASTER_IMAGE_INTEL_MAX_TAG_PAGES:-5}
+
+      # ================================================================
+      # DOCKER WRITE CAPABILITIES — off by default, opt in deliberately
+      # ================================================================
+      #
+      # Each of these hands the process a capability it otherwise does not
+      # hold. When false the interface is never wired, so the ability is
+      # ABSENT rather than merely unused, and no request can turn it back on.
+      #
+      # They also gate each other: execution requires acquisition, and
+      # rollback requires execution. HarborMaster refuses to start on an
+      # inconsistent combination rather than silently ignoring one.
+
+      # Downloads an approved, digest-pinned image into the local image store.
+      # Touches no container.
+      HARBORMASTER_ACQUISITION_ENABLED: ${HARBORMASTER_ACQUISITION_ENABLED:-false}
+      HARBORMASTER_ACQUISITION_MAX_CONCURRENT: ${HARBORMASTER_ACQUISITION_MAX_CONCURRENT:-2}
+      HARBORMASTER_ACQUISITION_PULL_TIMEOUT: ${HARBORMASTER_ACQUISITION_PULL_TIMEOUT:-30m}
+      HARBORMASTER_ACQUISITION_REQUIRE_SNAPSHOT: ${HARBORMASTER_ACQUISITION_REQUIRE_SNAPSHOT:-true}
+
+      # STOPS A RUNNING CONTAINER and replaces it. Requires acquisition.
+      HARBORMASTER_EXECUTION_ENABLED: ${HARBORMASTER_EXECUTION_ENABLED:-false}
+      HARBORMASTER_EXECUTION_REQUIRE_SNAPSHOT: ${HARBORMASTER_EXECUTION_REQUIRE_SNAPSHOT:-true}
+      HARBORMASTER_EXECUTION_MAX_CONCURRENT: ${HARBORMASTER_EXECUTION_MAX_CONCURRENT:-1}
+      HARBORMASTER_EXECUTION_STARTUP_TIMEOUT: ${HARBORMASTER_EXECUTION_STARTUP_TIMEOUT:-5m}
+      HARBORMASTER_EXECUTION_STABILITY_PERIOD: ${HARBORMASTER_EXECUTION_STABILITY_PERIOD:-30s}
+      HARBORMASTER_EXECUTION_STOP_TIMEOUT: ${HARBORMASTER_EXECUTION_STOP_TIMEOUT:-30s}
+
+      # STOPS THE CONTAINER THAT IS CURRENTLY SERVING and starts the one it
+      # replaced. Requires execution. There is a gap between the two.
+      HARBORMASTER_ROLLBACK_ENABLED: ${HARBORMASTER_ROLLBACK_ENABLED:-false}
+      HARBORMASTER_ROLLBACK_MAX_CONCURRENT: ${HARBORMASTER_ROLLBACK_MAX_CONCURRENT:-1}
+      HARBORMASTER_ROLLBACK_STARTUP_TIMEOUT: ${HARBORMASTER_ROLLBACK_STARTUP_TIMEOUT:-5m}
+      HARBORMASTER_ROLLBACK_STABILITY_PERIOD: ${HARBORMASTER_ROLLBACK_STABILITY_PERIOD:-20s}
+      HARBORMASTER_ROLLBACK_STOP_TIMEOUT: ${HARBORMASTER_ROLLBACK_STOP_TIMEOUT:-30s}
 
     volumes:
       # See the warning above: `:ro` does not make the Docker API read-only.
@@ -74,11 +178,30 @@ services:
         tmpfs:
           size: 16777216 # 16 MiB
 
-    # The container runs as UID 65532, which needs the host's docker group to
-    # read the socket. Find the GID with:
-    #   stat -c '%g' /var/run/docker.sock
-    # and set HARBORMASTER_DOCKER_GID in .env. 999 is a common default but is
-    # not portable — check rather than assume.
+    # ---- Docker socket group -------------------------------------------
+    #
+    # The container runs as UID 65532 and needs the group that owns the socket.
+    # The right value differs by platform, so check rather than assume:
+    #
+    #   Native Linux / rootful Docker
+    #     stat -c '%g' /var/run/docker.sock        # commonly 999 or 998
+    #
+    #   Docker Desktop (macOS, Windows/WSL2)
+    #     The socket your host sees is a proxy; the one bind-mounted into a
+    #     container lives inside Docker Desktop's VM and is owned by root:root.
+    #     Read it from inside a container rather than from the host, where the
+    #     command above reports the wrong thing or nothing at all:
+    #
+    #       docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+    #         alpine stat -c '%g' /var/run/docker.sock
+    #
+    #     This reports 0 on current Docker Desktop, so set
+    #     HARBORMASTER_DOCKER_GID=0. That is the VM's root group and not the
+    #     host's, so it does not grant host root beyond what mounting the
+    #     socket already does.
+    #
+    #   Rootless Docker
+    #     The socket is owned by your own uid/gid; use `id -g`.
     group_add:
       - "${HARBORMASTER_DOCKER_GID:-999}"
 
@@ -92,12 +215,10 @@ services:
 
     # Resource ceilings.
     #
-    # HarborMaster is unauthenticated, so anyone who can reach the port can make
-    # it work: list containers, compare snapshots, open event streams. Every one
-    # of those paths is individually bounded in the application, but a ceiling
-    # here is what turns "a bug or an attacker made it allocate" from a host
-    # problem into a container problem. The process is one Go binary and one
-    # SQLite file; it does not legitimately need more than this.
+    # Every request path is individually bounded in the application, but a
+    # ceiling here is what turns "a bug or a hostile client made it allocate"
+    # from a host problem into a container problem. The process is one Go binary
+    # and one SQLite file; it does not legitimately need more than this.
     #
     # Raise mem_limit if you run HarborMaster against a host with many thousands
     # of containers and see OOM kills in `docker events`.

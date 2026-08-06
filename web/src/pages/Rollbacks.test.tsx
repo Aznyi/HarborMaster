@@ -95,6 +95,7 @@ function summary(overrides: Partial<RollbackSummary> = {}): RollbackSummary {
     succeeded: 2,
     failed: 1,
     needsAttention: 0,
+    enabled: true,
     ...overrides,
   };
 }

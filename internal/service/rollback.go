@@ -420,7 +420,15 @@ func (s *RollbackService) List(
 
 // Summary returns the estate aggregate.
 func (s *RollbackService) Summary(ctx context.Context) (domain.RollbackSummary, error) {
-	return s.store.Summary(ctx)
+	summary, err := s.store.Summary(ctx)
+	if err != nil {
+		return summary, err
+	}
+	// Set here rather than in the repository: whether the capability is held
+	// is a property of THIS PROCESS, not of the rows. A database restored onto
+	// a deployment that has not opted in must read as switched off.
+	summary.Enabled = s.Enabled()
+	return summary, nil
 }
 
 // Eligible answers whether one execution LOOKS like one that can be rolled

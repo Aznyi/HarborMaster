@@ -475,7 +475,7 @@ func (c *Client) CaptureConfig(ctx context.Context, containerID string) (*Captur
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	inspected, err := c.api.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	inspected, err := c.mutateAPI.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrContainerVanished, domain.ShortenID(containerID))
@@ -859,7 +859,7 @@ func (c *Client) CreateContainer(ctx context.Context, request CreateRequest) (st
 		options.Platform = &platform
 	}
 
-	created, err := c.api.ContainerCreate(ctx, options)
+	created, err := c.mutateAPI.ContainerCreate(ctx, options)
 	if err != nil {
 		return "", classifyMutationError(ctx, err)
 	}
@@ -884,7 +884,7 @@ func (c *Client) StartContainer(ctx context.Context, request StartRequest) error
 	// ContainerStartOptions carries checkpoint fields, which are left zero.
 	// Restoring from a checkpoint is a different capability and HarborMaster
 	// has no way to name one.
-	if _, err := c.api.ContainerStart(ctx, request.ContainerID, client.ContainerStartOptions{}); err != nil {
+	if _, err := c.mutateAPI.ContainerStart(ctx, request.ContainerID, client.ContainerStartOptions{}); err != nil {
 		return classifyMutationError(ctx, err)
 	}
 	return nil
@@ -916,7 +916,7 @@ func (c *Client) StopContainer(ctx context.Context, request StopRequest) error {
 	defer cancel()
 
 	seconds := int(grace.Round(time.Second) / time.Second)
-	if _, err := c.api.ContainerStop(ctx, request.ContainerID, client.ContainerStopOptions{
+	if _, err := c.mutateAPI.ContainerStop(ctx, request.ContainerID, client.ContainerStopOptions{
 		Timeout: &seconds,
 	}); err != nil {
 		return classifyMutationError(ctx, err)
@@ -933,7 +933,7 @@ func (c *Client) RenameContainer(ctx context.Context, request RenameRequest) err
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	if _, err := c.api.ContainerRename(ctx, request.ContainerID, client.ContainerRenameOptions{
+	if _, err := c.mutateAPI.ContainerRename(ctx, request.ContainerID, client.ContainerRenameOptions{
 		NewName: request.NewName,
 	}); err != nil {
 		return classifyMutationError(ctx, err)
@@ -963,7 +963,7 @@ func (c *Client) RemoveContainer(ctx context.Context, request RemoveRequest) err
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	_, err := c.api.ContainerRemove(ctx, request.ContainerID, client.ContainerRemoveOptions{
+	_, err := c.mutateAPI.ContainerRemove(ctx, request.ContainerID, client.ContainerRemoveOptions{
 		// All three stated explicitly rather than left to the zero value. A
 		// reader of this call should not have to know Go's defaults to know
 		// that HarborMaster does not force and does not delete data.

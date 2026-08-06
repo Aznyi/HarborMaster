@@ -130,8 +130,16 @@ type ImageIntel struct {
 	// LocalDigest is the manifest digest the local daemon reports for this
 	// reference, and RemoteDigest the one the registry currently serves. The
 	// pair is the whole of digest-based update detection.
-	LocalDigest  string `json:"localDigest,omitempty"`
-	RemoteDigest string `json:"remoteDigest,omitempty"`
+	LocalDigest string `json:"localDigest,omitempty"`
+	// LocalDigestDetail says why LocalDigest is empty when it is: an image
+	// built on this host, a repository the local image reports ambiguously, or
+	// a reference that names no registry at all.
+	//
+	// Present so a change plan can explain a missing digest in the operator's
+	// terms rather than reporting the bare absence. A fixed set of phrases --
+	// see RepoDigestMatch.Explain.
+	LocalDigestDetail string `json:"localDigestDetail,omitempty"`
+	RemoteDigest      string `json:"remoteDigest,omitempty"`
 	// Pinned reports that the reference names a digest, so its tag cannot move.
 	Pinned bool `json:"pinned"`
 
@@ -157,6 +165,23 @@ type ImageIntel struct {
 	// LatestTag is the newer tag found by version comparison, when there was
 	// one. Empty for a digest-only update.
 	LatestTag string `json:"latestTag,omitempty"`
+	// LatestDigest is the manifest digest of LatestTag, resolved from the SAME
+	// registry lookup that found the tag.
+	//
+	// # Why this field exists
+	//
+	// Without it there was only one digest on the record -- the one resolved
+	// for the CURRENT tag -- and the planner used it for both. A plan read
+	// "busybox:1.36 -> busybox:1.38" while carrying 1.36's digest, and because
+	// acquisition is digest-pinned it would have pulled 1.36, verified it
+	// against the digest the plan called approved, passed, and recorded an
+	// update that never happened.
+	//
+	// Empty means the newer tag's manifest could not be resolved. That is NOT
+	// a licence to fall back to RemoteDigest: a tag whose digest is unknown
+	// cannot be acquired safely, so the planner proposes nothing at all. See
+	// ProposedTarget.
+	LatestDigest string `json:"latestDigest,omitempty"`
 	// UpdateReason explains the verdict, from a fixed set of phrases.
 	UpdateReason string `json:"updateReason,omitempty"`
 

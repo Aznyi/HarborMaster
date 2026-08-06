@@ -310,20 +310,15 @@ func (r *PlanRepository) gatherIntel(
 		args = append(args, reference)
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT i.id, i.reference, i.familiar, i.registry_kind, i.registry,
-		       i.namespace, i.repository, i.tag,
-		       i.local_digest, i.remote_digest, i.pinned,
-		       i.platform_os, i.platform_arch, i.platform_variant, i.platform_missing,
-		       i.image_id,
-		       i.update_type, i.latest_tag, i.update_reason,
-		       i.check_status, i.status_detail,
-		       i.first_seen_at, i.last_checked_at, i.last_success_at,
-		       i.next_check_at, i.failure_count,
-		       i.published_at, i.vendor, i.source, i.labels, i.etag,
-		       (SELECT COUNT(*) FROM containers c
-		         WHERE c.present = 1 AND c.image_ref = i.reference) AS container_count
-		FROM image_intel i
+	// The SHARED column list, not a second copy of it.
+	//
+	// There used to be two hand-maintained SELECTs over image_intel, and they
+	// drifted: both carried the correlated container-count subquery that never
+	// matched, and neither gained the latest-tag digest. One list means the
+	// planner and the intelligence dashboard cannot disagree about what a
+	// record contains.
+	rows, err := r.db.QueryContext(ctx,
+		selectImageIntelColumns+`
 		WHERE i.reference IN (`+placeholders(len(imageRefs))+`)`, args...)
 	if err != nil {
 		return fmt.Errorf("query plan image intel: %w", AsError(err))
@@ -468,6 +463,18 @@ func (r *PlanRepository) InsertPlans(
 	defer func() { _ = tx.Rollback() }()
 
 	for _, plan := range plans {
+		// The last gate before a crossed pair becomes durable.
+		//
+		// A plan's proposed digest is what acquisition pins its pull to, so a
+		// reference without a usable digest must never reach a row an operator
+		// could later act on. Refusing the whole batch rather than skipping the
+		// row: a planner producing unpinnable plans is a defect, and silently
+		// dropping some of its output would hide it.
+		if !plan.ValidTarget() {
+			return result, fmt.Errorf("%w: container %s proposes %q",
+				domain.ErrPlanTargetCrossed, plan.ContainerID, plan.ProposedImage)
+		}
+
 		inserted, err := insertPlan(ctx, tx, plan, stamp)
 		if err != nil {
 			return result, err

@@ -892,6 +892,7 @@ Listing these so their absence reads as a decision rather than an oversight.
 
 | Absent | Why |
 | --- | --- |
+| A digest for a tag nobody resolved | Phase 10.1. A newer tag is proposed only when its OWN manifest digest was resolved in the same registry lookup. `domain.ProposedTarget` cannot be constructed from a reference and a digest resolved for a different reference, and `ChangePlan.ValidTarget` refuses an unpinnable pair before it reaches a row |
 | Any Docker mutation beyond a digest-pinned pull, a single-container recreate, and a single-execution rollback | Phase 8 added one image mutation, Phase 9 added five container lifecycle methods, Phase 10 added four rollback methods. All three surfaces are pinned by test, held by separate services, and off by default. Everything else remains absent |
 | **Automatic** rollback | **Explicitly not built.** A failed recreation quarantines the replacement, preserves both containers, and records manual steps. An automatic undo is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong. Phase 10 added a rollback a PERSON asks for, one execution at a time; see §3g |
 | Scheduled or fleet rollback | Same reasoning. No timer creates rollback work, and `ROLLBACK_MAX_CONCURRENT` defaults to one |

@@ -140,6 +140,13 @@ type PlanInputs struct {
 	// ContainerCount is how many present containers run the current image --
 	// the blast radius of acting on this plan everywhere.
 	ContainerCount int
+	// CurrentDigestDetail says WHY CurrentDigest is empty, when it is: an image
+	// built on this host, a repository the local image reports ambiguously, or
+	// a reference naming no registry.
+	//
+	// Carried so the unknown-digest factor names the actual situation instead
+	// of restating the absence. Empty falls back to the generic phrasing.
+	CurrentDigestDetail string
 
 	// EvaluatedAt is the moment the assessment is made. Passed in rather than
 	// read from a clock, so image age is reproducible.
@@ -436,11 +443,19 @@ func assessUnknownDigest(inputs PlanInputs) (RiskFactor, bool) {
 		}, true
 
 	case inputs.CurrentDigest == "":
+		// The reason, when the image check established one. "This image was
+		// built on this host" is a different situation from "this image reports
+		// two conflicting digests", and an operator can act on the second.
+		detail := "the running image has no registry digest, so HarborMaster " +
+			"cannot confirm what is actually deployed"
+		if inputs.CurrentDigestDetail != "" {
+			detail = inputs.CurrentDigestDetail +
+				", so HarborMaster cannot confirm what is actually deployed"
+		}
 		return RiskFactor{
 			Points:   15,
 			Severity: FactorUnknown,
-			Detail: "the running image has no registry digest, so HarborMaster " +
-				"cannot confirm what is actually deployed",
+			Detail:   detail,
 		}, true
 
 	case inputs.ProposedDigest == "":

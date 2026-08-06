@@ -1,0 +1,72 @@
+-- 0015_update_pipeline_correctness: make the update pipeline reachable and safe.
+--
+-- # What was broken
+--
+-- Three defects in the same subsystem, found by a live acceptance test against
+-- a stock Docker host. Together they made image acquisition, container
+-- recreation, and rollback unreachable for ordinary tag-referenced containers,
+-- and would have made them WRONG had they been reachable.
+--
+-- ## 1. The running image's digest was never known
+--
+-- `local_digest` was populated only from the container's image REFERENCE, which
+-- carries a digest only when the container was started as `image@sha256:...`.
+-- Every container started from a tag -- almost every container anywhere -- had
+-- an empty local digest.
+--
+-- That empty value reaches the planner as "the running image has no registry
+-- digest", which forces the recommendation to `unknown`, and acquisition
+-- refuses an unrecommended plan. The whole write path was closed.
+--
+-- The daemon knew the answer: `local_digest` is now resolved from the local
+-- image's RepoDigests, restricted to entries naming this exact repository.
+-- `local_digest_detail` records WHY it is missing when it is, so the plan can
+-- say "this image was built on this host" instead of a bare gap.
+--
+-- ## 2. A newer tag was paired with the CURRENT tag's digest
+--
+-- The planner proposed `busybox:1.36 -> busybox:1.38` while carrying 1.36's
+-- manifest digest, because the only digest it had was the one resolved for the
+-- tracked tag. Acquisition is digest-pinned, so it would have pulled 1.36,
+-- verified it against the "approved" digest, passed, and recorded an update to
+-- 1.38 that never happened.
+--
+-- `latest_digest` holds the digest resolved for `latest_tag`, from the SAME
+-- registry lookup that found the tag. A tag change is proposed only when both
+-- are present, so the pair cannot be crossed.
+--
+-- ## 3. container_count was always zero
+--
+-- It was a correlated subquery matching `containers.image_ref` (the raw
+-- reference, `nginx:1.27.0-alpine`) against `image_intel.reference` (the
+-- canonical one, `docker.io/library/nginx:1.27.0-alpine`). Those never match,
+-- so every image reported zero containers affected -- the number an operator
+-- prioritises updates by.
+--
+-- It is now a stored column, summed during the inventory sync where the mapping
+-- from raw reference to canonical reference is still known. That mapping is not
+-- recoverable in SQL afterwards, which is why the subquery could not be fixed
+-- in place.
+
+ALTER TABLE image_intel ADD COLUMN local_digest_detail TEXT NOT NULL DEFAULT '';
+
+-- The digest of `latest_tag`, resolved from the same registry evidence.
+--
+-- Empty whenever `latest_tag` is empty, and also whenever the newer tag was
+-- found but its manifest could not be resolved. The planner treats the second
+-- case as "no proposal", because a tag with no digest cannot be acquired
+-- safely and proposing it would put an unpinnable change in front of an
+-- operator.
+ALTER TABLE image_intel ADD COLUMN latest_digest TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE image_intel ADD COLUMN container_count INTEGER NOT NULL DEFAULT 0;
+
+-- Restore readiness needs NO schema change, which is worth recording.
+--
+-- `snapshots.readiness_status` and `snapshots.readiness_evaluated_at` have
+-- existed since 0004. Every snapshot nonetheless sat at 'unknown' forever,
+-- because nothing ever ran the evaluation and wrote it back -- so every change
+-- plan carried `restoreReadiness: unknown` and the risk points that go with it.
+--
+-- The fix is entirely in the service layer: evaluate on capture and before
+-- planning. See internal/service/snapshot_readiness.go.

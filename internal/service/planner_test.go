@@ -214,21 +214,39 @@ func plannerNow(t *testing.T) time.Time {
 	return parsed
 }
 
+// Three distinct, WELL FORMED digests.
+//
+// Well formed because a proposal is now built by domain.NewProposedTarget,
+// which refuses anything that is not a real manifest digest -- a fixture using
+// "sha256:aaaa" would exercise the refusal path rather than the path under
+// test. Distinct because the whole point of Phase 10.1 is that the current
+// tag's digest and the proposed tag's digest are different values that must not
+// be interchanged.
+const (
+	planLocalDigest  = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	planRemoteDigest = "sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	planLatestDigest = "sha256:" + "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+)
+
 // updatableIntel is an image with a patch update on offer.
 func updatableIntel(reference, familiar, tag string) domain.ImageIntel {
 	published := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	return domain.ImageIntel{
-		Reference:      reference,
-		Familiar:       familiar,
-		Kind:           domain.RegistryDockerHub,
-		Registry:       "docker.io",
-		Repository:     "library/nginx",
-		Tag:            "1.27.0",
-		LocalDigest:    "sha256:aaaa",
-		RemoteDigest:   "sha256:bbbb",
-		Platform:       domain.Platform{OS: "linux", Architecture: "amd64"},
-		Update:         domain.UpdatePatch,
-		LatestTag:      tag,
+		Reference:    reference,
+		Familiar:     familiar,
+		Kind:         domain.RegistryDockerHub,
+		Registry:     "docker.io",
+		Repository:   "library/nginx",
+		Tag:          "1.27.0",
+		LocalDigest:  planLocalDigest,
+		RemoteDigest: planRemoteDigest,
+		Platform:     domain.Platform{OS: "linux", Architecture: "amd64"},
+		Update:       domain.UpdatePatch,
+		LatestTag:    tag,
+		// The newer tag's OWN digest, resolved with it. Without this the
+		// planner proposes nothing, which is the correct refusal for a tag that
+		// cannot be pinned.
+		LatestDigest:   planLatestDigest,
 		Status:         domain.CheckOK,
 		PublishedAt:    &published,
 		ContainerCount: 1,
@@ -279,8 +297,17 @@ func TestGenerateProducesOnePlanPerChangedContainer(t *testing.T) {
 	if plan.CurrentImage != "nginx:1.27.0" || plan.ProposedImage != "nginx:1.27.1" {
 		t.Errorf("proposed change = %q -> %q", plan.CurrentImage, plan.ProposedImage)
 	}
-	if plan.ProposedDigest != "sha256:bbbb" {
-		t.Errorf("proposed digest = %q", plan.ProposedDigest)
+	// The digest of the PROPOSED tag, not of the tag the container runs now.
+	//
+	// This assertion is the regression guard for Phase 10.1's headline defect:
+	// the planner used to pair a newer tag with planRemoteDigest, which is the
+	// digest resolved for the CURRENT tag.
+	if plan.ProposedDigest != planLatestDigest {
+		t.Errorf("proposed digest = %q, want the proposed tag's own digest %q",
+			plan.ProposedDigest, planLatestDigest)
+	}
+	if plan.ProposedDigest == planRemoteDigest {
+		t.Error("the proposed tag was paired with the CURRENT tag's digest")
 	}
 	if plan.UpdateType != domain.UpdatePatch {
 		t.Errorf("update type = %q", plan.UpdateType)
