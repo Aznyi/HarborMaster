@@ -91,7 +91,8 @@ const selectImageIntelColumns = `
 	SELECT i.id, i.reference, i.familiar, i.registry_kind, i.registry,
 	       i.namespace, i.repository, i.tag,
 	       i.local_digest, i.remote_digest, i.pinned,
-	       i.platform_os, i.platform_arch, i.platform_variant, i.image_id,
+	       i.platform_os, i.platform_arch, i.platform_variant, i.platform_missing,
+	       i.image_id,
 	       i.update_type, i.latest_tag, i.update_reason,
 	       i.check_status, i.status_detail,
 	       i.first_seen_at, i.last_checked_at, i.last_success_at,
@@ -380,7 +381,13 @@ type CheckOutcome struct {
 	LatestTag    string
 	UpdateReason string
 
-	Platform    domain.Platform
+	Platform domain.Platform
+	// PlatformMissing reports that the index advertised platforms but not the
+	// one this image runs on. Written on every successful check, including when
+	// it is false, so a previously missing platform that reappeared is cleared
+	// rather than remembered forever.
+	PlatformMissing bool
+
 	PublishedAt *time.Time
 	Vendor      string
 	Source      string
@@ -444,6 +451,7 @@ func (r *ImageIntelRepository) RecordCheck(ctx context.Context, outcome CheckOut
 				platform_os      = CASE WHEN ? <> '' THEN ? ELSE platform_os END,
 				platform_arch    = CASE WHEN ? <> '' THEN ? ELSE platform_arch END,
 				platform_variant = CASE WHEN ? <> '' THEN ? ELSE platform_variant END,
+				platform_missing = ?,
 				published_at     = COALESCE(?, published_at),
 				vendor           = CASE WHEN ? <> '' THEN ? ELSE vendor END,
 				source           = CASE WHEN ? <> '' THEN ? ELSE source END,
@@ -460,6 +468,7 @@ func (r *ImageIntelRepository) RecordCheck(ctx context.Context, outcome CheckOut
 			outcome.Platform.OS, outcome.Platform.OS,
 			outcome.Platform.Architecture, outcome.Platform.Architecture,
 			outcome.Platform.Variant, outcome.Platform.Variant,
+			boolToInt(outcome.PlatformMissing),
 			published,
 			outcome.Vendor, outcome.Vendor,
 			outcome.Source, outcome.Source,
@@ -1012,6 +1021,18 @@ func imageIntelWhere(filter ImageIntelFilter) (string, []any) {
 	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
+// boolToInt renders a flag for a SQLite integer column.
+//
+// SQLite has no boolean type, and database/sql binds a Go bool as 1 or 0
+// anyway; this exists so the CHECK-constrained columns are written with the
+// same two literals the constraint names, visibly at the call site.
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func scanImageIntel(rows *sql.Rows) ([]domain.ImageIntel, error) {
 	records := make([]domain.ImageIntel, 0, 16)
 
@@ -1020,6 +1041,7 @@ func scanImageIntel(rows *sql.Rows) ([]domain.ImageIntel, error) {
 			record      domain.ImageIntel
 			kind        string
 			pinned      int
+			noPlatform  int
 			updateType  string
 			status      string
 			firstSeen   string
@@ -1034,7 +1056,7 @@ func scanImageIntel(rows *sql.Rows) ([]domain.ImageIntel, error) {
 			&record.Namespace, &record.Repository, &record.Tag,
 			&record.LocalDigest, &record.RemoteDigest, &pinned,
 			&record.Platform.OS, &record.Platform.Architecture, &record.Platform.Variant,
-			&record.ImageID,
+			&noPlatform, &record.ImageID,
 			&updateType, &record.LatestTag, &record.UpdateReason,
 			&status, &record.StatusDetail,
 			&firstSeen, &lastChecked, &lastSuccess, &nextCheck, &record.FailureCount,
@@ -1046,6 +1068,7 @@ func scanImageIntel(rows *sql.Rows) ([]domain.ImageIntel, error) {
 
 		record.Kind = domain.RegistryKind(kind)
 		record.Pinned = pinned == 1
+		record.PlatformMissing = noPlatform == 1
 		record.Update = domain.UpdateType(updateType)
 		record.Status = domain.CheckStatus(status)
 

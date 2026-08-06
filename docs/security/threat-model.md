@@ -112,7 +112,7 @@ largest residual risk in the product.
 
 | Surface | Methods | Notes |
 | --- | --- | --- |
-| 33 REST endpoints under `/api/v1` | Mostly GET | Full list in `api/openapi.yaml` |
+| 40 REST endpoints under `/api/v1` | Mostly GET | Full list in `api/openapi.yaml`; a test fails the build if the router and the document disagree |
 | `POST /api/v1/inventory/refresh` | POST | Drives a full Docker sweep |
 | `POST /api/v1/snapshots` | POST | Writes to the database |
 | `PATCH /api/v1/drift/{id}` | PATCH | Moves a drift record's status. Cannot reach Docker, a container, or a snapshot; cannot set `active` or `resolved` |
@@ -121,6 +121,8 @@ largest residual risk in the product.
 | `PATCH /api/v1/policy-violations/{id}` | PATCH | Moves a violation's status; cannot set `active` or `resolved`, and does not suppress re-evaluation |
 | `POST /api/v1/policy/evaluate` | POST | Schedules a compliance pass and answers 202. Coalesced through the same queue the scheduled passes use, so a loop produces one pass; rate limited on top |
 | 5 policy read endpoints | GET | Definitions, the rule catalogue, violations, summary, per-container view |
+| `POST /api/v1/plans/generate` | POST | Schedules a plan generation pass and answers 202. Generates HarborMaster's own analysis of HarborMaster's own database: pulls nothing, changes no container, schedules no change. Coalesced and rate limited |
+| 3 plan read endpoints | GET | Plans with the estate summary, one plan, one container's planning view. No PATCH and no DELETE: plans are immutable |
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
 
@@ -135,6 +137,22 @@ asynchronous evaluate endpoint are what stop it being used to occupy the
 process. Under R1 (no authentication) an attacker who can reach the port can
 also **disable a policy and hide non-compliance from the dashboard** — the
 definition and its history survive, but the report stops being trustworthy.
+
+**The change planning surface adds no capability**, which is the point worth
+stating. `POST /plans/generate` is the third asynchronous "do a pass" endpoint,
+and like the other two it takes no body and no target. What it schedules reads
+six tables HarborMaster already populated and writes one; it makes no network
+request and opens no Docker connection, so an anonymous caller who reaches it
+gains nothing they could not already cause with an inventory refresh — and less,
+since a pass over an unchanged estate writes no rows at all.
+
+There is no plan write surface beyond that. A plan cannot be edited, deleted,
+approved, or applied, because none of those routes exists and HarborMaster has
+no capability behind them. Under R1 an attacker who can reach the port can read
+every assessment, which tells them which containers are running outdated images
+and which have unresolved policy violations — reconnaissance value, addressed by
+the same binding and proxy guidance as the rest of the API rather than by
+anything specific to this feature.
 
 ### Outbound (initiated by HarborMaster)
 
@@ -312,6 +330,9 @@ Ordered by severity. These are accepted, not solved.
 | R15 | **Anyone who can reach the API can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Medium** | Follows from R1; the policy surface has no separate authentication because HarborMaster has none | The definition and every violation it found are retained, so the change is visible and reversible rather than destructive; loopback bind and an authenticating proxy |
 | R16 | **A policy is only as good as the configuration HarborMaster can see.** Capability rules evaluate declared `capAdd` and cannot see the daemon's default set; `networkAllowlist` evaluates attached networks and cannot distinguish `container:<id>` namespace sharing from having no network | **Medium** | The alternative is hardcoding a claim about a daemon HarborMaster has not asked, which would be confidently wrong rather than honestly narrow | Stated in each rule's catalogue description, in the violation's reason, and in the editor; the network rule fails closed on an empty attachment set |
 | R17 | **Compliance reflects the last inventory refresh, not the live host.** A container changed between refreshes is reported against stale configuration until the next pass | **Low** | Evaluating against the daemon on demand would put a Docker call behind an unauthenticated endpoint | A pass runs after every successful refresh and after a targeted refresh commits; the inventory generation is recorded on every violation |
+| R22 | **A risk score is a judgement, not a measurement.** The weights are chosen by people and can be wrong for a given estate; a plan that reads "proceed" is not a guarantee the change is safe | **Medium** | Any risk model has this property, and the alternative — no assessment — leaves an operator with the same decision and less information. Making the weights configurable would make plans irreproducible between deployments, which costs more than it gains | Every factor names the rule that produced it and its contribution, so a verdict is auditable rather than opaque; the planner version is recorded on every plan and a rule change forces regeneration; nothing acts on a plan automatically |
+| R23 | **A plan is only as fresh as its inputs.** It rests on the last inventory refresh, the last registry lookup, and the last drift and policy passes, so a world that moved since any of those is assessed against stale evidence | **Low** | Reading live state would put a Docker call and a registry call behind an unauthenticated endpoint, which is a larger risk than staleness | A pass runs after every successful inventory refresh; each plan records when it was generated and the registry status it rested on; the UI reports a non-OK registry status as `cannot advise` rather than as a verdict |
+| R24 | **The freshness rule can act on a stale clock.** The evaluation time is excluded from the fingerprint deliberately, so an image crossing the 48-hour freshness boundary does not by itself produce a new plan | **Low** | Including a clock would make every fingerprint unique and defeat duplicate suppression entirely, which is what keeps the table from growing on every refresh | Documented at the fingerprint; the next genuine input change regenerates the plan, and the factor is worth 8 points of 100 |
 | R14 | **A wedged background task can be abandoned at shutdown** once the grace period elapses | **Low** | An unbounded wait is not recoverable; an abandoned SQLite transaction is rolled back by the database | Logged at error level with what was abandoned; raise `SHUTDOWN_TIMEOUT` |
 
 ---

@@ -65,6 +65,13 @@ import type {
   PolicyViolation,
   PolicyViolationQuery,
 } from "./policyTypes";
+import type {
+  ChangePlan,
+  PlanContainerResponse,
+  PlanGenerateAccepted,
+  PlanListResponse,
+  PlanQuery,
+} from "./planTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -907,4 +914,96 @@ export function refreshImageMetadata(
   options?: RequestOptions,
 ): Promise<ImageRefreshAccepted> {
   return request<ImageRefreshAccepted>("/images/refresh", options, "POST");
+}
+
+/**
+ * Change plans.
+ *
+ * Three reads and one write, and the write GENERATES HarborMaster's own
+ * analysis of HarborMaster's own database. There is deliberately no function
+ * here that applies, executes, approves, or schedules a change — HarborMaster
+ * has no such capability and the API exposes no such endpoint.
+ *
+ * There is also no update and no delete. A plan records what was believed at
+ * one moment; a function that edited one would destroy exactly the property
+ * that makes plans worth keeping.
+ */
+
+/** Builds the plan listing query string from closed vocabularies. */
+function buildPlanQuery(query: PlanQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  // Sent only when explicitly set, so the server's own default stands otherwise
+  // and the two cannot disagree about what "default" means.
+  if (query.currentOnly !== undefined) {
+    params.set("currentOnly", String(query.currentOnly));
+  }
+  if (query.minRisk !== undefined && query.minRisk > 0) {
+    params.set("minRisk", String(query.minRisk));
+  }
+
+  for (const band of query.band ?? []) params.append("band", band);
+  for (const value of query.recommendation ?? []) params.append("recommendation", value);
+  for (const update of query.update ?? []) params.append("update", update);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/plans */
+export function listChangePlans(
+  query: PlanQuery = {},
+  options?: RequestOptions,
+): Promise<PlanListResponse> {
+  return request<PlanListResponse>(`/plans${buildPlanQuery(query)}`, options);
+}
+
+/** GET /api/v1/plans/{id} */
+export function getChangePlan(
+  planId: string,
+  options?: RequestOptions,
+): Promise<ChangePlan> {
+  return request<ChangePlan>(`/plans/${encodeURIComponent(planId)}`, options);
+}
+
+/**
+ * GET /api/v1/plans/container/{id}
+ *
+ * The container's current plan and the history that led to it — the reasoning
+ * timeline.
+ */
+export function getContainerPlans(
+  containerId: string,
+  page = 1,
+  pageSize = 25,
+  options?: RequestOptions,
+): Promise<PlanContainerResponse> {
+  const params = new URLSearchParams();
+  if (page > 1) params.set("page", String(page));
+  params.set("pageSize", String(pageSize));
+
+  return request<PlanContainerResponse>(
+    `/plans/container/${encodeURIComponent(containerId)}?${params.toString()}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/plans/generate
+ *
+ * Schedules a plan generation pass and returns once it is *accepted*, not once
+ * it finishes: the server answers 202 and the pass runs in the background.
+ *
+ * **It generates ANALYSIS.** Nothing is pulled, no container is touched, and no
+ * change is scheduled. It takes no argument because there is no target to
+ * supply.
+ */
+export function generateChangePlans(
+  options?: RequestOptions,
+): Promise<PlanGenerateAccepted> {
+  return request<PlanGenerateAccepted>("/plans/generate", options, "POST");
 }

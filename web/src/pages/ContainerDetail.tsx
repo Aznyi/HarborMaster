@@ -12,10 +12,12 @@ import { useContainerDetail } from "../hooks/useContainers";
 import { useDockerEventPage } from "../hooks/useDockerEvents";
 import { useSnapshots } from "../hooks/useSnapshots";
 import { useContainerPolicy } from "../hooks/usePolicies";
+import { useContainerPlans } from "../hooks/usePlans";
 import {
   PolicySeverityBadge,
   PolicyStatusBadge,
 } from "../components/PolicyBadges";
+import { PlanCard } from "../components/PlanReasoning";
 import { RULE_LABELS } from "../api/policyTypes";
 import { EventResultBadge } from "../components/EventBadges";
 import { ReadinessBadge, TriggerBadge } from "../components/SnapshotBadges";
@@ -51,6 +53,7 @@ const TABS = [
   "Compose",
   "Snapshots",
   "Policy",
+  "Change plan",
   "Events",
   "Raw inspection",
 ] as const;
@@ -142,6 +145,7 @@ export function ContainerDetailPage() {
         {tab === "Compose" && <ComposeTab detail={container} />}
         {tab === "Snapshots" && <SnapshotsTab id={container.overview.id} />}
         {tab === "Policy" && <PolicyTab id={container.overview.id} />}
+        {tab === "Change plan" && <PlanTab id={container.overview.id} />}
         {tab === "Events" && <EventsTab id={container.overview.id} />}
         {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
       </div>
@@ -993,6 +997,59 @@ function PolicyTab({ id }: { id: string }) {
           className="text-accent hover:underline"
         >
           Full compliance history
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+/**
+ * This container's change plan.
+ *
+ * Read-only, like every other tab. There is no apply, execute, or approve
+ * control: a plan is an ASSESSMENT of a proposed change, and acting on it is an
+ * operator's job with their own tooling.
+ *
+ * The absence of a plan is stated explicitly rather than left as an empty area.
+ * "No change is proposed" and "a change was assessed and found safe" are
+ * different statements, and a blank tab would be read as the second.
+ */
+function PlanTab({ id }: { id: string }) {
+  const state = useContainerPlans(id);
+
+  if (state.status === "loading") {
+    return <LoadingState label="Loading the change plan" />;
+  }
+  if (state.status === "disconnected") {
+    return <DisconnectedState onRetry={state.refresh} />;
+  }
+  if (state.error) {
+    return <ErrorState error={state.error} onRetry={state.refresh} />;
+  }
+
+  const current = state.data?.current;
+
+  return (
+    <div className="space-y-4">
+      {current ? (
+        <PlanCard plan={current} />
+      ) : (
+        <p
+          role="status"
+          className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm text-content-muted"
+        >
+          No change is proposed for this container. That is not the same as a
+          change assessed and found safe — a plan appears once a newer image is
+          found, or once HarborMaster cannot establish whether there is one.
+        </p>
+      )}
+
+      <p className="text-sm">
+        <Link
+          to={`/plans/container/${id}`}
+          className="text-accent hover:underline"
+        >
+          Full planning history
         </Link>
       </p>
     </div>

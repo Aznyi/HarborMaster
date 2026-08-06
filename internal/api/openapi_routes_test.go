@@ -74,6 +74,10 @@ var routedPaths = []string{
 	APIPrefix + "/inventory/filters",
 	APIPrefix + "/inventory/refresh",
 	APIPrefix + "/networks",
+	APIPrefix + "/plans",
+	APIPrefix + "/plans/container/{id}",
+	APIPrefix + "/plans/generate",
+	APIPrefix + "/plans/{id}",
 	APIPrefix + "/policies",
 	APIPrefix + "/policies/{id}",
 	APIPrefix + "/policy-rules",
@@ -103,6 +107,14 @@ var routedPaths = []string{
 // configuration against administrator-defined rules and reports what fails; it
 // does not change a container to satisfy one, and adding a route that did would
 // have to be added to this literal in a diff a reviewer sees.
+//
+// Nor is there a plan APPLY, execute, approve, or schedule path. POST
+// /plans/generate produces HarborMaster's own analysis of HarborMaster's own
+// database -- it pulls nothing and changes no container. Phase 7 assesses a
+// proposed change; carrying one out is an operator's job with their own
+// tooling. There is also no PATCH or DELETE for a plan, because a plan records
+// what was believed at one moment and editing one would destroy exactly the
+// property that makes it worth keeping.
 
 func TestOpenAPIDocumentsExactlyTheRoutedPaths(t *testing.T) {
 	documented := documentedPaths(t)
@@ -149,7 +161,8 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 		switch pattern {
 		case APIPrefix + "/inventory/refresh",
 			APIPrefix + "/policy/evaluate",
-			APIPrefix + "/images/refresh":
+			APIPrefix + "/images/refresh",
+			APIPrefix + "/plans/generate":
 			method = http.MethodPost
 		}
 

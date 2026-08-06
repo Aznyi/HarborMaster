@@ -176,6 +176,41 @@ tags:
       resolved, because resolution is something the world does rather than
       something a person asserts.
 
+  - name: Change plans
+    description: |
+      Deterministic assessments of a PROPOSED image change: how risky it looks,
+      what the reasoning was, and what an operator should do about it.
+
+      A plan is analysis, not an instruction. **Nothing applies one.**
+      HarborMaster cannot pull an image, recreate a container, or roll one back,
+      and generating a plan does not bring it closer to being able to: the
+      planner reads six tables HarborMaster already populated -- inventory,
+      image intelligence, snapshots, restore readiness, drift, and policy
+      compliance -- and writes one row. There is no apply, execute, approve, or
+      schedule endpoint.
+
+      **Plans are immutable.** There is no PATCH and no DELETE. A plan records
+      what was known at one moment; a changed world produces a NEW plan and the
+      old one remains as the record of what was believed when a decision was
+      made. That is what makes a plan usable as evidence afterwards, and it is
+      enforced by the schema rather than by convention.
+
+      **The risk model is deterministic.** A fixed, compile-time set of rules
+      over integer scores, with no clock, randomness, I/O, or map iteration
+      inside it. The same inputs produce the same score, band, recommendation
+      and explanation, byte for byte, on any machine. Nothing here is learned,
+      probabilistic, or statistical -- every number is a judgement written down
+      by a person and reviewable as such.
+
+      **A gap in evidence is never reported as safe.** When HarborMaster could
+      not establish something -- a registry that did not answer, a digest it
+      could not resolve -- the recommendation is `unknown`, which is
+      deliberately not `proceed`.
+
+      `POST /plans/generate` generates ANALYSIS. It is the only write, it takes
+      no body and no target, and it schedules a pass over HarborMaster's own
+      database.
+
 paths:
   /api/v1/health:
     get:
@@ -2351,6 +2386,232 @@ paths:
         "503":
           $ref: "#/components/responses/ImageIntelUnavailable"
 
+  /api/v1/plans:
+    get:
+      tags: [Change plans]
+      summary: Assessments of proposed image changes
+      operationId: listChangePlans
+      description: |
+        Returns change plans with the estate aggregate.
+
+        The summary travels WITH the list so a dashboard renders in one request,
+        and so `undetermined` is always beside `actionable`. That pairing
+        matters: an "actionable" count without "how many could not be judged"
+        invites reading a partly-assessed estate as a clean one.
+
+        Defaults to CURRENT plans -- the newest per container. A superseded plan
+        describes a world that has moved on, and listing it beside the current
+        one would double-count the estate. Pass `currentOnly=false` to include
+        the history.
+
+        Sorted by risk band descending by default, because the dashboard's
+        question is "what most needs attention" rather than "what happened
+        most recently".
+
+        Absence of a plan for a container means NO CHANGE IS PROPOSED for it --
+        not that a change was assessed as safe.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: band
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/RiskBand" }
+        - name: recommendation
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/Recommendation" }
+        - name: update
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/UpdateType" }
+        - name: currentOnly
+          in: query
+          description: |
+            Only the newest plan per container. Defaults to true.
+          schema: { type: boolean, default: true }
+        - name: minRisk
+          in: query
+          description: Minimum risk score, 0 to 100.
+          schema: { type: integer, minimum: 0, maximum: 100 }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [band, risk, recommendation, generatedAt, container, update, id]
+            default: band
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of plans, with the estate aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ChangePlan" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/ChangePlanSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/PlanningUnavailable"
+
+  /api/v1/plans/{id}:
+    get:
+      tags: [Change plans]
+      summary: One assessment
+      operationId: getChangePlan
+      description: |
+        Returns one plan by its immutable identifier, including the full
+        reasoning: every rule that contributed, what it contributed, and why.
+
+        There is no PATCH and no DELETE. A plan is a record of what was believed
+        at one moment; an endpoint that edited one would destroy exactly the
+        property that makes plans worth keeping.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: |
+            A server-generated plan identifier, `plan_` followed by twenty
+            hexadecimal characters. Random rather than sequential: it appears in
+            URLs, and a sequential one would leak how many plans exist.
+          schema:
+            type: string
+            pattern: "^plan_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The plan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChangePlan" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/PlanningUnavailable"
+
+  /api/v1/plans/container/{id}:
+    get:
+      tags: [Change plans]
+      summary: One container's planning view
+      operationId: getContainerPlans
+      description: |
+        The container's current plan and the history that led to it.
+
+        History is the REASONING TIMELINE: how HarborMaster's assessment of this
+        container has changed over time, which is what makes a verdict
+        reviewable rather than merely stated. Newest first.
+
+        `current` is ABSENT when the container has no plan. That means no change
+        is proposed for it, NOT that a change was judged safe -- the two are
+        different and a client must be able to tell them apart.
+      parameters:
+        - $ref: "#/components/parameters/ContainerId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: The container's current plan and its history.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [containerId, history, pagination]
+                properties:
+                  containerId: { type: string }
+                  current:
+                    allOf:
+                      - $ref: "#/components/schemas/ChangePlan"
+                    description: |
+                      Absent when no change is proposed for this container.
+                  history:
+                    type: array
+                    items: { $ref: "#/components/schemas/ChangePlan" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/AmbiguousId"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/PlanningUnavailable"
+
+  /api/v1/plans/generate:
+    post:
+      tags: [Change plans]
+      summary: Request a plan generation pass
+      operationId: generateChangePlans
+      description: |
+        Schedules a plan generation pass and answers 202 immediately.
+
+        **It generates ANALYSIS.** The pass re-reads HarborMaster's own tables
+        and re-runs HarborMaster's own risk model. It pulls no image, touches no
+        container, restores nothing, and schedules no change -- there is no
+        route here that could, and adding one would have to get past the
+        architecture test that keeps the Docker SDK inside `internal/docker`.
+
+        **It takes no body and no target.** There is no container, image, or
+        registry parameter; the pass covers whatever the inventory already
+        holds, and any query parameter attached to the request is simply not
+        read.
+
+        Asynchronous deliberately: a synchronous pass over a
+        ten-thousand-container estate would hold an unauthenticated request open
+        for minutes. The request is coalesced -- calling it in a loop produces
+        one pass, not a backlog -- and it is rate limited on top of that.
+
+        It is also close to free on a settled estate. Every assessment is
+        fingerprinted over exactly the values it read, so a pass with nothing new
+        to say writes nothing at all.
+      responses:
+        "202":
+          description: The pass was scheduled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requested, planner]
+                properties:
+                  requested: { type: boolean }
+                  planner: { $ref: "#/components/schemas/PlannerStatus" }
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/PlanningUnavailable"
+
 
 components:
   headers:
@@ -2512,6 +2773,19 @@ components:
       description: |
         Drift detection is not configured or is disabled by configuration.
         Records already collected remain readable; only evaluation stops.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    PlanningUnavailable:
+      description: |
+        Change planning is not configured or is disabled by configuration.
+
+        Plans already stored remain in the database; only generation and these
+        endpoints stop. Reported as 503 rather than as an empty list, because an
+        empty list of plans reads as "no risk found" and a disabled feature has
+        found nothing at all.
       content:
         application/json:
           schema:
@@ -4121,7 +4395,12 @@ components:
       required: [error, active]
       properties:
         error:
-          $ref: "#/components/schemas/ErrorBody"
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message: { type: string }
         requestId: { type: string }
         active:
           type: object
@@ -5039,6 +5318,262 @@ components:
           description: |
             The most recent failure was a rate limit, which an operator should
             read very differently from an outage.
+
+    RiskBand:
+      type: string
+      description: |
+        How risky a proposed change is, from a deterministic integer score.
+
+        Bands exist because a number alone invites false precision: "47" implies
+        a measurement, while "medium" is honest about being a judgement built
+        from named factors. The boundaries are 10, 25, 50 and 80.
+      enum: [veryLow, low, medium, high, critical]
+
+    Recommendation:
+      type: string
+      description: |
+        What HarborMaster suggests an operator do.
+
+        `unknown` is deliberately NOT the same as `proceed`. A gap in evidence is
+        not a clean bill of health, and collapsing the two would be the single
+        most misleading thing this feature could do.
+      enum: [proceed, proceedWithCaution, manualReview, notRecommended, unknown]
+
+    FactorSeverity:
+      type: string
+      description: |
+        How much one contributing factor matters.
+
+        Separate from its point contribution, because the two answer different
+        questions: points decide the band, severity decides the recommendation.
+        A factor can add few points and still block -- a critical policy
+        violation is not made acceptable by everything else being fine.
+
+        `unknown` records MISSING EVIDENCE and forces the recommendation to
+        `unknown`. `blocker` argues against the change whatever the score.
+      enum: [info, caution, warning, blocker, unknown]
+
+    PlanRule:
+      type: string
+      description: |
+        The rule that produced a factor. A closed vocabulary, fixed at compile
+        time -- there is no rule registry, no configuration, and no way to add
+        one at runtime or from a request.
+      enum:
+        - updateClassification
+        - mutableTag
+        - unknownDigest
+        - registryQuality
+        - imageAge
+        - platform
+        - snapshotAvailable
+        - restoreReadiness
+        - activeDrift
+        - policyViolations
+        - blastRadius
+
+    RiskFactor:
+      type: object
+      description: One named contribution to a plan's risk.
+      required: [rule, points, severity, detail]
+      properties:
+        rule: { $ref: "#/components/schemas/PlanRule" }
+        points:
+          type: integer
+          description: |
+            This factor's contribution to the score. May be zero: a factor can
+            be worth STATING without being worth scoring, and the reasoning
+            timeline is more useful when it includes those.
+        severity: { $ref: "#/components/schemas/FactorSeverity" }
+        detail:
+          type: string
+          description: |
+            The human-readable reason, from a fixed set of phrases built by the
+            rule. Never an error string, never registry-supplied text, never
+            caller input.
+
+    RiskAssessment:
+      type: object
+      description: The verdict for one proposed change.
+      required: [riskScore, riskBand, recommendation, summary, factors]
+      properties:
+        riskScore: { type: integer, minimum: 0, maximum: 100 }
+        riskBand: { $ref: "#/components/schemas/RiskBand" }
+        recommendation: { $ref: "#/components/schemas/Recommendation" }
+        summary:
+          type: string
+          description: |
+            A one-sentence explanation, built from the recommendation and the
+            single heaviest factor, so the sentence names the actual reason
+            rather than restating the score.
+        factors:
+          type: array
+          description: |
+            The contributions in RULE ORDER, which is fixed at compile time.
+            Stable ordering is part of determinism: the same inputs produce a
+            byte-identical explanation.
+          items: { $ref: "#/components/schemas/RiskFactor" }
+
+    ChangePlan:
+      type: object
+      description: |
+        One immutable assessment of one proposed container change.
+
+        Nothing executes a plan, and the model has no state to execute: no
+        status, no queue position, no target. It is the analysis; acting on it
+        is an operator's job with their own tooling.
+      required:
+        - planId
+        - containerId
+        - containerName
+        - currentImage
+        - proposedImage
+        - updateType
+        - snapshotAvailable
+        - restoreReadiness
+        - driftOpen
+        - policyOpen
+        - registryStatus
+        - risk
+        - planVersion
+        - plannerVersion
+        - inputDigest
+        - generatedAt
+        - superseded
+      properties:
+        planId:
+          type: string
+          description: The immutable public identifier, generated server-side.
+          pattern: "^plan_[0-9a-f]{20}$"
+        containerId: { type: string }
+        containerName: { type: string }
+        currentImage:
+          type: string
+          description: The familiar reference the container runs, e.g. `nginx:1.25`.
+        proposedImage:
+          type: string
+          description: |
+            What the container would move to. The same reference as
+            `currentImage` when only the digest moved: reporting that as a
+            reference change would suggest editing something that does not need
+            editing.
+        currentDigest: { type: string }
+        proposedDigest: { type: string }
+        updateType: { $ref: "#/components/schemas/UpdateType" }
+        snapshotId:
+          type: integer
+          format: int64
+          description: The baseline this container would have to refer back to.
+        snapshotAvailable: { type: boolean }
+        restoreReadiness: { $ref: "#/components/schemas/ReadinessStatus" }
+        driftOpen:
+          type: integer
+          description: |
+            Unresolved differences from the baseline. The drift RECORDS are not
+            copied here: a plan references the summary it acted on, and the
+            records have one home.
+        driftMaxSeverity: { type: string }
+        policyOpen: { type: integer }
+        policyMaxSeverity: { type: string }
+        registryStatus: { $ref: "#/components/schemas/CheckStatus" }
+        registryDetail:
+          type: string
+          description: |
+            HarborMaster's own description of a non-OK status, from a fixed set
+            of phrases. Never a registry-supplied string.
+        proposedPublishedAt:
+          type: string
+          format: date-time
+          description: |
+            When the proposed image was built, when a publisher recorded it.
+            Frequently absent, which is unremarkable and is not scored against
+            the image.
+        risk: { $ref: "#/components/schemas/RiskAssessment" }
+        planVersion:
+          type: integer
+          description: The schema version of this plan's shape.
+        plannerVersion:
+          type: string
+          description: |
+            The rule set that produced it. Stored so a plan generated by an older
+            planner is identifiable rather than silently compared with a newer
+            one.
+        inputDigest:
+          type: string
+          description: |
+            A fingerprint of everything the assessment read. Two passes over an
+            unchanged world produce the same digest and the second writes
+            nothing, which is what keeps this table from growing on every
+            refresh.
+        generatedAt: { type: string, format: date-time }
+        superseded:
+          type: boolean
+          description: |
+            A newer plan exists for this container. Derived at read time rather
+            than stored, because storing it would mean writing to an immutable
+            row.
+
+    ChangePlanSummary:
+      type: object
+      description: The dashboard aggregate, over CURRENT plans only.
+      properties:
+        plans: { type: integer }
+        containers: { type: integer }
+        byRiskBand:
+          type: object
+          additionalProperties: { type: integer }
+        byRecommendation:
+          type: object
+          additionalProperties: { type: integer }
+        byUpdateType:
+          type: object
+          additionalProperties: { type: integer }
+        actionable:
+          type: integer
+          description: |
+            Plans recommending proceed or proceed-with-caution -- the changes an
+            operator could make today.
+        needsReview:
+          type: integer
+          description: Plans that ask for a person.
+        blocked:
+          type: integer
+          description: Plans recommending against the change.
+        undetermined:
+          type: integer
+          description: |
+            Plans HarborMaster could not judge. Reported beside the rest so a gap
+            in evidence stays visible rather than being absorbed into
+            `actionable`.
+        lastGeneratedAt: { type: string, format: date-time }
+        plannerVersion:
+          type: string
+          description: |
+            The rule set the newest plans were built with, so a UI can say the
+            rules changed rather than leaving an operator to wonder why every
+            score moved.
+
+    PlannerStatus:
+      type: object
+      description: The generation scheduler's state.
+      properties:
+        enabled: { type: boolean }
+        plannerVersion: { type: string }
+        running: { type: boolean }
+        pending:
+          type: boolean
+          description: A pass is owed.
+        lastRunAt: { type: string, format: date-time }
+        lastGenerated: { type: integer }
+        lastUnchanged:
+          type: integer
+          description: |
+            Containers whose assessment had not moved, so nothing was written.
+            On a settled estate this is nearly everything, and it is how much
+            work duplicate suppression saved.
+        lastSkipped:
+          type: integer
+          description: Containers with no change to assess.
 
     ImageIntelSummary:
       type: object

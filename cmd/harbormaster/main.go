@@ -421,6 +421,26 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Change planning.
+	//
+	// The synthesis layer: it combines the inventory, snapshots, restore
+	// readiness, drift, policy compliance, and image intelligence into one
+	// assessment per proposed image change.
+	//
+	// It reads six tables and writes one. There is no Docker call behind it, no
+	// network request, and nothing that executes a plan -- a plan is analysis an
+	// operator acts on with their own tooling.
+	planner := service.NewPlannerService(service.PlannerOptions{
+		Store:  db.Plans,
+		Config: cfg.Planner,
+		Logger: logger,
+	})
+
+	// A plan rests on the inventory, so a committed refresh is the moment its
+	// inputs may have moved. Cheap to trigger: every assessment is
+	// fingerprinted, so a pass over an unchanged estate writes nothing.
+	inventory.AddRefreshObserver(planner)
+
 	// The reference set is re-projected after every successful refresh. That is
 	// a query and a transaction, not a burst of registry traffic: collection
 	// itself is rationed by the engine's own schedule.
@@ -457,7 +477,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(6)
+	background.Add(7)
 
 	go func() {
 		defer background.Done()
@@ -482,6 +502,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		imageIntel.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		planner.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -515,6 +539,9 @@ func run() error {
 
 		ImageIntel:     db.ImageIntel,
 		ImageCollector: imageIntel,
+
+		Plans:   db.Plans,
+		Planner: planner,
 
 		Logger:         logger,
 		Config:         cfg.Server,

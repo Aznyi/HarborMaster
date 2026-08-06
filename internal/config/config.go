@@ -290,8 +290,39 @@ const (
 	MaxImageIntelTrackedReferences  = 100000
 	MaxImageIntelTagPages           = 50
 	MaxImageIntelAttempts           = 5
-	MaxPolicyWriteRateLimit         = 6000.0
-	MaxPolicyWriteRateBurst         = 1000
+
+	// Change planner defaults.
+	//
+	// Planning is cheap and local: it reads six tables and writes one, makes no
+	// network request, and touches no Docker socket. The bounds below exist to
+	// keep a pass proportional to the estate rather than to protect anyone from
+	// it.
+	DefaultPlannerEnabled           = true
+	DefaultPlannerGenerateOnStartup = true
+	// DefaultPlannerInterval is the periodic pass. Short, because a pass over an
+	// unchanged estate writes nothing -- the fingerprint means the common case
+	// costs a handful of grouped queries and no rows.
+	DefaultPlannerInterval = 15 * time.Minute
+	// DefaultPlannerBatchSize is how many containers one batch assesses. Each
+	// batch costs five grouped queries whatever its size, so this trades peak
+	// memory against query count.
+	DefaultPlannerBatchSize = 500
+	// DefaultPlannerMaxContainers caps a whole pass, so a pathologically large
+	// inventory produces bounded work.
+	DefaultPlannerMaxContainers     = 20000
+	DefaultPlannerGenerationTimeout = 5 * time.Minute
+	// DefaultPlannerRetentionAge is how long a SUPERSEDED plan is kept. The
+	// current plan for a container is never pruned.
+	DefaultPlannerRetentionAge  = 90 * 24 * time.Hour
+	DefaultPlannerPruneInterval = 6 * time.Hour
+
+	// Planner bounds.
+	MinPlannerInterval      = 1 * time.Minute
+	MinPlannerPruneInterval = 1 * time.Minute
+	MaxPlannerBatchSize     = 5000
+	MaxPlannerContainers    = 200000
+	MaxPolicyWriteRateLimit = 6000.0
+	MaxPolicyWriteRateBurst = 1000
 
 	// DefaultHealthcheckTimeout bounds the `harbormaster healthcheck` probe.
 	// It is deliberately short: a container health check that outlives the
@@ -645,6 +676,50 @@ type ImageIntel struct {
 	PruneInterval    time.Duration
 }
 
+// Planner holds settings for change planning and risk analysis.
+//
+// A change plan is an ASSESSMENT of a proposed image change, built by combining
+// data HarborMaster already holds. Nothing executes a plan: there is no setting
+// here that pulls an image, recreates a container, restores one, or schedules
+// any of that, because HarborMaster has no such capability and this phase adds
+// none.
+//
+// Planning makes no network request and touches no Docker socket. It reads six
+// tables and writes one.
+type Planner struct {
+	// Enabled turns the planner on or off. When false nothing is generated and
+	// the endpoints report the feature disabled. Plans already stored remain
+	// readable.
+	Enabled bool
+
+	// GenerateOnStartup runs one pass at boot, so a HarborMaster that was down
+	// while the estate changed has current plans without waiting for the first
+	// interval.
+	GenerateOnStartup bool
+
+	// Interval is the periodic pass. A pass also runs after every successful
+	// inventory refresh. Zero disables the periodic one, leaving refresh and
+	// request as the triggers.
+	Interval time.Duration
+
+	// BatchSize is how many containers one batch assesses. Each batch costs a
+	// fixed number of grouped queries whatever its size, so this trades peak
+	// memory against query count.
+	BatchSize int
+	// MaxContainers caps a whole pass.
+	MaxContainers int
+	// GenerationTimeout bounds one pass.
+	GenerationTimeout time.Duration
+
+	// RetentionAge is how long a SUPERSEDED plan is kept. The current plan for
+	// a container is never pruned, whatever its age: it is the standing
+	// assessment, and removing it would leave the container looking unplanned
+	// rather than unchanged. Zero keeps superseded plans forever.
+	RetentionAge time.Duration
+	// PruneInterval is how often that retention runs.
+	PruneInterval time.Duration
+}
+
 // Drift holds settings for configuration drift detection.
 //
 // Drift compares a container's CURRENT configuration against its baseline
@@ -724,6 +799,7 @@ type Config struct {
 	Drift       Drift
 	Policy      Policy
 	ImageIntel  ImageIntel
+	Planner     Planner
 }
 
 var (
@@ -1017,6 +1093,32 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Planner.Enabled, err = boolVar(lookup, "PLANNER_ENABLED", DefaultPlannerEnabled)
+	collect(err)
+	cfg.Planner.GenerateOnStartup, err = boolVar(lookup, "PLANNER_GENERATE_ON_STARTUP", DefaultPlannerGenerateOnStartup)
+	collect(err)
+	cfg.Planner.Interval, err = durationVar(lookup, "PLANNER_INTERVAL", DefaultPlannerInterval)
+	collect(err)
+	cfg.Planner.GenerationTimeout, err = durationVar(lookup, "PLANNER_GENERATION_TIMEOUT", DefaultPlannerGenerationTimeout)
+	collect(err)
+	cfg.Planner.RetentionAge, err = durationVar(lookup, "PLANNER_RETENTION_AGE", DefaultPlannerRetentionAge)
+	collect(err)
+	cfg.Planner.PruneInterval, err = durationVar(lookup, "PLANNER_PRUNE_INTERVAL", DefaultPlannerPruneInterval)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"PLANNER_BATCH_SIZE", DefaultPlannerBatchSize, &cfg.Planner.BatchSize},
+		{"PLANNER_MAX_CONTAINERS", DefaultPlannerMaxContainers, &cfg.Planner.MaxContainers},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -1101,8 +1203,53 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Drift.validate()...)
 	errs = append(errs, c.Policy.validate()...)
 	errs = append(errs, c.ImageIntel.validate()...)
+	errs = append(errs, c.Planner.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the change planner settings.
+//
+// Validated even when the planner is disabled, for the same reason every other
+// section is: a configuration error that only surfaces the day someone flips
+// the feature on is a worse failure than one caught at startup.
+func (p Planner) validate() []error {
+	var errs []error
+
+	// Zero is the documented way to disable the periodic pass, leaving refresh
+	// and request as the triggers. A tiny non-zero one would re-plan the estate
+	// continuously for no benefit, since an unchanged estate writes nothing.
+	if p.Interval != 0 && p.Interval < MinPlannerInterval {
+		errs = append(errs, fmt.Errorf("%sPLANNER_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinPlannerInterval))
+	}
+	if p.PruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sPLANNER_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+	if p.GenerationTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("%sPLANNER_GENERATION_TIMEOUT must be positive", envPrefix))
+	}
+	// Zero keeps superseded plans forever, which is valid but unbounded.
+	// Negative is not a way to do anything.
+	if p.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sPLANNER_RETENTION_AGE must not be negative", envPrefix))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"PLANNER_BATCH_SIZE", p.BatchSize, 1, MaxPlannerBatchSize},
+		{"PLANNER_MAX_CONTAINERS", p.MaxContainers, 1, MaxPlannerContainers},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the image intelligence settings.

@@ -181,6 +181,39 @@ would be confidently wrong:
 - A **failed lookup** overwrites nothing. "We could not ask" and "no update is
   available" are different claims, and the second is the dangerous one.
 
+## 3d. Change planning
+
+Phase 7 adds an ANALYSIS layer over data HarborMaster already holds. It is the
+one feature that adds no new capability at all: no network call, no Docker call,
+no new input source. The planner reads six existing tables and writes one.
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| No Docker access, even indirectly | The planner's store interface holds six methods, none of which reaches Docker. Every input comes from persisted inventory | `internal/service/planner.go` |
+| No network access | Nothing in the planning path constructs a request. The `net/http` architecture test still confines HTTP to four packages, and `internal/service` is not one of them | `internal/arch` |
+| No mutation of a plan | `PlanStore` has insert, read, and prune. There is no update method, so immutability is structural rather than conventional | `internal/service/planner.go` |
+| No mutable state on a plan | The `change_plans` table has no status, applied, approved, or executed column. A test asserts their absence, because adding one would be the first step toward treating a plan as a work item | `0008_plans.sql` |
+| Determinism | Rules are a fixed slice of typed functions. No map is ever ranged over, scores are integers, and the clock arrives as an explicit field | `internal/domain/plan_risk.go` |
+| Duplicate suppression is exact | SHA-256 over a sorted list of named fields, including the planner version. A unique index on `(container_id, input_digest)` makes it hold under concurrency | `plan_repository.go` |
+| No N+1 | Input gathering is a batch operation in the repository: five grouped queries per batch whatever its size | `PlanRepository.GatherInputs` |
+| Sort fields are allowlisted | The caller's string selects a compile-time column constant; rank expressions are built from literals only | `planSortFields` |
+| No secret can reach a plan | `PlanInputs` has no field that could carry an environment value. The four-layer secret defence is upstream of every source the planner reads | `internal/domain/plan_risk.go` |
+| Factor text is HarborMaster's own | Every `detail` string is a fixed phrase built by a rule. Never an error string, never registry text, never caller input | `internal/domain/plan_risk.go` |
+
+**Three conclusions the model refuses to draw**, each because the alternative
+would be confidently wrong:
+
+- **Missing evidence is not safety.** A failed lookup, an unresolved digest, or
+  an unclassifiable change forces `unknown` rather than reducing confidence in a
+  verdict that still reads as "proceed".
+- **A low total does not overrule a blocker.** A critical policy violation
+  argues against a change whatever the score, because an organisation that
+  marked a rule critical has already said the container should not be running as
+  it is.
+- **A failed registry lookup says nothing about platform support.** Silence is
+  not an answer of "no", and reporting it as a mismatch would double-count a
+  failure already scored.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |

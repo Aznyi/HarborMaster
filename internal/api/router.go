@@ -52,6 +52,12 @@ type Server struct {
 	// intelligence disabled, which yields a 503 rather than a broken route.
 	imageIntel     ImageIntelReader
 	imageCollector ImageIntelCollector
+
+	// plans answers the change plan endpoints, and planner schedules a
+	// generation pass. Both nil in a deployment with planning disabled, which
+	// yields a 503 rather than a broken route.
+	plans   PlanReader
+	planner PlanGenerator
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -152,6 +158,15 @@ type Options struct {
 	ImageIntel     ImageIntelReader
 	ImageCollector ImageIntelCollector
 
+	// Plans answers the change plan endpoints and Planner schedules a
+	// generation pass. Both nil in a deployment with planning disabled, which
+	// yields a 503 rather than a broken route.
+	//
+	// "Generate" means generate ANALYSIS. Nothing behind either of these
+	// reaches Docker.
+	Plans   PlanReader
+	Planner PlanGenerator
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -198,6 +213,9 @@ func NewServer(opts Options) *Server {
 
 		imageIntel:     opts.ImageIntel,
 		imageCollector: opts.ImageCollector,
+
+		plans:   opts.Plans,
+		planner: opts.Planner,
 
 		now: now,
 
@@ -390,6 +408,27 @@ func (s *Server) routes() http.Handler {
 	// POST /images/refresh is strictly more specific than the bare
 	// "/images/{id}" pattern, so this pair resolves without ambiguity.
 	mux.HandleFunc("POST "+APIPrefix+"/images/refresh", s.handleImageRefresh)
+
+	// Change planning.
+	//
+	// Three reads and one write, and the write generates HarborMaster's own
+	// ANALYSIS of its own database. It pulls nothing, changes no container, and
+	// schedules no change; there is deliberately no route that applies a plan,
+	// and no PATCH or DELETE, because a plan is immutable evidence of what was
+	// known at one moment.
+	mux.HandleFunc("GET "+APIPrefix+"/plans", s.handlePlans)
+	mux.HandleFunc(APIPrefix+"/plans", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// Three segments, so this never overlaps the two-segment /plans/{id}.
+	mux.HandleFunc("GET "+APIPrefix+"/plans/container/{id}", s.handlePlansByContainer)
+	mux.HandleFunc(APIPrefix+"/plans/container/{id}", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// POST /plans/generate is strictly more specific than the bare
+	// "/plans/{id}" pattern below, so this pair resolves without ambiguity.
+	mux.HandleFunc("POST "+APIPrefix+"/plans/generate", s.handlePlanGenerate)
+
+	mux.HandleFunc("GET "+APIPrefix+"/plans/{id}", s.handlePlanDetail)
+	mux.HandleFunc(APIPrefix+"/plans/{id}", s.handleMethodNotAllowed("GET, HEAD"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

@@ -2,7 +2,9 @@
 
 import { AppShell } from "./components/AppShell";
 import { useHealth } from "./hooks/useHealth";
+import { ChangePlans } from "./pages/ChangePlans";
 import { ContainerDetailPage } from "./pages/ContainerDetail";
+import { ContainerPlan } from "./pages/ContainerPlan";
 import { ContainerDrift } from "./pages/ContainerDrift";
 import { Containers } from "./pages/Containers";
 import { Dashboard } from "./pages/Dashboard";
@@ -44,6 +46,8 @@ export function App() {
         <Route path="/policies" element={<Policies />} />
         <Route path="/compliance" element={<PolicyViolations />} />
         <Route path="/policy/container/:id" element={<ContainerPolicy />} />
+        <Route path="/plans" element={<ChangePlans />} />
+        <Route path="/plans/container/:id" element={<ContainerPlan />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -81,6 +81,12 @@ type DB struct {
 	// pull, push, or remove an image.
 	ImageIntel *ImageIntelRepository
 
+	// Plans holds change plans: immutable assessments of proposed image
+	// changes, built by combining the inventory, snapshots, readiness, drift,
+	// policy compliance, and image intelligence. A plan is analysis, never an
+	// instruction -- nothing executes one, and nothing behind this can.
+	Plans *PlanRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -286,6 +292,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Drift:        &DriftRepository{db: sqlDB},
 		Policies:     &PolicyRepository{db: sqlDB},
 		ImageIntel:   &ImageIntelRepository{db: sqlDB},
+		Plans:        &PlanRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

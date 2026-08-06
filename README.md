@@ -27,6 +27,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Configuration drift](#configuration-drift)
 - [Policy engine](#policy-engine)
 - [Image intelligence](#image-intelligence)
+- [Change planning](#change-planning)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -959,6 +960,90 @@ rate-limited.
 would let an unauthenticated caller hold a request open across hundreds of
 registry lookups and generate outbound traffic on demand; the request is
 coalesced, so calling it in a loop produces one pass rather than a backlog.
+
+## Change planning
+
+HarborMaster assesses each proposed image change and says how risky it looks,
+why, and what to do about it.
+
+**Nothing applies a plan.** HarborMaster cannot pull an image, recreate a
+container, or roll one back, and planning adds no such capability — the planner
+reads six tables it already populated and writes one row. There is no apply,
+execute, approve, or schedule endpoint, and the route-coverage test would have
+to change for one to appear.
+
+### What a plan combines
+
+For each container: the image it runs, the update its registry offers, its
+baseline snapshot, that snapshot's restore readiness, its open drift, and its
+policy compliance. Every input comes from data HarborMaster has already
+persisted, so **a plan is reproducible from the database alone** — the planner
+makes no network request and touches no Docker socket.
+
+### The risk model is deterministic, and that is the point
+
+A fixed slice of compile-time typed rules, evaluated in order, over integer
+scores. No clock, no randomness, no I/O, and no map iteration — Go randomises
+map order, so a factor list built from one would differ between runs of the same
+input. The evaluation time reaches the rules as an explicit field, which is what
+lets a test pin every time-dependent rule.
+
+The same inputs produce the same score, the same band, the same recommendation,
+and the same explanation in the same order, byte for byte, on any machine.
+**Nothing is learned, probabilistic, or statistical.** Each number is a
+judgement written down by a person and reviewable as such, and every factor
+names the rule that produced it — so a score is traceable to a specific, named
+piece of code rather than to an opaque total.
+
+Points and severity are deliberately separate. Points decide the **band**;
+severity decides the **recommendation**. Collapsing them would lose the case
+that matters most: a critical policy violation must argue against a change even
+when everything else about it is unremarkable, and a low total must not launder
+it into "proceed".
+
+### A gap in evidence is never reported as safe
+
+When HarborMaster could not establish something — a registry that did not
+answer, a digest it could not resolve, a change it could not classify — the
+recommendation is `unknown`, which is deliberately **not** `proceed`. This is
+the single most misleading thing the feature could do, so it is pinned from both
+sides in the model, the API, and the UI: the count is reported beside the rest of
+the summary rather than folded into "ready to act on", and the badge's tooltip
+says what it is not.
+
+The same care applies to an *absent* plan. A container with no plan has **no
+change proposed for it** — not a change that was assessed and found safe.
+
+### Plans are immutable
+
+There is no PATCH and no DELETE, and the stored row carries no status, no queue
+position, and no assignee. A changed world produces a **new** plan and the old
+one remains as the record of what was believed when a decision was made. That is
+what makes the reasoning timeline worth having, and it is enforced by the schema
+rather than by convention.
+
+### An unchanged estate costs nothing to re-plan
+
+Every assessment is fingerprinted over exactly the values it read — a SHA-256
+over a sorted list of named fields, including the planner version, so bumping the
+rule set invalidates every stored fingerprint and forces a clean regeneration. A
+pass over an unchanged estate **writes nothing at all**, which is what makes it
+safe to run one after every inventory refresh.
+
+The application-level check avoids the write; a unique index on
+`(container_id, input_digest)` is what makes the guarantee hold when two passes
+race, and a conflict there is treated as "unchanged" rather than as an error.
+
+### No N+1
+
+Containers are processed in batches, and each batch costs a fixed number of
+grouped queries whatever its size. Ten thousand containers in batches of five
+hundred is about a hundred queries rather than sixty thousand, and a test counts
+them rather than describing them.
+
+`POST /plans/generate` is **asynchronous** and answers 202, because a synchronous
+pass over a large estate would hold an unauthenticated request open for minutes.
+It is coalesced, so calling it in a loop produces one pass rather than a backlog.
 
 ## Reliability and recovery
 

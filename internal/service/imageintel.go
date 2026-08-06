@@ -410,7 +410,7 @@ func (s *ImageIntelService) check(ctx context.Context, record domain.ImageIntel)
 	remoteDigest := record.RemoteDigest
 	if !manifest.NotModified {
 		remoteDigest = manifest.Digest
-		outcome.Platform = pickPlatform(record.Platform, manifest.Platforms)
+		outcome.Platform, outcome.PlatformMissing = pickPlatform(record.Platform, manifest.Platforms)
 		outcome.PublishedAt = parsePublished(manifest.Annotations)
 		outcome.Vendor = manifest.Annotations["vendor"]
 		outcome.Source = manifest.Annotations["source"]
@@ -798,26 +798,34 @@ func (s *ImageIntelService) nextCheckAfterFailure(failures int) time.Time {
 	return s.now().Add(backoff)
 }
 
-// pickPlatform chooses the platform to record for an index.
+// pickPlatform chooses the platform to record for an index, and reports whether
+// the local platform was absent from it.
 //
 // The LOCAL platform is preferred when the index advertises it: a
 // multi-architecture image resolves differently per platform, and the one that
 // matters is the one the container is actually running.
-func pickPlatform(local domain.Platform, advertised []domain.Platform) domain.Platform {
+//
+// The second return value is the part that cannot be inferred later. An index
+// that does not list the local platform yields NO platform rather than some
+// other platform's -- a quietly wrong answer would be worse than none -- and
+// that empty result is indistinguishable from "never determined". So the
+// distinction is reported here, where it is still known.
+func pickPlatform(local domain.Platform, advertised []domain.Platform) (domain.Platform, bool) {
+	// No advertised list means a single-platform manifest rather than an index.
+	// It establishes nothing about platform support, which is not the same as
+	// establishing that support is absent.
 	if len(advertised) == 0 {
-		return domain.Platform{}
+		return domain.Platform{}, false
 	}
 	for _, candidate := range advertised {
 		if candidate.OS == local.OS && candidate.Architecture == local.Architecture {
-			return candidate
+			return candidate, false
 		}
 	}
 	if local.Empty() {
-		return advertised[0]
+		return advertised[0], false
 	}
-	// The local platform is not advertised. Reported as empty rather than as
-	// some other platform's, which would be a quietly wrong answer.
-	return domain.Platform{}
+	return domain.Platform{}, true
 }
 
 // parsePublished reads the OCI created annotation.

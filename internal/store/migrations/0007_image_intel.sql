@@ -64,6 +64,16 @@ CREATE TABLE image_intel (
     platform_os      TEXT NOT NULL DEFAULT '',
     platform_arch    TEXT NOT NULL DEFAULT '',
     platform_variant TEXT NOT NULL DEFAULT '',
+    -- 1 when the most recent SUCCESSFUL check found that the registry
+    -- advertises platforms but not the one this image runs on.
+    --
+    -- Recorded separately because the columns above cannot express it: when the
+    -- local platform is absent from an index, pickPlatform reports no platform
+    -- at all rather than some other platform's, and that empty result is
+    -- indistinguishable from "never determined". Default 0 -- an image that has
+    -- not been checked has established nothing, and nothing is not a mismatch.
+    platform_missing INTEGER NOT NULL DEFAULT 0
+        CHECK (platform_missing IN (0, 1)),
 
     -- The local image row, when one exists. See above for why this is not a
     -- foreign key.

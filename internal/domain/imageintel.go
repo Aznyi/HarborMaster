@@ -136,6 +136,15 @@ type ImageIntel struct {
 	Pinned bool `json:"pinned"`
 
 	Platform Platform `json:"platform,omitempty"`
+	// PlatformMissing reports that the most recent successful check found the
+	// registry advertising platforms, but not the one this image runs on.
+	//
+	// A separate flag because Platform cannot express it: when the local
+	// platform is absent from an index, the recorded platform is left alone
+	// rather than set to some other platform's, so "not advertised" and "never
+	// determined" would otherwise look identical. False until a successful
+	// check establishes otherwise -- an unchecked image has claimed nothing.
+	PlatformMissing bool `json:"platformMissing,omitempty"`
 
 	// ImageID links to the local image row, when one exists. A reference can
 	// have intelligence without a local image: a container may name an image
