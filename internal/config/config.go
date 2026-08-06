@@ -409,6 +409,52 @@ const (
 	// a multi-container outage nobody chose.
 	DefaultExecutionMaxConcurrent = 1
 
+	// DefaultRollbackEnabled keeps manual rollback OFF unless a deployment asks
+	// for it, exactly as recreation is.
+	//
+	// A rollback stops the container that is currently serving. It is the
+	// safest way out of a bad recreation and it is still an interruption, so a
+	// deployment that has not thought about it does not have it.
+	DefaultRollbackEnabled = false
+
+	// DefaultRollbackMaxConcurrent bounds simultaneous rollbacks.
+	//
+	// ONE, for the same reason recreation is one: a rollback stops something
+	// that is serving, and several at once turns a contained interruption into
+	// a multi-container outage nobody chose.
+	DefaultRollbackMaxConcurrent = 1
+
+	// DefaultRollbackRequestTTL is how long a queued rollback stays valid.
+	//
+	// Shorter than a recreation's, because the evidence behind it is more
+	// perishable: a rollback is approved against two container identities that
+	// somebody may be rearranging by hand at the very moment it is queued.
+	DefaultRollbackRequestTTL = 10 * time.Minute
+
+	// DefaultRollbackStartupTimeout bounds the wait for the restored original
+	// to become healthy.
+	DefaultRollbackStartupTimeout = 5 * time.Minute
+	// DefaultRollbackStabilityPeriod is how long an original with NO health
+	// check must stay running to count as stable.
+	DefaultRollbackStabilityPeriod = 20 * time.Second
+	// DefaultRollbackHealthPollInterval is how often the original is
+	// re-inspected while waiting.
+	DefaultRollbackHealthPollInterval = 2 * time.Second
+	// DefaultRollbackStopTimeout is how long the REPLACEMENT is given to exit
+	// on its own before the daemon terminates it.
+	DefaultRollbackStopTimeout = 30 * time.Second
+	// DefaultRollbackInventoryFreshness bounds how stale HarborMaster's view of
+	// the host may be when a rollback acts on it.
+	DefaultRollbackInventoryFreshness = 15 * time.Minute
+	// DefaultRollbackSweepInterval is how often the queue is re-examined.
+	DefaultRollbackSweepInterval = 30 * time.Second
+	// DefaultRollbackRetentionAge is how long finished rollbacks are kept.
+	DefaultRollbackRetentionAge = 90 * 24 * time.Hour
+	// DefaultRollbackPruneInterval is how often retention runs.
+	DefaultRollbackPruneInterval = 6 * time.Hour
+	// DefaultRollbackMaxEvents bounds one rollback's audit trail.
+	DefaultRollbackMaxEvents = 200
+
 	// DefaultExecutionRequestTTL is how long a queued request stays valid.
 	// Short, because the preflight evidence behind it ages: a request that has
 	// waited an hour was approved against a host that may no longer look the
@@ -1031,6 +1077,65 @@ type Acquisition struct {
 	PruneInterval time.Duration
 }
 
+// Rollback holds settings for manual rollback.
+//
+// # Off by default, and refused without recreation
+//
+// A rollback stops the container that is currently serving so a preserved
+// original can take its place. It is the safest way out of a bad recreation and
+// it is still an interruption, so a deployment that has not asked for it does
+// not have the capability at all -- the Docker interface behind it stays nil.
+//
+// Validation also refuses ROLLBACK_ENABLED without EXECUTION_ENABLED: a
+// rollback undoes a recreation, and with recreation off there can never be one.
+type Rollback struct {
+	// Enabled turns rollback on. When false the endpoints report the feature
+	// disabled and no rollback can be requested or performed. Records already
+	// stored remain readable.
+	Enabled bool
+
+	// StartupTimeout bounds the wait for the RESTORED ORIGINAL to become
+	// healthy. An original that exceeds it fails the rollback with both
+	// containers preserved and a recovery plan recorded.
+	StartupTimeout time.Duration
+
+	// StabilityPeriod is how long an original with NO health check must stay
+	// running to count as stable. Weaker evidence than a health check and
+	// treated as such.
+	StabilityPeriod time.Duration
+
+	// HealthPollInterval is how often the original is re-inspected while
+	// waiting. Bounded below so a wait cannot become a busy loop against the
+	// Docker socket.
+	HealthPollInterval time.Duration
+
+	// StopTimeout is how long the REPLACEMENT is given to exit on its own
+	// before the daemon terminates it.
+	StopTimeout time.Duration
+
+	// RequestTTL is how long a queued rollback stays valid. Short, because the
+	// evidence behind it is two container identities somebody may be
+	// rearranging by hand.
+	RequestTTL time.Duration
+
+	// InventoryFreshness bounds how stale HarborMaster's view of the host may
+	// be when a rollback acts on it.
+	InventoryFreshness time.Duration
+
+	// MaxConcurrent bounds simultaneous rollbacks.
+	MaxConcurrent int
+
+	// MaxEventsPerRollback bounds one rollback's audit trail.
+	MaxEventsPerRollback int
+
+	// SweepInterval is how often the queue is re-examined, RetentionAge how
+	// long finished rollbacks are kept, and PruneInterval how often retention
+	// runs.
+	SweepInterval time.Duration
+	RetentionAge  time.Duration
+	PruneInterval time.Duration
+}
+
 // Auth holds settings for authentication, sessions, and the audit log.
 //
 // # There is no way to switch authentication off
@@ -1298,6 +1403,7 @@ type Config struct {
 	Planner     Planner
 	Acquisition Acquisition
 	Execution   Execution
+	Rollback    Rollback
 	Auth        Auth
 }
 
@@ -1689,6 +1795,44 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	// ---- rollback ----------------------------------------------------------
+
+	cfg.Rollback.Enabled, err = boolVar(lookup, "ROLLBACK_ENABLED", DefaultRollbackEnabled)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback time.Duration
+		into     *time.Duration
+	}{
+		{"ROLLBACK_STARTUP_TIMEOUT", DefaultRollbackStartupTimeout, &cfg.Rollback.StartupTimeout},
+		{"ROLLBACK_STABILITY_PERIOD", DefaultRollbackStabilityPeriod, &cfg.Rollback.StabilityPeriod},
+		{"ROLLBACK_HEALTH_POLL_INTERVAL", DefaultRollbackHealthPollInterval, &cfg.Rollback.HealthPollInterval},
+		{"ROLLBACK_STOP_TIMEOUT", DefaultRollbackStopTimeout, &cfg.Rollback.StopTimeout},
+		{"ROLLBACK_REQUEST_TTL", DefaultRollbackRequestTTL, &cfg.Rollback.RequestTTL},
+		{"ROLLBACK_INVENTORY_FRESHNESS", DefaultRollbackInventoryFreshness, &cfg.Rollback.InventoryFreshness},
+		{"ROLLBACK_SWEEP_INTERVAL", DefaultRollbackSweepInterval, &cfg.Rollback.SweepInterval},
+		{"ROLLBACK_RETENTION_AGE", DefaultRollbackRetentionAge, &cfg.Rollback.RetentionAge},
+		{"ROLLBACK_PRUNE_INTERVAL", DefaultRollbackPruneInterval, &cfg.Rollback.PruneInterval},
+	} {
+		value, convErr := durationVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"ROLLBACK_MAX_CONCURRENT", DefaultRollbackMaxConcurrent, &cfg.Rollback.MaxConcurrent},
+		{"ROLLBACK_MAX_EVENTS", DefaultRollbackMaxEvents, &cfg.Rollback.MaxEventsPerRollback},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	// ---- authentication ----------------------------------------------------
 	//
 	// No AUTH_ENABLED. Authentication is always on: see the Auth type.
@@ -1838,6 +1982,17 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf(
 			"%sEXECUTION_ENABLED requires %sACQUISITION_ENABLED: a recreation names an "+
 				"acquisition, and with acquisition switched off there can never be one",
+			envPrefix, envPrefix))
+	}
+
+	// A rollback undoes a recreation. With recreation switched off there can
+	// never be one to undo, so a deployment that enabled only rollback has
+	// enabled a capability that can do nothing -- and has granted the Docker
+	// mutation interface behind it for no reason.
+	if c.Rollback.Enabled && !c.Execution.Enabled {
+		errs = append(errs, fmt.Errorf(
+			"%sROLLBACK_ENABLED requires %sEXECUTION_ENABLED: a rollback undoes a "+
+				"recreation, and with recreation switched off there can never be one",
 			envPrefix, envPrefix))
 	}
 

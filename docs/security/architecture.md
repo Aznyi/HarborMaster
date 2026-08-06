@@ -348,9 +348,10 @@ same uncertainty.
 - **A running replacement is not a successful recreation.** Only all four proofs
   together can conclude that, and a proof that was not reached establishes
   nothing.
-- **A failure is not a reason to act again.** HarborMaster does not roll back.
-  It stops, quarantines the replacement, preserves both containers, and records
-  what a person would do.
+- **A failure is not a reason to act again.** HarborMaster does not roll back on
+  its own. It stops, quarantines the replacement, preserves both containers, and
+  records what a person would do. Undoing the recreation afterwards is a
+  separate, separately authorised operation a person asks for — see §3h.
 - **A recorded state is not a known state after a failed write.** The pipeline
   stops rather than assume.
 - **An empty checkpoint does not always mean "nothing changed".** With
@@ -360,7 +361,110 @@ same uncertainty.
   is single use; another recreation needs a fresh plan assessed against the
   world as it is now.
 
-## 3g. Identity, authorization, and audit
+## 3g. Manual rollback
+
+Phase 10 gave HarborMaster a way to UNDO §3f, and nothing more. This section
+states the limits, because the limits are the design.
+
+**HarborMaster can return ONE container to the state ONE recreation replaced,
+ONCE, when a person asks for it.** It cannot roll back automatically, on a
+schedule, or across a fleet; cannot restore from a snapshot; cannot roll back to
+an image or configuration a caller chooses; and cannot remove anything.
+
+### Nothing a caller supplies reaches the host
+
+The request body has two fields: an execution id and an optional idempotency
+key. There is no type in the rollback path with somewhere to put a container id,
+a name, an image, or a Docker option — which makes "roll back to an
+attacker-selected target" structurally impossible rather than merely checked
+for. Both container identities, the production name, and the image identity are
+read from HarborMaster's own record of that recreation and re-verified against
+the live host before anything moves.
+
+### The pipeline, and where the point of no return is
+
+```
+queued → validating │ stoppingReplacement → restoringName → startingOriginal → verifyingOriginal → succeeded
+└─ changes nothing ─┘ └──────────────── the host is being changed ─────────────────────────────┘
+   freely cancellable                       cancellation refused
+```
+
+The transition into `stoppingReplacement` is the MUTATION POINT, and it works
+exactly as §3f's does: before it an operator can cancel and nothing has
+happened; after it cancellation is refused and the in-process cancel function is
+unregistered, because a rollback that has stopped a container an operator
+depends on must reach a RECORDED conclusion.
+
+### Two preflights, and the second one is the one that decides
+
+The full preflight runs synchronously inside the request, so an operator gets a
+real refusal rather than a queued job that fails a moment later. It runs AGAIN
+inside the worker, immediately before the first mutation, because minutes may
+have passed and a person may have been moving containers by hand. **Only the
+second verdict decides whether anything is touched.**
+
+Both runs ask the same seventeen questions, and any one of them refuses:
+the capability is enabled; the execution exists and has settled; its checkpoint
+left an arrangement that can be undone; the original was not removed; no
+successful rollback of it exists; no rollback or recreation of this container is
+in flight; the concurrency limit is free; the daemon answers; the inventory is
+fresh; the preserved original is present, under the parked name the record
+gives, on the image the record gives; the replacement is present under a name
+HarborMaster derived; the production name is free or held by the replacement;
+the derived parked name fits; and the original's configuration can be projected
+so the result can be proved.
+
+### The checkpoint is what survives a crash
+
+The same design as §3f, for the same reason. `state` says what HarborMaster was
+doing; `checkpoint` says what is TRUE OF THE HOST, written after each Docker
+mutation succeeds and before the next is attempted. A checkpoint that cannot be
+written **stops the pipeline** — the mutation is never repeated, because
+repeating a stop, a rename, or a start against a host whose recorded state is
+uncertain is how a recoverable situation becomes an unrecoverable one.
+
+Restart recovery reads checkpoints and issues **no Docker call at all**. It
+settles each interrupted row from its own checkpoint and attaches a manual
+recovery plan.
+
+### The properties
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| The rollback surface is FOUR methods | `docker.ContainerRollbacker` pins stop, park, restore, start. Architecture tests pin the count and names, refuse create/remove/exec/image verbs on it, require a full container id on every request, and refuse any package outside the rollback service from naming any of it | `internal/arch/rollback_arch_test.go` |
+| **There is no remove method at all** | Deliberately narrower than the spec allowed. The failed replacement is the evidence of why the recreation was backed out, and a capability that could destroy it would eventually be used to. Pinned by `TestTheRollbackInterfaceCannotCreateOrDestroy` | `internal/docker/rollback.go` |
+| The rollback service holds NO other mutation capability | It is handed `docker.Runtime` and `docker.ContainerRollbacker` and nothing else, so it cannot create, remove, or capture. Pinned by test | `internal/arch/rollback_arch_test.go` |
+| Mutations target a FULL container id | Exactly 64 lowercase hex, validated at the adapter. A prefix would let a shorter id match a container the record does not name | `RollbackStopRequest.Validate` and siblings |
+| The renames are ONE-WAY | Park REQUIRES the rollback marker in the new name; restore REFUSES any HarborMaster-derived marker. Nothing here can move a container into a name that says something untrue about how it got there | `containsRollbackMarker`, `containsRecreationMarker` |
+| Names are DERIVED, never supplied | `<name>.hm-rolledback-<rollbackId>`, built from a name read from the daemon and an id from the system entropy source, then re-validated. Refused in the PREFLIGHT if it cannot be produced, before anything is stopped | `domain.RollbackParkedName` |
+| Preservation is proved against a BEFORE picture | The projection is taken during validation, before anything moves, and compared against the restored container afterwards. What that proves is that the ROLLBACK did not change the container it restored | `rollbackDecision.Baseline` |
+| No hasher means UNVERIFIABLE, which refuses | Without the installation key the preservation comparison cannot be made at all, so the rollback is refused rather than run unprovable | `assess`, `RollbackRefusalUnverifiable` |
+| Four proofs, and `unknown` is not a pass | Health or stability, image identity, configuration preservation, network attachment. `RollbackVerification.Passed()` requires all four to read `passed` | `domain.RollbackVerification` |
+| One successful rollback per recreation, ever | A partial unique index over succeeded rows, plus an in-transaction check on insert. A refused rollback does not consume the chance | `0013_rollbacks.sql`, `RollbackRepository.Create` |
+| One rollback per container | A partial unique index over the active states. Two would each rename what the other just renamed | `0013_rollbacks.sql` |
+| The preflight excludes ITSELF from the conflict check | The second preflight runs while the rollback is active. Without the exclusion every rollback would refuse for conflicting with itself | `ActiveCount(ctx, excluding)` |
+| Retention never prunes a failure that left containers | The same rule the recreation records follow. Removing that row would leave an operator with two containers and nothing explaining them | `RollbackRepository.Prune` |
+| Shutdown is bounded and recoverable | The mutation context carries a 10-second grace so a call in flight can finish and its checkpoint land; the pipeline also checks for shutdown at every step boundary | `rollbackShutdownGrace`, `shuttingDown` |
+| Recovery plans are text | Assembled from a fixed vocabulary and names HarborMaster generated or read from the daemon. Nothing executes one | `internal/domain/rollback_recovery.go` |
+| The outcome is audited from ONE choke point | A deferred call reads the FINAL state back from the store, so every terminal path is audited whether or not its author remembered to, and attributes it to the account recorded on the request | `RollbackService.auditOutcome` |
+| The advisory answer reads NO Docker | `Eligible` runs the record half of the preflight and stops. The execution detail endpoint carries it and the UI polls that page; a read able to turn one request into a ping, two inspections, and a listing would be a denial-of-service amplifier pointed at the socket. Pinned by test | `assessRecords`, `TestEligibilityNeverTouchesTheDockerSocket` |
+
+### Four conclusions the feature refuses to draw
+
+- **A restored container is not a successful rollback.** Only all four proofs
+  together can conclude that, and a proof that was not reached establishes
+  nothing.
+- **A failure is not a reason to put things back.** HarborMaster has just
+  demonstrated that its model of the host is wrong; correcting it automatically
+  at that moment is the unattended mutation this whole design exists to avoid.
+  It never guesses which container should serve traffic.
+- **An uncertain recreation is not rollable-back.** A recreation whose mutation
+  was issued and never confirmed refuses with `checkpointUncertain`: HarborMaster
+  does not know where the containers are, and a rollback would be a guess.
+- **A check that could not be PERFORMED is not a pass.** An unreadable container
+  listing refuses the rollback rather than assuming the production name is free.
+
+## 3h. Identity, authorization, and audit
 
 Phase 9.5 closed the boundary every earlier phase was compensating for. Before
 it, HarborMaster's answer to "who may stop a container" was "whoever can reach
@@ -788,13 +892,14 @@ Listing these so their absence reads as a decision rather than an oversight.
 
 | Absent | Why |
 | --- | --- |
-| Authentication | Deferred to a later phase. **The largest residual risk.** |
-| RBAC | Follows authentication |
-| Any Docker mutation beyond a digest-pinned pull and a single-container recreate | Phase 8 added one image mutation, Phase 9 added five container lifecycle methods. Both surfaces are pinned by test, held by separate services, and off by default. Everything else remains absent |
-| Rollback | **Explicitly not built.** A failed recreation quarantines the replacement, preserves both containers, and records manual steps. An automatic undo is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong |
+| Any Docker mutation beyond a digest-pinned pull, a single-container recreate, and a single-execution rollback | Phase 8 added one image mutation, Phase 9 added five container lifecycle methods, Phase 10 added four rollback methods. All three surfaces are pinned by test, held by separate services, and off by default. Everything else remains absent |
+| **Automatic** rollback | **Explicitly not built.** A failed recreation quarantines the replacement, preserves both containers, and records manual steps. An automatic undo is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong. Phase 10 added a rollback a PERSON asks for, one execution at a time; see §3g |
+| Scheduled or fleet rollback | Same reasoning. No timer creates rollback work, and `ROLLBACK_MAX_CONCURRENT` defaults to one |
+| Rollback to an arbitrary image, configuration, or snapshot | A rollback undoes ONE recorded recreation and derives every identity from that record. Restoring a container from a snapshot needs evidence a rollback does not have and is a later phase |
+| Removing anything during a rollback | The rollback capability has four methods and none of them removes. The failed replacement is the evidence of why the recreation was backed out |
 | Restore | Later phase; snapshots prepare for it |
 | Automatic, scheduled, or fleet updates | Every recreation is requested by an operator and acts on ONE container. No timer creates work, and `EXECUTION_MAX_CONCURRENT` is capped at four with a default of one |
-| Retrying a recreation | HarborMaster stops at the first failure. A retry is a new plan and a new acquisition |
+| Retrying a recreation or a rollback | HarborMaster stops at the first failure. A retried recreation is a new plan and a new acquisition; a retried rollback is a new request an operator makes deliberately |
 | Image or volume deletion | Still absent. `RemoveRequest` can remove a stopped CONTAINER and has no field for volumes or force |
 | Arbitrary command execution | Never. Not a feature, a category of vulnerability |
 | Template or plugin execution | Same |

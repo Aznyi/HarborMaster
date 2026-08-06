@@ -28,6 +28,7 @@ const READS: Permission[] = [
   "plan:read",
   "acquisition:read",
   "execution:read",
+  "rollback:read",
 ];
 
 const OPERATOR_WRITES: Permission[] = [
@@ -42,6 +43,8 @@ const OPERATOR_WRITES: Permission[] = [
   "acquisition:cancel",
   "execution:create",
   "execution:cancel",
+  "rollback:create",
+  "rollback:cancel",
 ];
 
 const ADMIN_ONLY: Permission[] = [

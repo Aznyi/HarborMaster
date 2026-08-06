@@ -551,11 +551,16 @@ func TestARecreationEndpointIsUnavailableWhenNotWired(t *testing.T) {
 
 // ------------------------------------------------------------- no routes --
 
-// TestThereIsNoRollbackOrRestoreRoute.
+// TestThereIsNoPerExecutionMutationRoute.
 //
 // The list of paths this feature does NOT serve, asserted rather than assumed.
 // Each would be a reasonable thing to want and none exists.
-func TestThereIsNoRollbackOrRestoreRoute(t *testing.T) {
+//
+// Manual rollback DOES exist, as its own resource at `/rollbacks`, and it is
+// still not here. A sub-resource under an execution would make "undo this" read
+// like a property of the recreation; it is a separate, separately authorised,
+// separately audited operation with its own record, and the URL says so.
+func TestThereIsNoPerExecutionMutationRoute(t *testing.T) {
 	srv := newExecutionServer(t, &fakeExecutions{enabled: true})
 
 	for _, path := range []string{

@@ -14,6 +14,8 @@ import { ChangePassword } from "./pages/ChangePassword";
 import { ClaimInstallation } from "./pages/ClaimInstallation";
 import { ExecutionDetail } from "./pages/ExecutionDetail";
 import { Executions } from "./pages/Executions";
+import { RollbackDetail } from "./pages/RollbackDetail";
+import { Rollbacks } from "./pages/Rollbacks";
 import { ChangePlans } from "./pages/ChangePlans";
 import { ContainerDetailPage } from "./pages/ContainerDetail";
 import { ContainerPlan } from "./pages/ContainerPlan";
@@ -170,6 +172,15 @@ function AuthenticatedApp() {
         <Route
           path="/executions/:id"
           element={<Guard permission="execution:read"><ExecutionDetail /></Guard>}
+        />
+
+        <Route
+          path="/rollbacks"
+          element={<Guard permission="rollback:read"><Rollbacks /></Guard>}
+        />
+        <Route
+          path="/rollbacks/:id"
+          element={<Guard permission="rollback:read"><RollbackDetail /></Guard>}
         />
 
         <Route path="/events" element={<Guard permission="event:read"><Events /></Guard>} />

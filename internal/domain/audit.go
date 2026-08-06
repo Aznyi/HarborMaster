@@ -109,6 +109,18 @@ const (
 	// whether the host was left changed, because that is what decides whether
 	// somebody has to go and look.
 	AuditExecutionFailed AuditAction = "execution.failed"
+
+	// Manual rollback: returning a container to the state a recreation moved it
+	// from. The same request/outcome split, for the same reason.
+	AuditRollbackRequested AuditAction = "rollback.requested"
+	AuditRollbackCancelled AuditAction = "rollback.cancelled"
+	// AuditRollbackCompleted means a container was returned to its preserved
+	// original and that original is running and proved.
+	AuditRollbackCompleted AuditAction = "rollback.completed"
+	// AuditRollbackFailed means it did not finish. The reason says whether the
+	// host was left changed -- and for a rollback that matters more than
+	// anywhere else, because a failure partway can leave nothing serving.
+	AuditRollbackFailed AuditAction = "rollback.failed"
 )
 
 // AuditActions lists every action.
@@ -130,6 +142,8 @@ var AuditActions = []AuditAction{
 	AuditAcquisitionCompleted, AuditAcquisitionFailed,
 	AuditExecutionRequested, AuditExecutionCancelled,
 	AuditExecutionCompleted, AuditExecutionFailed,
+	AuditRollbackRequested, AuditRollbackCancelled,
+	AuditRollbackCompleted, AuditRollbackFailed,
 }
 
 // ValidAuditAction reports whether name is a known action.
@@ -166,7 +180,7 @@ func (a AuditAction) Security() bool {
 // configuration without anybody opening a page.
 func (a AuditAction) Privileged() bool {
 	switch a {
-	case AuditAcquisitionCompleted, AuditExecutionCompleted:
+	case AuditAcquisitionCompleted, AuditExecutionCompleted, AuditRollbackCompleted:
 		return true
 	default:
 		return false
@@ -219,6 +233,7 @@ const (
 	AuditTargetPlan        AuditTargetType = "plan"
 	AuditTargetAcquisition AuditTargetType = "acquisition"
 	AuditTargetExecution   AuditTargetType = "execution"
+	AuditTargetRollback    AuditTargetType = "rollback"
 	AuditTargetInventory   AuditTargetType = "inventory"
 	AuditTargetSystem      AuditTargetType = "system"
 )
@@ -228,7 +243,8 @@ var AuditTargetTypes = []AuditTargetType{
 	AuditTargetUser, AuditTargetSession, AuditTargetContainer,
 	AuditTargetSnapshot, AuditTargetDrift, AuditTargetPolicy,
 	AuditTargetViolation, AuditTargetPlan, AuditTargetAcquisition,
-	AuditTargetExecution, AuditTargetInventory, AuditTargetSystem,
+	AuditTargetExecution, AuditTargetRollback,
+	AuditTargetInventory, AuditTargetSystem,
 }
 
 // ValidAuditTargetType reports whether name is a known target type.

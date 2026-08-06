@@ -91,6 +91,20 @@ const (
 	PermExecutionCreate Permission = "execution:create"
 	// PermExecutionCancel stops a recreation that has not yet changed anything.
 	PermExecutionCancel Permission = "execution:cancel"
+
+	// PermRollbackRead covers rollback history.
+	PermRollbackRead Permission = "rollback:read"
+	// PermRollbackCreate STOPS THE RUNNING REPLACEMENT and puts the preserved
+	// original back. Alongside execution:create, one of the two permissions
+	// that reach a root-equivalent socket and change something that is serving.
+	//
+	// An operator permission rather than an administrator one, deliberately.
+	// The person who has to undo a bad recreation at three in the morning is
+	// the person who performed it, and making them find an administrator first
+	// would make the safest response the slowest one.
+	PermRollbackCreate Permission = "rollback:create"
+	// PermRollbackCancel stops a rollback that has not yet changed anything.
+	PermRollbackCancel Permission = "rollback:cancel"
 )
 
 // Administrator permissions.
@@ -133,6 +147,7 @@ var AllPermissions = []Permission{
 	PermDriftAnnotate, PermDriftRead,
 	PermEventRead,
 	PermExecutionCancel, PermExecutionCreate, PermExecutionRead,
+	PermRollbackCancel, PermRollbackCreate, PermRollbackRead,
 	PermImageRefresh,
 	PermInventoryRead, PermInventoryRefresh,
 	PermPlanGenerate, PermPlanRead,
@@ -173,6 +188,8 @@ func (p Permission) Describe() string {
 		return "read image acquisition history"
 	case PermExecutionRead:
 		return "read container recreation history"
+	case PermRollbackRead:
+		return "read rollback history"
 
 	case PermInventoryRefresh:
 		return "re-read this host's inventory"
@@ -196,6 +213,10 @@ func (p Permission) Describe() string {
 		return "STOP AND REPLACE a running container"
 	case PermExecutionCancel:
 		return "cancel a container recreation"
+	case PermRollbackCreate:
+		return "ROLL A CONTAINER BACK to its preserved original"
+	case PermRollbackCancel:
+		return "cancel a rollback"
 
 	case PermPolicyManage:
 		return "create, edit, and withdraw compliance policies"
@@ -213,7 +234,8 @@ func (p Permission) Describe() string {
 // Exactly two do. Used to mark them in the UI and to decide which audit events
 // are logged at a level a default configuration shows.
 func (p Permission) Privileged() bool {
-	return p == PermAcquisitionCreate || p == PermExecutionCreate
+	return p == PermAcquisitionCreate || p == PermExecutionCreate ||
+		p == PermRollbackCreate
 }
 
 // ---------------------------------------------------------------- roles --
@@ -297,6 +319,7 @@ var viewerPermissions = []Permission{
 	PermPlanRead,
 	PermAcquisitionRead,
 	PermExecutionRead,
+	PermRollbackRead,
 }
 
 // operatorPermissions are what an Operator adds to the Viewer set.
@@ -311,6 +334,8 @@ var operatorPermissions = []Permission{
 	PermAcquisitionCreate,
 	PermAcquisitionCancel,
 	PermExecutionCreate,
+	PermRollbackCreate,
+	PermRollbackCancel,
 	PermExecutionCancel,
 }
 

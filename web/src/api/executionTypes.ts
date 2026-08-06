@@ -278,6 +278,19 @@ export interface ExecutionListResponse {
 export interface ExecutionDetailResponse {
   execution: Execution;
   events: ExecutionEvent[];
+  /**
+   * Whether this recreation can be undone, and if not, why.
+   *
+   * Answered here rather than on a separate endpoint so the page that offers
+   * the control and the check that governs it cannot disagree. Advice only:
+   * the server asks the same questions again, against the live host,
+   * immediately before it acts.
+   *
+   * ABSENT means manual rollback is not configured, which the UI renders as
+   * "not available" rather than as "refused" — an operator must not go looking
+   * for a check that never ran.
+   */
+  rollback?: import("./rollbackTypes").RollbackEligibility;
 }
 
 /**

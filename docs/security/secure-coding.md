@@ -29,11 +29,18 @@ privileged socket traffic is a denial-of-service amplifier: one HTTP request
 becomes a full host sweep, repeatable at will.
 
 **1.5 Never widen a mutation interface without editing its test.**
-There are exactly two: `docker.ImageAcquirer` (one method) and
-`docker.ContainerMutator` (five). Each is pinned by an exact-set test, a verb
-test, and a source-level test naming the packages allowed to reference it.
-Adding a method means editing tests whose entire subject is that limit — which
-is what makes the change visible in review.
+There are exactly three: `docker.ImageAcquirer` (one method),
+`docker.ContainerMutator` (five), and `docker.ContainerRollbacker` (four). Each
+is pinned by an exact-set test, a verb test, and a source-level test naming the
+packages allowed to reference it. Adding a method means editing tests whose
+entire subject is that limit — which is what makes the change visible in review.
+
+**Do not merge the rollback interface into the mutator.** They are separate
+because capability is granted by what a constructor is handed: the rollback
+service cannot create or remove a container, and the execution service cannot
+perform a rollback, and both facts are true because neither holds the other's
+interface. A single wide interface would make both statements false in one
+edit.
 
 **1.6 Never take a Docker SDK option struct as a parameter.**
 Every mutation method takes a HarborMaster-owned request struct built from
@@ -61,6 +68,27 @@ success is durable.**
 All four verifications must read `passed` — an `unknown` is not a pass — and the
 success record must have been written. If either is missing, preserve both
 containers and fail closed.
+
+**1.11 Never add a remove capability to the rollback interface.**
+`docker.ContainerRollbacker` has four methods and none of them destroys
+anything. The replacement a rollback displaces is the evidence of why the
+recreation was backed out, and a capability that could delete it would
+eventually be used to. Pinned by
+`TestTheRollbackInterfaceCannotCreateOrDestroy`.
+
+**1.12 Keep the rollback renames one-way.**
+`ParkReplacement` REQUIRES the rollback marker in the name it is given;
+`RestoreOriginalName` REFUSES any HarborMaster-derived marker. Between them
+those two rules mean nothing in the rollback path can move a container into a
+name that says something untrue about how it got there. Relaxing either turns
+two narrow operations into a general rename.
+
+**1.13 Derive every rollback identity from HarborMaster's own record.**
+The request carries an execution id and an optional idempotency key, and there
+is no type in the rollback path with anywhere to put a container id, a name, or
+an image. That is what makes "roll back to an attacker-selected target"
+structurally impossible rather than merely checked for. Adding a field would
+remove the property, not merely add an input to validate.
 
 ---
 
@@ -410,6 +438,7 @@ has the defect the test was written to catch, and only a time assertion sees it.
 ## Pull request checklist
 
 - [ ] No new `docker.Runtime` method
+- [ ] No new method on any of the three mutation interfaces
 - [ ] No Docker SDK import outside `internal/docker`
 - [ ] Every SQL value bound; every identifier from an allowlist
 - [ ] Every new input validated and bounded

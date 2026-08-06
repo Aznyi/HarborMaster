@@ -102,6 +102,10 @@ func TestOnlyTheSocketTouchingPermissionsArePrivileged(t *testing.T) {
 	privileged := map[domain.Permission]bool{
 		domain.PermAcquisitionCreate: true,
 		domain.PermExecutionCreate:   true,
+		// Rollback stops the container that is currently serving so a preserved
+		// original can take its place. It reaches the socket and it interrupts
+		// a service, so it counts.
+		domain.PermRollbackCreate: true,
 	}
 
 	for _, permission := range domain.RoleAdministrator.Permissions() {

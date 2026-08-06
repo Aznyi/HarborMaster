@@ -15,8 +15,8 @@ by the time HarborMaster can change a container it can already undo it.
 > that inventory current. Watching events does not change anything: an event
 > only ever causes HarborMaster to re-read the host.
 >
-> It has exactly two abilities to change the host, both **off by default** and
-> both requested by a person:
+> It has exactly three abilities to change the host, all **off by default** and
+> all requested by a person:
 >
 > 1. **Downloading an approved, digest-pinned image** into the local image
 >    store, verified afterwards. It touches no container. See
@@ -25,11 +25,15 @@ by the time HarborMaster can change a container it can already undo it.
 >    verified, preserving that container's configuration. The original is kept
 >    until the replacement is proved, and there is **no automatic rollback**.
 >    See [Manual container recreation](#manual-container-recreation).
+> 3. **Rolling ONE recreation back**, when a person asks. It stops the
+>    replacement, starts the original that recreation preserved, and proves it.
+>    It **removes nothing** — the replacement is kept as evidence. See
+>    [Manual rollback](#manual-rollback).
 >
-> Everything else remains absent: no automatic or scheduled updates, no fleet
-> updates, no rollback, no restore, no image deletion or pruning, and no
-> command-execution path of any kind. See [Status](#status) for what is and is
-> not here yet.
+> Everything else remains absent: no automatic, scheduled, or fleet updates; no
+> automatic rollback; no restore from a snapshot; no image deletion or pruning;
+> and no command-execution path of any kind. See [Status](#status) for what is
+> and is not here yet.
 >
 > **Every route requires a session**, and which routes an account can reach
 > depends on its role. There is no setting that turns that off. A fresh
@@ -50,6 +54,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Change planning](#change-planning)
 - [Safe image acquisition](#safe-image-acquisition)
 - [Manual container recreation](#manual-container-recreation)
+- [Manual rollback](#manual-rollback)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -1425,7 +1430,7 @@ All four must pass. A check that was never reached reads `unknown`, and an
 | **Configuration** | Its configuration matches the original's, field by field — including capabilities, security options, read-only rootfs, namespaces, limits, mounts, and ports |
 | **Network** | It is attached to every network the original was on, with the same aliases |
 
-### There is no rollback
+### There is no automatic rollback
 
 Deliberately. When a recreation fails after the first mutation, HarborMaster:
 
@@ -1440,6 +1445,100 @@ An automatic undo would be another unattended mutation, performed at exactly the
 moment HarborMaster has demonstrated that its model of the host is wrong. The
 UI, the API, and the record all say this in as many words, and the confirmation
 dialog says it before you act.
+
+Undoing a recreation *afterwards*, when a person decides to, is a separate
+feature with its own permission and its own record. See
+[Manual rollback](#manual-rollback).
+
+## Manual rollback
+
+**Returning ONE container to the state ONE recreation replaced.** Off by
+default, and refused at startup unless recreation is on too.
+
+A recreation stopped a container, parked it under a derived name, and started a
+replacement in its place. A rollback undoes exactly that arrangement: it stops
+the replacement, renames it aside, renames the preserved original back, starts
+it, and proves it.
+
+> **This causes downtime, and the README says so before the feature does
+> anything else.** The replacement is stopped *before* the original is started,
+> and the original then has to start and pass its checks. There is no overlap:
+> two containers cannot hold one name.
+
+### What the request carries
+
+An **execution id**, and optionally an idempotency key. That is the whole body.
+
+There is no field for a container id, a container name, an image, a digest, a
+snapshot, or any Docker parameter — not rejected, *absent*. Both container
+identities, the production name, and the image identity are read from
+HarborMaster's own record of that recreation and re-verified against the live
+host before anything moves.
+
+### What it checks, twice
+
+The full preflight runs synchronously before the request is accepted, so a
+refusal is immediate rather than arriving as a failed background job. It runs
+**again** inside the worker, immediately before the first mutation, because
+minutes may have passed and somebody may have been moving containers by hand.
+Only the second verdict decides whether anything is touched.
+
+Both runs ask the same questions: the execution exists and has settled; its
+checkpoint left an arrangement that can be undone; the original was not removed;
+no successful rollback of it exists; nothing else is in flight for this
+container; the daemon answers; the inventory is fresh; both containers are still
+present under the names and images the record gives; the production name is free
+or held by the replacement; and the original's configuration can be projected so
+the result can be proved. A refusal names the specific check that said no.
+
+### What happens to the containers
+
+| Step | What is true afterwards |
+| --- | --- |
+| Stop the replacement | The replacement is stopped and still holds the production name |
+| Rename it aside | It is `<name>.hm-rolledback-<rollbackId>`, and the name is free |
+| Rename the original back | The original holds its own name and is not running |
+| Start the original | It is running and not yet proved |
+| Prove it | Health or stability, image identity, configuration preservation, network attachment — all four must pass |
+
+A checkpoint is written after each of those and before the next. If one cannot
+be written, the pipeline **stops** — it never repeats a mutation whose record is
+uncertain.
+
+### Nothing is removed
+
+The rollback capability has four methods — stop, rename aside, rename back,
+start — and no remove. The replacement stays on the host as the evidence of why
+the recreation was backed out, and you delete it yourself when you are done with
+it.
+
+### One per recreation, ever
+
+Enforced by a unique index rather than by a check that hopes to win a race. A
+*refused* rollback does not consume that chance: the point of a refusal is that
+nothing happened.
+
+### When a rollback fails
+
+Exactly as a failed recreation does. It stops, preserves both containers,
+records the checkpoint that says what was actually done, and writes a manual
+recovery plan of fixed-vocabulary steps. **It never guesses which container
+should serve traffic**, and it does not try to put things back — it has just
+demonstrated that its model of the host is wrong.
+
+### Turning it on
+
+```bash
+HARBORMASTER_EXECUTION_ENABLED=true
+HARBORMASTER_ROLLBACK_ENABLED=true
+```
+
+When `ROLLBACK_ENABLED` is false the capability is **absent**, not merely
+unused: no rollbacker is wired and the process holds no ability to perform one.
+Requesting a rollback needs `rollback:create`, which an operator and an
+administrator hold and a viewer does not. Reading the history needs
+`rollback:read`, which every role holds — an incident is not a reason to hide
+the record of it.
 
 ### Configuration is reproduced, and secrets are not re-derived
 
@@ -2117,15 +2216,18 @@ to root. HarborMaster is built accordingly.
 
 Six statements, all of them true today:
 
-1. **HarborMaster does not update containers.** It observes them. There is no
-   image pull, no recreation, no restart, no rollback, and no exec. Subscribing
-   to the Docker event stream does not change that: reading events is an
-   observation, and an event only ever causes HarborMaster to *re-read* the
-   host.
-2. **Docker socket access remains highly privileged despite HarborMaster's
-   read-only behaviour.** The application only reads, but the socket it holds
-   could do anything. Mounting it `:ro` restricts the socket *file*, not the
-   Docker *API*. Treat access to this service as equivalent to root on the host.
+1. **HarborMaster changes a host only when a person asks, and only in three
+   narrow ways** — pulling an approved digest-pinned image, recreating one
+   container, and rolling one recreation back. All three are **off by default**,
+   and when off the capability is absent rather than merely unused. Nothing here
+   happens on a timer, on a schedule, or across a fleet, and there is no
+   restart, no exec, and no image or volume deletion at all. Subscribing to the
+   Docker event stream changes none of that: reading events is an observation,
+   and an event only ever causes HarborMaster to *re-read* the host.
+2. **Docker socket access remains highly privileged regardless.** The socket
+   HarborMaster holds could do anything, whether or not HarborMaster uses it
+   that way. Mounting it `:ro` restricts the socket *file*, not the Docker
+   *API*. Treat access to this service as equivalent to root on the host.
 3. **Authentication is implemented and cannot be disabled**, but HarborMaster
    does not terminate TLS. Four routes answer without a session — `GET /health`
    (reduced to one field for an anonymous caller), `GET /version`,
@@ -2150,8 +2252,11 @@ On masking specifically: environment values are masked in the API and the UI,
 and raw values are not persisted. That is a meaningful reduction in exposure,
 not a complete one — variable *names* are still disclosed, and names alone often
 reveal which services and providers a host talks to. Configuration persistence
-warrants continued security review as HarborMaster grows, particularly when a
-future phase needs real values to recreate a container.
+warrants continued security review as HarborMaster grows. Recreation does need
+real values, and it handles them without ever holding one it can read: the live
+configuration is captured into a value carrying unexported fields and handed
+straight back to the daemon, and what the service and the API see is a
+value-free projection in which a sensitive value contributes a keyed digest.
 
 If you find a security problem, please open a private security advisory rather
 than a public issue.
@@ -2202,15 +2307,19 @@ than a public issue.
   immediately before the transfer, and verified afterwards. It does not update
   containers.
 - **Manual container recreation**: replacing one container with a new one built
-  from its own configuration, on an already-verified local image.
-  **HarborMaster's only write to something running**, off by default, requested
-  by a person, revalidated immediately before the first mutation, checkpointed
-  after every step, and proved four ways before the original is removed. There
-  is no automatic rollback: a failure preserves both containers and records the
-  manual steps.
+  from its own configuration, on an already-verified local image. Off by
+  default, requested by a person, revalidated immediately before the first
+  mutation, checkpointed after every step, and proved four ways before the
+  original is removed. There is no automatic rollback: a failure preserves both
+  containers and records the manual steps.
+- **Manual rollback**: undoing one recreation, when a person asks. Off by
+  default and refused unless recreation is on. It stops the replacement, renames
+  it aside, renames the preserved original back, starts it, and proves it four
+  ways. It **removes nothing**, acts on one execution at a time, and derives
+  every identity from HarborMaster's own record of that recreation.
 - **Web interface**: Dashboard, Containers with detail, Images, Updates,
   Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions,
-  Recreations, and a live Events page
+  Recreations, Rollbacks, and a live Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -2222,18 +2331,23 @@ than a public issue.
 
 - **Automatic rollback.** Explicitly not built. A failed recreation quarantines
   the replacement, preserves both containers, and records the manual steps.
+  Manual rollback exists and happens only when a person asks for it.
+- **Scheduled or fleet rollback.** No timer creates rollback work, and a
+  rollback acts on exactly one execution's two containers.
+- **Rollback to an arbitrary image, configuration, or snapshot.** A rollback
+  undoes one recorded recreation and derives every identity from that record.
 - **Automatic, scheduled, or fleet updates.** Every recreation is requested by a
   person and acts on exactly one container.
 - **Retrying a recreation.** HarborMaster stops at the first failure. A retry is
   a new plan and a new acquisition.
-- Standalone container start, stop, restart, and removal. The five lifecycle
-  methods exist only inside the recreation pipeline and are not reachable from
-  the API.
+- Standalone container start, stop, restart, and removal. The five recreation
+  lifecycle methods and the four rollback methods exist only inside their own
+  pipelines and are not reachable from the API.
 - Restore from a snapshot. Readiness validation answers whether it *could*
   work; nothing performs it.
 - Image deletion and pruning. Acquisition adds to the local store, recreation
-  removes only the container it replaced, and neither can remove an image or a
-  volume.
+  removes only the container it replaced, rollback removes nothing at all, and
+  none of them can remove an image or a volume.
 - Notifications
 - A second authentication factor, single sign-on, LDAP, OIDC, public
   registration, and password reset by email. Accounts are local, and recovery is

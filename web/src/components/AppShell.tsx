@@ -39,6 +39,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Change plans", path: "/plans", permission: "plan:read" },
   { label: "Acquisitions", path: "/acquisitions", permission: "acquisition:read" },
   { label: "Recreations", path: "/executions", permission: "execution:read" },
+  { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
   { label: "Compliance", path: "/compliance", permission: "policy:read" },
   { label: "Policies", path: "/policies", permission: "policy:read" },
   { label: "Events", path: "/events", permission: "event:read" },

@@ -93,6 +93,9 @@ func TestTheHostChangingActionsAreAuditedByOutcomeNotRequest(t *testing.T) {
 	privileged := map[domain.AuditAction]bool{
 		domain.AuditAcquisitionCompleted: true,
 		domain.AuditExecutionCompleted:   true,
+		// A completed rollback stopped the container that was serving and
+		// started another in its place. It changed the host.
+		domain.AuditRollbackCompleted: true,
 	}
 
 	for _, action := range domain.AuditActions {
@@ -106,6 +109,8 @@ func TestTheHostChangingActionsAreAuditedByOutcomeNotRequest(t *testing.T) {
 		domain.AuditAcquisitionRequested, domain.AuditExecutionRequested,
 		domain.AuditAcquisitionCompleted, domain.AuditAcquisitionFailed,
 		domain.AuditExecutionCompleted, domain.AuditExecutionFailed,
+		domain.AuditRollbackRequested, domain.AuditRollbackCancelled,
+		domain.AuditRollbackCompleted, domain.AuditRollbackFailed,
 	} {
 		if !domain.ValidAuditAction(string(action)) {
 			t.Errorf("audit action %q is not in the recognised vocabulary", action)

@@ -287,6 +287,7 @@ is lost, and no operator action is required.**
 | Event engine state | Timestamps and the reconnect count, so "has this been flapping" survives a restart. |
 | An image acquisition | Nothing is resumed. An unverified transfer is failed, because the image on the host now may not be the one that pull produced. |
 | **A container recreation** | The **checkpoint**, which says what was done to the host. Nothing is resumed and nothing is undone. See below. |
+| **A manual rollback** | The same: its own **checkpoint**. Nothing is resumed and nothing is undone. See below. |
 
 ### A container recreation interrupted by a restart
 
@@ -318,9 +319,33 @@ curl -s localhost:8080/api/v1/executions?needsAttention=true | jq
 A container HarborMaster parked is identifiable on the host by its name:
 
 ```sh
-docker ps -a --filter 'name=.hm-old-'    # originals waiting to be settled
-docker ps -a --filter 'name=.hm-failed-' # replacements kept for diagnosis
+docker ps -a --filter 'name=.hm-old-'        # originals waiting to be settled
+docker ps -a --filter 'name=.hm-failed-'     # replacements kept for diagnosis
+docker ps -a --filter 'name=.hm-rolledback-' # replacements a rollback displaced
 ```
+
+### A rollback interrupted by a restart
+
+The same discipline, the same reasoning, and the same "no Docker call during
+recovery" rule. The table is different because the mutation sequence is.
+
+| Checkpoint | What is on the host | What the plan says |
+| --- | --- | --- |
+| *(empty, `mutatedAt` unset)* | Nothing was changed | Nothing to do |
+| *(empty, `mutatedAt` set)* | **Unknown.** A stop was issued and never confirmed | Check which container is running; the replacement may be stopped or may still be serving |
+| `replacementStopped` | The replacement is stopped and still holds the production name; the original is still parked | Nothing is serving. Either start the replacement again, or rename it aside and rename the original back |
+| `replacementParked` | The replacement is stopped and renamed aside; the production name is free; the original is still parked | Rename the original back and start it |
+| `originalRestored` | The original holds its own name and is not running | `docker start <name>` |
+| `originalStarted` | The original is running under its own name and was never proved | Confirm it is serving correctly. Service is up; only the proof is missing |
+| `originalVerified` | The rollback completed | Nothing to do |
+
+Find them with:
+
+```sh
+curl -s localhost:8080/api/v1/rollbacks?needsAttention=true | jq
+```
+
+A rollback record in that state is never pruned either.
 
 `diagnose` reports `rows still running` if any refresh row is left in the
 `running` state. It should always be zero: a refresh is recorded only when it
@@ -346,7 +371,7 @@ On `SIGINT` or `SIGTERM`, in order:
 
 1. The HTTP server drains. In-flight requests and open SSE streams end first.
 2. Background services stop: the inventory loop, the event engine, snapshot
-   retention, image acquisition, container recreation.
+   retention, image acquisition, container recreation, manual rollback.
 3. The Docker client and the database close. The database **must** close last,
    or a final event flush would write to a closed handle.
 
@@ -366,10 +391,10 @@ rolled back by the database; an unbounded hang is not recoverable.
 `Close` checkpoints the write-ahead log (`wal_checkpoint(TRUNCATE)`), so a clean
 stop leaves no log to replay and a subsequent file copy is complete.
 
-### Shutting down mid-recreation
+### Shutting down mid-recreation or mid-rollback
 
-A container recreation is the one background task that can be holding a
-container down when the signal arrives, so it gets its own discipline:
+These are the two background tasks that can be holding a container down when the
+signal arrives, so they share a discipline:
 
 - The pipeline checks for shutdown **at every step boundary** and stops there,
   with its checkpoint current. In the common case no grace is used at all.
@@ -379,10 +404,10 @@ container down when the signal arrives, so it gets its own discipline:
 - The verification wait watches the shutdown signal separately from the mutation
   budget. It is entirely reads, so abandoning it changes nothing.
 
-The result is that a recreation interrupted by a shutdown lands on a recorded
-checkpoint, and the next start settles it from the table above. A shutdown mid-
-recreation is therefore recoverable by an operator following a plan, rather than
-a container in a state nobody wrote down.
+The result is that a recreation or a rollback interrupted by a shutdown lands on
+a recorded checkpoint, and the next start settles it from the tables above.
+Either is therefore recoverable by an operator following a plan, rather than a
+container in a state nobody wrote down.
 
 ---
 

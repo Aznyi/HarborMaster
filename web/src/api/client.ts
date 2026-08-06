@@ -87,6 +87,13 @@ import type {
   ExecutionRequest,
 } from "./executionTypes";
 import type {
+  Rollback,
+  RollbackDetailResponse,
+  RollbackListResponse,
+  RollbackQuery,
+  RollbackRequest,
+} from "./rollbackTypes";
+import type {
   AuditListResponse,
   AuditQuery,
   AuditSummary,
@@ -1216,8 +1223,9 @@ export function cancelAcquisition(
  * Everything about what will happen is derived server-side from the
  * acquisition, and revalidated immediately before the first mutation.
  *
- * There is deliberately no rollback, restore, retry, or force call, and no
- * server capability behind one.
+ * There is deliberately no restore, retry, or force call, and no server
+ * capability behind one. Manual rollback exists and is its own resource below:
+ * a separate route, a separate permission, a separate audit record.
  */
 
 /** Builds the execution listing query string from closed vocabularies. */
@@ -1295,6 +1303,101 @@ export function cancelExecution(
 ): Promise<Execution> {
   return request<Execution>(
     `/executions/${encodeURIComponent(executionId)}/cancel`,
+    options,
+    "POST",
+  );
+}
+
+/**
+ * Manual rollback.
+ *
+ * # The second pair of calls that change something RUNNING
+ *
+ * `requestRollback` takes an EXECUTION ID. There is no container id, name,
+ * image, snapshot, or Docker option anywhere below, and the server rejects
+ * unknown fields rather than ignoring them. Both container identities are read
+ * from HarborMaster's own record of the recreation and re-verified against the
+ * live host before anything moves.
+ *
+ * There is deliberately no remove call. A rollback stops and parks the
+ * replacement and leaves it there as the evidence of why the recreation was
+ * backed out; the server holds no capability that could destroy it.
+ */
+
+/** Builds the rollback listing query string from closed vocabularies. */
+function buildRollbackQuery(query: RollbackQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.executionId) params.set("executionId", query.executionId);
+  if (query.activeOnly !== undefined) {
+    params.set("activeOnly", String(query.activeOnly));
+  }
+  if (query.needsAttention !== undefined) {
+    params.set("needsAttention", String(query.needsAttention));
+  }
+
+  for (const state of query.state ?? []) params.append("state", state);
+  for (const failure of query.failure ?? []) params.append("failure", failure);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/rollbacks */
+export function listRollbacks(
+  query: RollbackQuery = {},
+  options?: RequestOptions,
+): Promise<RollbackListResponse> {
+  return request<RollbackListResponse>(
+    `/rollbacks${buildRollbackQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/rollbacks/{id} */
+export function getRollback(
+  rollbackId: string,
+  options?: RequestOptions,
+): Promise<RollbackDetailResponse> {
+  return request<RollbackDetailResponse>(
+    `/rollbacks/${encodeURIComponent(rollbackId)}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/rollbacks
+ *
+ * Asks HarborMaster to undo one recreation. Returns once the request is
+ * *accepted*, not once the rollback finishes: the server answers 202 and the
+ * work runs in the background.
+ *
+ * **This stops a running container and starts a different one in its place.**
+ * There is a gap between the two, so the container is unavailable while the
+ * rollback runs.
+ */
+export function requestRollback(
+  body: RollbackRequest,
+  options?: RequestOptions,
+): Promise<Rollback> {
+  return request<Rollback>("/rollbacks", options, "POST", body);
+}
+
+/**
+ * POST /api/v1/rollbacks/{id}/cancel
+ *
+ * Stops a rollback that has not yet changed anything. Past the mutation point
+ * the server answers 409: a rollback that has stopped a container must reach a
+ * recorded conclusion.
+ */
+export function cancelRollback(
+  rollbackId: string,
+  options?: RequestOptions,
+): Promise<Rollback> {
+  return request<Rollback>(
+    `/rollbacks/${encodeURIComponent(rollbackId)}/cancel`,
     options,
     "POST",
   );

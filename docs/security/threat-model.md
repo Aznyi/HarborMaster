@@ -1,6 +1,6 @@
 # HarborMaster Threat Model
 
-**Status:** current as of the pre-Phase-10 repository security audit
+**Status:** current as of Phase 10 (manual rollback)
 **Scope:** the whole repository — backend, frontend, container image, CI/CD
 **Method:** asset-driven, with STRIDE applied per trust boundary
 
@@ -32,8 +32,8 @@ Two consequences follow, and they shape everything below:
    *Docker API* read-only: the writes an API request needs are still permitted.
    The deployment documentation says this in the same words.
 
-**As of Phase 9, HarborMaster issues two kinds of write to that socket**, and
-both are off by default:
+**As of Phase 10, HarborMaster issues three kinds of write to that socket**, and
+all three are off by default:
 
 1. **Pulling an approved, digest-pinned image** (Phase 8). One method, on its
    own interface, reachable from one service. Adds to the local image store,
@@ -41,11 +41,16 @@ both are off by default:
 2. **Recreating ONE container** (Phase 9). Five methods — create, start, stop,
    rename, remove — on their own interface, reachable from one different
    service.
+3. **Rolling ONE recreation back** (Phase 10). Four methods — stop, rename
+   aside, rename back, start — on their own interface, reachable from one third
+   service. It creates nothing and **removes nothing**, and its two rename
+   operations are one-way: the aside rename requires a rollback marker in the
+   new name and the restore rename refuses any HarborMaster-derived marker.
 
-Neither changes consequence 1. The process was already root-equivalent by virtue
-of holding the socket at all, and the defence was never "HarborMaster only
-reads". What they change is the set of things a bug in HarborMaster's own logic
-could cause, so that set is bounded deliberately and narrowly:
+None of them changes consequence 1. The process was already root-equivalent by
+virtue of holding the socket at all, and the defence was never "HarborMaster
+only reads". What they change is the set of things a bug in HarborMaster's own
+logic could cause, so that set is bounded deliberately and narrowly:
 
 - Both capabilities are `nil` unless the deployment opts in, so a default
   HarborMaster holds no write access at all — absent, not merely unused.
@@ -63,6 +68,12 @@ stop a running container. The mitigation is not that it cannot happen — it is
 that the original container is preserved through every failure path, that the
 outcome is recorded before the original is removed, and that a person is handed
 the exact steps to restore service. See R27 to R31.
+
+**What Phase 10 adds to that cost.** A second path that can stop a running
+container — the rollback — and it stops the container that is currently serving.
+It is bounded the same way and in two further respects: it acts only on an
+arrangement HarborMaster itself created and recorded, and it cannot destroy the
+container it displaces. See R42 to R45.
 
 ---
 
@@ -282,11 +293,22 @@ What is NOT bounded, and is stated rather than mitigated: the container is
 unavailable while the replacement starts and is verified, which is up to
 `EXECUTION_STARTUP_TIMEOUT` (five minutes by default). Recorded as R27.
 
-The design decision worth defending explicitly is the absence of rollback. An
-automatic undo would run at exactly the moment HarborMaster has demonstrated
-that its model of the host is wrong, and it would run unattended. Preserving
-both containers and handing a person precise instructions is slower and less
-impressive, and it cannot make a bad situation worse.
+The design decision worth defending explicitly is the absence of AUTOMATIC
+rollback. An automatic undo would run at exactly the moment HarborMaster has
+demonstrated that its model of the host is wrong, and it would run unattended.
+Preserving both containers and handing a person precise instructions is slower
+and less impressive, and it cannot make a bad situation worse.
+
+**Manual rollback (Phase 10) does not weaken that.** It is the same decision
+with the person put back in: a rollback happens only when an operator asks for
+it, on one recorded recreation at a time, after HarborMaster has re-verified
+both container identities against the live host. It derives every identity from
+its own record of that recreation — the request body has an execution id and
+nothing else — and it removes nothing, so the failed replacement remains
+available as evidence. When a rollback itself fails after changing the host it
+behaves exactly as a failed recreation does: it stops, preserves both
+containers, records the checkpoint, and writes manual steps. It never guesses
+which container should serve traffic. The new risks are recorded as R42 to R45.
 
 **The change planning surface adds no capability**, which is the point worth
 stating. `POST /plans/generate` is the third asynchronous "do a pass" endpoint,
@@ -527,6 +549,10 @@ Ordered by severity. These are accepted, not solved.
 | R39 | **An authenticated account can grow the audit table by provoking denials.** Every 403 is recorded, and a read is not rate limited, so a low-privilege account can add rows as fast as it can make requests | **Low** | Every alternative is worse. Dropping repeated denials would blind the log to exactly the pattern it exists to show -- somebody looking for a way in. Capping total rows would let an attacker push out older security records, which is evidence destruction. Rate-limiting reads would let a viewer exhaust an operator's budget | Rows are small and bounded in every field; retention prunes on two cutoffs; the actor is recorded on every row, so the flooding is attributable and the account can be disabled. Reaching a meaningful size needs millions of authenticated requests, which is a louder problem than the table |
 | R40 | **A stream can deliver up to one heartbeat's worth of events after its session ends.** The re-authorization runs on the heartbeat, not on every frame | **Low** | Checking on every frame would put an indexed lookup on the hot path of a burst, and the window is the heartbeat interval -- 30 seconds by default -- of already-redacted event metadata to a client that held a valid session moments earlier | Lower `HARBORMASTER_EVENTS_STREAM_HEARTBEAT` to narrow it; the frames carry no secret, because redaction happens before storage |
 | R41 | **On a plain-HTTP loopback deployment the session cookie is not marked Secure.** A browser refuses to send a Secure cookie over `http://127.0.0.1` on older versions, so marking it would break sign-in for the default standalone deployment | **Low** | The traffic never leaves the machine, so there is no network to intercept it on. The case that mattered -- plain HTTP from ANYWHERE ELSE -- was closed by this audit: a request whose peer is not loopback now yields a Secure cookie regardless of configuration, which makes an exposed plain-HTTP deployment fail loudly at sign-in instead of quietly shipping the token in the clear | Terminate TLS, or set `HARBORMASTER_COOKIE_SECURE=true` behind a proxy; the corresponding CodeQL alert is recorded in the release process with the same reasoning rather than suppressed |
+| R42 | **An operator can take a container down by rolling one back.** With `ROLLBACK_ENABLED=true`, an account holding `rollback:create` can stop the container that is currently serving and start the one it replaced | **Medium if enabled** | Undoing a bad recreation is the feature, and the account that can do it is the account an administrator decided should. What remains is that an operator's mistake, or a compromised operator session, reaches a running service | Off by default, and refused at startup unless recreation is also on; needs `rollback:create`, which a viewer does not hold; the request names an EXECUTION and cannot name a container, so it can only undo an arrangement HarborMaster itself created and recorded; one active rollback per container and one successful rollback per recreation, both by unique index; `ROLLBACK_MAX_CONCURRENT` defaults to 1; the UI requires the container's name to be typed; the request and the outcome are both audited against the account that asked |
+| R43 | **A container is unavailable while a rollback runs, and the gap is real.** The replacement is stopped BEFORE the original is started, and the original must then start and pass its checks — up to `ROLLBACK_STARTUP_TIMEOUT`, five minutes by default | **Medium** | There is no overlap to remove: two containers cannot hold one name, and starting the original first would mean a name collision at exactly the wrong moment. Removing the wait would mean removing the verification | Stated in the confirmation dialogue, the API description, and this document rather than mitigated away; tune `ROLLBACK_STARTUP_TIMEOUT` down for fast-starting services; a container with a health check gets a verdict as soon as the daemon has one |
+| R44 | **A failed rollback leaves two containers on the host and does not restore service by itself** | **Medium** | The same decision as R30, and for the same reason: HarborMaster has just demonstrated that its model of the host is wrong, and correcting it automatically at that moment is the unattended mutation the whole design avoids. It never guesses which container should serve traffic | Nothing is ever removed, so both containers remain; the checkpoint records exactly which mutations completed; the record carries a `recovery` plan naming both containers by name and id with the exact commands; failures that changed the host are counted separately as `needsAttention` and retention never prunes them |
+| R45 | **A rollback restores a container that may itself be the reason the recreation happened.** HarborMaster verifies that the original is the container the record names and comes back configured as it was; it cannot know whether running it is a good idea | **Low** | Judging that would mean re-running the change-planning assessment in reverse, on evidence gathered for a different question. The operator asking for the rollback is the one who knows why | The confirmation shows both container ids and both image references so the decision is made against content rather than a label; the image the original returns to is displayed before the request is sent; the whole history is retained, so a rollback of a rollback is a decision an operator makes with the same information |
 | R14 | **A wedged background task can be abandoned at shutdown** once the grace period elapses | **Low** | An unbounded wait is not recoverable; an abandoned SQLite transaction is rolled back by the database | Logged at error level with what was abandoned; raise `SHUTDOWN_TIMEOUT` |
 
 ---

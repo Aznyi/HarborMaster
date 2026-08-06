@@ -283,6 +283,26 @@ func (s *Server) routeTable() []route {
 		{http.MethodGet, p + "/executions/{id}", requires(domain.PermExecutionRead), s.handleExecutionDetail, ""},
 		{"", p + "/executions/{id}", requires(domain.PermExecutionRead), nil, "GET, HEAD"},
 
+		// ---- manual rollback ------------------------------------------------
+		//
+		// THE OTHER PERMISSION THAT INTERRUPTS A SERVICE. PermRollbackCreate
+		// stops the container a recreation put in place and starts the one it
+		// replaced.
+		//
+		// Operator-level, like recreation. The person who has to undo a bad
+		// recreation is the person who performed it, and requiring an
+		// administrator would make the safest response the slowest one.
+
+		{http.MethodGet, p + "/rollbacks", requires(domain.PermRollbackRead), s.handleRollbacks, ""},
+		{http.MethodPost, p + "/rollbacks", requires(domain.PermRollbackCreate), s.handleRollbackCreate, ""},
+		{"", p + "/rollbacks", requires(domain.PermRollbackRead), nil, "GET, HEAD, POST"},
+
+		{http.MethodPost, p + "/rollbacks/{id}/cancel", requires(domain.PermRollbackCancel), s.handleRollbackCancel, ""},
+		{"", p + "/rollbacks/{id}/cancel", requires(domain.PermRollbackCancel), nil, "POST"},
+
+		{http.MethodGet, p + "/rollbacks/{id}", requires(domain.PermRollbackRead), s.handleRollbackDetail, ""},
+		{"", p + "/rollbacks/{id}", requires(domain.PermRollbackRead), nil, "GET, HEAD"},
+
 		// ---- user administration -------------------------------------------
 
 		{http.MethodGet, p + "/users", requires(domain.PermUserManage), s.handleUsers, ""},

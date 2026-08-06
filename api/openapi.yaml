@@ -335,13 +335,18 @@ tags:
       attachment) AND the success has been recorded durably. Any failure before
       that leaves both containers on the host.
 
-      **There is no rollback.** A failure after the first mutation quarantines
-      the replacement, preserves both containers, and records a manual recovery
-      plan of fixed-vocabulary steps. HarborMaster never executes that plan:
-      there is no endpoint that runs one and no capability behind one. An
-      automatic undo would be another unattended mutation, performed at exactly
-      the moment HarborMaster has demonstrated that its model of the host is
-      wrong.
+      **There is no AUTOMATIC rollback.** A failure after the first mutation
+      quarantines the replacement, preserves both containers, and records a
+      manual recovery plan of fixed-vocabulary steps. HarborMaster never
+      executes that plan: there is no endpoint that runs one and no capability
+      behind one. An automatic undo would be another unattended mutation,
+      performed at exactly the moment HarborMaster has demonstrated that its
+      model of the host is wrong.
+
+      A recreation that SUCCEEDED, or that failed leaving the original parked,
+      can be undone by an operator asking for it -- see the Manual rollback
+      tag. That is a separate endpoint, a separate permission, a separate
+      record, and it happens only when a person requests it.
 
       **Configuration is reproduced, secrets are not re-derived.** The
       container's live configuration is read into a value the execution service
@@ -356,6 +361,46 @@ tags:
 
       Off by default, and refused at startup unless image acquisition is on too:
       an execution names an acquisition, and with acquisition off there can
+      never be one to name.
+
+  - name: Manual rollback
+    description: |
+      Returning ONE container to the state a recreation replaced.
+
+      **HarborMaster's second-largest privilege, and the one an operator reaches
+      for when the first went wrong.** It stops the replacement a recreation
+      created and starts the original that recreation preserved.
+
+      **The request names an EXECUTION and nothing else.** No container, no
+      name, no image, no snapshot, no Docker parameter. Unknown fields are
+      rejected rather than ignored. Both container identities, the production
+      name, and the image identity are read from HarborMaster's own record of
+      that recreation and re-verified against the live host before anything
+      moves.
+
+      **It causes downtime.** The replacement is stopped before the original is
+      started, and the original has to start and pass its checks before service
+      resumes. This is stated in the confirmation the UI shows and in every
+      description below, because it is the fact an operator most needs before
+      approving.
+
+      **It removes nothing.** The replacement is stopped and renamed to
+      `<name>.hm-rolledback-<rollbackId>` and stays on this host as the evidence
+      of why the recreation was backed out. The rollback capability has four
+      methods -- stop, rename aside, rename back, start -- and no remove.
+
+      **One successful rollback per recreation, ever.** Enforced by a unique
+      index rather than by a check the service performs and hopes to win. A
+      refused rollback does not consume that chance: the point of a refusal is
+      that nothing happened.
+
+      **Nothing happens on a schedule, on a fleet, or automatically.** Every
+      rollback is requested by a person, acts on one execution's two containers,
+      and stops at its first failure with both containers preserved and a manual
+      recovery plan recorded.
+
+      Off by default, and refused at startup unless container recreation is on
+      too: a rollback names an execution, and with recreation off there can
       never be one to name.
 
   - name: Change plans
@@ -3294,6 +3339,29 @@ paths:
                   events:
                     type: array
                     items: { $ref: "#/components/schemas/ExecutionEvent" }
+                  rollback:
+                    allOf:
+                      - $ref: "#/components/schemas/RollbackEligibility"
+                    description: |
+                      Whether this recreation LOOKS like one that can be undone,
+                      and if not, why.
+
+                      **Advice only, and computed from records alone.** It
+                      issues no Docker call, so it cannot say whether the two
+                      containers are still where the record puts them — this
+                      endpoint is polled, and letting a read turn one HTTP
+                      request into four privileged socket calls would make it a
+                      denial-of-service amplifier.
+
+                      Nothing is lost by that. `POST /rollbacks` runs the full
+                      assessment against the live host before it accepts
+                      anything, and runs it again immediately before the first
+                      mutation. A caller that saw `eligible: true` here can
+                      still be refused there, with a specific reason.
+
+                      ABSENT when manual rollback is not configured, which is
+                      distinct from a refusal: a check that was never performed
+                      establishes nothing.
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "404":
@@ -3361,6 +3429,286 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ExecutionUnavailable"
+
+
+  # ------------------------------------------------------- manual rollback --
+
+  /api/v1/rollbacks:
+    get:
+      tags: [Manual rollback]
+      summary: Recreations an operator has undone
+      operationId: listRollbacks
+      description: |
+        Every rollback attempt, newest first, with the estate aggregate.
+
+        The ordering puts work that NEEDS ATTENTION above everything else: a
+        rollback that failed after changing this host is what an operator opens
+        this page to find, and it is the case where a container may currently be
+        down.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: executionId
+          in: query
+          description: Only rollbacks of one recreation.
+          schema:
+            type: string
+            pattern: "^exec_[0-9a-f]{20}$"
+        - name: state
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/RollbackState" }
+        - name: failure
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/RollbackFailure" }
+        - name: activeOnly
+          in: query
+          description: Only work still in progress.
+          schema: { type: boolean }
+        - name: needsAttention
+          in: query
+          description: |
+            Only failures that left containers on this host for an operator to
+            settle. Selected from the CHECKPOINT rather than from the failure
+            classification, because the checkpoint is what says whether anything
+            was actually changed.
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: A page of rollbacks, with the estate aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Rollback" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/RollbackSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/RollbackUnavailable"
+
+    post:
+      tags: [Manual rollback]
+      summary: Undo one recreation
+      operationId: requestRollback
+      description: |
+        **Stops the container a recreation put in place and starts the one it
+        replaced.** Answers 202 immediately; the work runs in the background.
+
+        ### This causes downtime
+
+        The replacement is stopped BEFORE the original is started, and the
+        original has to start and pass its checks before service resumes. There
+        is no overlap and no draining.
+
+        ### What it accepts
+
+        An EXECUTION ID, and optionally an idempotency key. **No container id,
+        no container name, no image, no digest, no snapshot, no Docker
+        parameter, and no force.** Unknown fields are rejected rather than
+        ignored. Both container identities come from HarborMaster's own record
+        of that recreation, so aiming a rollback at a container of the caller's
+        choosing is structurally impossible rather than merely checked for.
+
+        ### What it checks first
+
+        The full preflight runs SYNCHRONOUSLY before the 202, so a refusal is
+        immediate rather than arriving as a failed background job, and it runs
+        AGAIN immediately before the first mutation. Every prerequisite is
+        re-read: the execution exists and has settled, its checkpoint left an
+        arrangement that can be undone, the original was not removed, no
+        successful rollback of it exists, no rollback or recreation of this
+        container is in flight, the daemon answers, the inventory is fresh, both
+        containers are still present under the names and images the record
+        gives, the production name is free or held by the replacement, and the
+        original's configuration can be projected so the result can be proved.
+
+        A refusal is a 409 (or 404 / 503 where the situation warrants) carrying a
+        `refusal` field naming the specific check that said no.
+
+        ### What happens to the containers
+
+        The replacement is STOPPED and RENAMED to
+        `<name>.hm-rolledback-<rollbackId>`. **It is not removed** -- it is the
+        evidence of why the recreation was backed out, and the rollback
+        capability has no remove method. The original is then renamed back to
+        the production name and started, and proved: health or stability, image
+        identity, configuration preservation, network attachment. A rollback is
+        recorded as succeeded only when all four pass.
+
+        On any failure after that first stop, both containers are left in place,
+        the checkpoint records exactly what was done, and a manual `recovery`
+        plan is written. **HarborMaster never guesses which container should
+        serve traffic**, and it does not try to put things back: it has just
+        demonstrated that its model of the host is wrong.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackRequest" }
+      responses:
+        "202":
+          description: The rollback was accepted and runs in the background.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollback" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          description: |
+            The recreation is not recorded here. Carries the specific refusal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackRefusalResponse" }
+        "409":
+          description: |
+            A preflight check refused. The recreation left nothing to undo, the
+            original is gone or is not the container the record describes, this
+            recreation has already been rolled back, or a rollback or recreation
+            for this container is already running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackRefusalResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          description: |
+            Too many rollbacks are already running, or the write rate limit was
+            exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackRefusalResponse" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/RollbackUnavailable"
+
+  /api/v1/rollbacks/{id}:
+    get:
+      tags: [Manual rollback]
+      summary: One rollback, with its checkpoint trail
+      operationId: getRollback
+      description: |
+        One rollback and the bounded record of what happened to it, oldest entry
+        first.
+
+        The record carries the CHECKPOINT, which is the field to read first: it
+        says what is true of the host, as opposed to `state`, which says what
+        HarborMaster was doing. After an interrupted rollback only the first
+        question matters.
+
+        When a failure left containers behind, `recovery` carries the manual
+        steps. It is text. Nothing executes it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: |
+            A server-generated rollback identifier, `rbk_` followed by twenty
+            hexadecimal characters.
+          schema:
+            type: string
+            pattern: "^rbk_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The rollback and its checkpoint trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rollback, events]
+                properties:
+                  rollback: { $ref: "#/components/schemas/Rollback" }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/RollbackEvent" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/RollbackUnavailable"
+
+  /api/v1/rollbacks/{id}/cancel:
+    post:
+      tags: [Manual rollback]
+      summary: Stop a rollback that has not yet changed anything
+      operationId: cancelRollback
+      description: |
+        Stops a rollback an operator no longer wants. It takes no body.
+
+        **Only before the first mutation.** A rollback in `queued` or
+        `validating` has changed nothing on this host, so stopping it is free.
+        From `stoppingReplacement` onward the replacement has been stopped, and
+        abandoning that would leave a container an operator depends on neither
+        running nor recorded as down -- so the only safe direction is forwards,
+        through verification, to a recorded conclusion.
+
+        A rollback past that point answers 409. The message says why rather than
+        only refusing, because "you cannot cancel this" invites an operator to
+        try harder while "the replacement has already been stopped" tells them
+        what to do next.
+
+        A rollback that finished between the request and the write is not an
+        error: the caller is told what the record actually says.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^rbk_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The rollback, now cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rollback" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: |
+            The rollback has already finished, or has passed the point where
+            stopping it would leave the host in an unrecorded state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/RollbackUnavailable"
 
 
   # ------------------------------------------------------------ identity --
@@ -4199,6 +4547,24 @@ components:
         The READ endpoints stay available and answer 200 with `summary.enabled`
         set to false, so records already stored remain readable. They answer 503
         only when the feature is not wired at all.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    RollbackUnavailable:
+      description: |
+        Manual rollback is not available in this deployment.
+
+        The default, and the strongest form of "off" HarborMaster has: when the
+        feature is disabled the Docker adapter's rollback capability is never
+        handed to anything, so the process holds no ability to stop, rename, or
+        start a container through this path at all. The capability is ABSENT
+        rather than merely unused, and no request can turn it back on.
+
+        Every rollback route answers 503 in that case, including the reads. A
+        404 would say the feature does not exist and send an operator looking
+        for the wrong thing.
       content:
         application/json:
           schema:
@@ -7534,6 +7900,332 @@ components:
           description: |
             Whether recreation is switched on at all, so an empty list is not
             read as "nothing has ever been recreated".
+
+    # ------------------------------------------------------ manual rollback --
+
+    RollbackState:
+      type: string
+      description: |
+        Where one rollback has got to.
+
+        `queued` and `validating` change nothing on this host and are freely
+        cancellable. **`stoppingReplacement` is the mutation point**: from there
+        the replacement has been stopped and the rollback must reach a recorded
+        conclusion.
+
+        There is no `interrupted` state. A rollback a restart abandoned settles
+        as `failed` with `failure: interrupted`, which is how a recreation
+        settles the same condition -- two vocabularies for one situation would
+        let the two recovery pages disagree about what "interrupted" means.
+      enum:
+        - queued
+        - validating
+        - stoppingReplacement
+        - restoringName
+        - startingOriginal
+        - verifyingOriginal
+        - succeeded
+        - failed
+        - cancelled
+        - expired
+
+    RollbackCheckpoint:
+      type: string
+      description: |
+        What is TRUE OF THE HOST.
+
+        **The field to read first on any failed or interrupted record.** `state`
+        says what HarborMaster was DOING; this says what it had actually
+        finished doing and durably recorded. A checkpoint is written after each
+        Docker mutation completes and before the next is attempted, and an
+        uncertain mutation is never repeated.
+
+        An empty value with `mutatedAt` unset means nothing was changed. An
+        empty value with `mutatedAt` SET means a stop was issued and never
+        confirmed, which is the one case where HarborMaster does not know where
+        the containers are.
+
+        `originalStarted` is deliberately not an interruption of service: the
+        container is running under its own name. What is missing is the proof
+        that it is running correctly.
+      enum:
+        - ""
+        - replacementStopped
+        - replacementParked
+        - originalRestored
+        - originalStarted
+        - originalVerified
+
+    RollbackFailure:
+      type: string
+      description: |
+        Why a rollback did not succeed.
+
+        A CLASSIFICATION, never a daemon string. `preflight` happens before the
+        mutation point and leaves the host untouched; for everything else the
+        CHECKPOINT, not this field, is what says whether anything was changed.
+      enum:
+        - preflight
+        - stop
+        - rename
+        - start
+        - healthTimeout
+        - unhealthy
+        - notStable
+        - imageMismatch
+        - preservation
+        - network
+        - dockerUnavailable
+        - timeout
+        - interrupted
+        - persistence
+        - internal
+
+    RollbackRefusal:
+      type: string
+      description: |
+        Which preflight check refused.
+
+        A closed vocabulary, so a client can branch on it rather than parse
+        prose. A refusal means the safety model worked: nothing on this host was
+        changed.
+      enum:
+        - disabled
+        - executionMissing
+        - executionActive
+        - nothingToRollBack
+        - originalRemoved
+        - checkpointUncertain
+        - alreadyRolledBack
+        - conflict
+        - limit
+        - originalMissing
+        - originalIdentity
+        - replacementMissing
+        - replacementIdentity
+        - nameUnavailable
+        - inventoryStale
+        - dockerUnavailable
+        - unverifiable
+
+    RollbackRefusalResponse:
+      type: object
+      description: |
+        A refusal, carrying the specific check that said no.
+
+        The extra field is what lets a client render the right remedy rather
+        than a generic conflict: "the original is gone" and "somebody else is
+        already rolling this back" call for completely different responses.
+      required: [error, refusal]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              description: |
+                HarborMaster's own fixed phrase for this refusal. Never a daemon
+                or registry string.
+        refusal: { $ref: "#/components/schemas/RollbackRefusal" }
+        requestId: { type: string }
+
+    RollbackVerification:
+      type: object
+      description: |
+        What each proof concluded about the RESTORED ORIGINAL.
+
+        All four must read `passed` for a rollback to be recorded as succeeded.
+        **`unknown` is never a pass**: a proof that could not be performed
+        established nothing.
+
+        The preservation comparison is against the projection taken BEFORE the
+        rollback moved anything, so what it proves is that the rollback did not
+        change the container it restored. The image comparison is against what
+        the RECREATION recorded the original as running, which is what makes
+        "this is the container that was replaced" a checked fact rather than an
+        assumption carried forward.
+      properties:
+        health: { $ref: "#/components/schemas/VerificationResult" }
+        healthState:
+          type: string
+          enum: ["", none, starting, healthy, unhealthy]
+        healthChecked:
+          type: boolean
+          description: |
+            False means `health` reflects the STABILITY window rather than a
+            declared health check, which is weaker evidence and is recorded as
+            such.
+        stabilitySeconds: { type: integer }
+        image: { $ref: "#/components/schemas/VerificationResult" }
+        preservation: { $ref: "#/components/schemas/VerificationResult" }
+        preservationReport: { $ref: "#/components/schemas/PreservationReport" }
+        network: { $ref: "#/components/schemas/VerificationResult" }
+
+    RollbackRequest:
+      type: object
+      description: |
+        Everything a caller may supply.
+
+        **Two fields, and neither names a container.** There is nowhere here to
+        put a container id, a name, an image, a snapshot, or any Docker
+        parameter, which is a stronger guarantee than a check that rejects one.
+        Unknown fields are rejected rather than ignored.
+      required: [executionId]
+      properties:
+        executionId:
+          type: string
+          pattern: "^exec_[0-9a-f]{20}$"
+          description: |
+            The recreation to undo. Everything about what will happen is derived
+            from HarborMaster's own record of it.
+        requestKey:
+          type: string
+          maxLength: 100
+          description: |
+            An optional idempotency key, so a retried request -- or a
+            double-clicked button -- returns the rollback it already made rather
+            than starting a second one.
+
+    Rollback:
+      type: object
+      description: |
+        One immutable record of one manual rollback.
+
+        Read `checkpoint` before `state` on anything that did not succeed.
+      required: [rollbackId, executionId, containerName, originalId, replacementId, state]
+      properties:
+        rollbackId:
+          type: string
+          pattern: "^rbk_[0-9a-f]{20}$"
+        executionId:
+          type: string
+          pattern: "^exec_[0-9a-f]{20}$"
+        containerName:
+          type: string
+          description: The production name both containers contend for.
+        originalId:
+          type: string
+          description: The preserved original, by full container id.
+        parkedName:
+          type: string
+          description: |
+            `<name>.hm-old-<executionId>` -- where the recreation left the
+            original, and where to find it if a rollback failed before renaming
+            it back.
+        replacementId:
+          type: string
+          description: The container the recreation created, by full container id.
+        replacementParkedName:
+          type: string
+          description: |
+            `<name>.hm-rolledback-<rollbackId>` -- where the rollback moved the
+            replacement to. Empty until that rename has happened AND been
+            recorded.
+        originalImage: { type: string }
+        originalImageId: { type: string }
+        replacementImage:
+          type: string
+          description: What the recreation moved the container onto, so an
+            operator sees what is being backed out of.
+        state: { $ref: "#/components/schemas/RollbackState" }
+        checkpoint: { $ref: "#/components/schemas/RollbackCheckpoint" }
+        failure: { $ref: "#/components/schemas/RollbackFailure" }
+        refusal: { $ref: "#/components/schemas/RollbackRefusal" }
+        message:
+          type: string
+          description: |
+            HarborMaster's own sentence about the outcome. **Never a daemon or
+            registry string.**
+        verification: { $ref: "#/components/schemas/RollbackVerification" }
+        recovery:
+          allOf:
+            - $ref: "#/components/schemas/RecoveryPlan"
+          description: |
+            The manual steps, present when a failure left containers on this
+            host. It is text. **HarborMaster never executes it.**
+        requestedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        mutatedAt:
+          type: string
+          format: date-time
+          description: |
+            When the host was FIRST changed. Absent means it never was, which is
+            the single most useful fact on a failed record.
+        completedAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            When a still-queued request is abandoned. An expired request never
+            started and changed nothing.
+        requestKey: { type: string }
+        requestedBy:
+          allOf:
+            - $ref: "#/components/schemas/Requester"
+          description: |
+            The account that asked for this. Carried on the record so the
+            OUTCOME can be attributed by the worker that finishes the job,
+            minutes later, with no request and no session of its own.
+
+    RollbackEvent:
+      type: object
+      description: |
+        One bounded entry in a rollback's audit trail.
+
+        Records STATE TRANSITIONS and CHECKPOINTS, every one written by
+        HarborMaster about its own action from a fixed vocabulary. Nothing
+        external influences how many rows one rollback can produce.
+      required: [state, at]
+      properties:
+        state: { $ref: "#/components/schemas/RollbackState" }
+        checkpoint: { $ref: "#/components/schemas/RollbackCheckpoint" }
+        detail: { type: string }
+        at: { type: string, format: date-time }
+
+    RollbackSummary:
+      type: object
+      description: The estate aggregate.
+      properties:
+        total: { type: integer }
+        active: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        needsAttention:
+          type: integer
+          description: |
+            Failures that left containers on this host for an operator to
+            settle. The number that matters most on this page.
+
+    RollbackEligibility:
+      type: object
+      description: |
+        Whether one recreation LOOKS like one that can be undone, and if not,
+        why.
+
+        **Advice, not permission, and computed from records alone.** It reflects
+        HarborMaster's own record of the recreation and of any rollbacks already
+        made from it. It issues no Docker call, so it says nothing about whether
+        the containers are still on the host — see the `rollback` field on the
+        execution detail for why.
+
+        The identities are filled in even on a refusal, when they are known, so
+        a refusal page can say WHICH containers it is talking about.
+      required: [eligible]
+      properties:
+        eligible: { type: boolean }
+        refusal: { $ref: "#/components/schemas/RollbackRefusal" }
+        reason:
+          type: string
+          description: The refusal in operator-facing words.
+        containerName: { type: string }
+        originalId: { type: string }
+        parkedName: { type: string }
+        replacementId: { type: string }
+        replacementImage: { type: string }
+        originalImage: { type: string }
 
     RiskBand:
       type: string

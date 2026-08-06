@@ -68,6 +68,9 @@ type Server struct {
 	// this API that change something that is RUNNING. Nil in a deployment that
 	// has not opted in, which yields a 503 rather than a broken route.
 	executions ExecutionService
+	// rollbacks answers the rollback endpoints. Nil in a deployment with
+	// rollback disabled, which yields 503 rather than a broken route.
+	rollbacks RollbackService
 
 	// auth resolves sessions and answers the authentication endpoints. A nil
 	// auth serves the public routes and refuses everything else with 503 --
@@ -213,6 +216,13 @@ type Options struct {
 	// id and nothing else, and the service revalidates every prerequisite
 	// before touching Docker.
 	Executions ExecutionService
+	// Rollbacks answers the rollback endpoints -- returning a container to the
+	// state a recreation moved it from. Nil disables them.
+	//
+	// Note what this interface CANNOT reach: the rollback service holds the
+	// Docker capability, and an architecture test fails the build if this
+	// package names it.
+	Rollbacks RollbackService
 
 	// Auth resolves sessions and answers the authentication endpoints.
 	//
@@ -280,6 +290,7 @@ func NewServer(opts Options) *Server {
 
 		acquisitions: opts.Acquisitions,
 		executions:   opts.Executions,
+		rollbacks:    opts.Rollbacks,
 
 		auth:    opts.Auth,
 		users:   opts.Users,

@@ -143,6 +143,19 @@ func (s *ExecutionService) verifyImage(
 // preservation check, which compares the sets exactly; this narrower check
 // exists to give the security-relevant half its own verdict.
 func (s *ExecutionService) verifyNetworks(original, replacement domain.ContainerDetail) bool {
+	return networksPreserved(original, replacement)
+}
+
+// networksPreserved reports whether `after` carries every attachment `before`
+// had.
+//
+// Shared by recreation and rollback. Both ask the same question about the same
+// shape of data -- is this container on the networks it is supposed to be on --
+// and two implementations of it would eventually disagree, which for a
+// security-relevant verdict is worse than either being slightly wrong.
+func networksPreserved(before, after domain.ContainerDetail) bool {
+	original, replacement := before, after
+
 	expected := make(map[string][]string, len(original.Networks))
 	for _, attachment := range original.Networks {
 		expected[attachment.NetworkName] = attachment.Aliases

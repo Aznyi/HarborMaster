@@ -116,6 +116,16 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
 type executionDetailResponse struct {
 	Execution domain.Execution        `json:"execution"`
 	Events    []domain.ExecutionEvent `json:"events"`
+	// Rollback reports whether this recreation can be undone, and if not, why.
+	//
+	// Answered here rather than on a separate endpoint so the page that offers
+	// the control and the check that governs it cannot disagree. Advice only:
+	// the service asks the same questions again, against the live host,
+	// immediately before it acts.
+	//
+	// Absent when rollback is not configured, which the UI renders as "not
+	// available" rather than as "refused".
+	Rollback *domain.RollbackEligibility `json:"rollback,omitempty"`
 }
 
 // handleExecutionDetail returns one execution.
@@ -139,10 +149,22 @@ func (s *Server) handleExecutionDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, r, s.logger, http.StatusOK, executionDetailResponse{
-		Execution: execution,
-		Events:    events,
-	})
+	response := executionDetailResponse{Execution: execution, Events: events}
+
+	// The eligibility answer is best effort: a failure to compute it must not
+	// stop the page rendering the record, which is the part an operator needs
+	// most when something has gone wrong.
+	if s.rollbacks != nil && s.rollbacks.Enabled() {
+		if eligibility, eligErr := s.rollbacks.Eligible(r.Context(), executionID); eligErr == nil {
+			response.Rollback = &eligibility
+		} else {
+			s.logger.WarnContext(r.Context(), "could not evaluate rollback eligibility",
+				slog.String("executionId", executionID),
+				slog.String("error", eligErr.Error()))
+		}
+	}
+
+	writeJSON(w, r, s.logger, http.StatusOK, response)
 }
 
 // executionRequestBody is the create request.

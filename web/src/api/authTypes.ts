@@ -33,6 +33,7 @@ export type Permission =
   | "plan:read"
   | "acquisition:read"
   | "execution:read"
+  | "rollback:read"
   | "inventory:refresh"
   | "snapshot:create"
   | "drift:annotate"
@@ -44,6 +45,8 @@ export type Permission =
   | "acquisition:cancel"
   | "execution:create"
   | "execution:cancel"
+  | "rollback:create"
+  | "rollback:cancel"
   | "policy:manage"
   | "user:manage"
   | "audit:read";

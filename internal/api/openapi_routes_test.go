@@ -101,6 +101,9 @@ var routedPaths = []string{
 	APIPrefix + "/policy-violations/container/{id}",
 	APIPrefix + "/policy-violations/{id}",
 	APIPrefix + "/policy/evaluate",
+	APIPrefix + "/rollbacks",
+	APIPrefix + "/rollbacks/{id}",
+	APIPrefix + "/rollbacks/{id}/cancel",
 	APIPrefix + "/snapshots",
 	APIPrefix + "/snapshots/{id}",
 	APIPrefix + "/snapshots/{id}/diff",
@@ -113,9 +116,9 @@ var routedPaths = []string{
 	APIPrefix + "/volumes",
 }
 
-// There is no restore, rollback, or apply path, and this is the list that would
-// have to change for one to appear. Phase 3 records configuration and validates
-// whether it could be restored; it does not restore.
+// There is no restore or apply path, and this is the list that would have to
+// change for one to appear. Phase 3 records configuration and validates whether
+// it could be restored; it does not restore.
 //
 // Nor is there an image PULL, delete, prune, or apply path. Phase 6 reads
 // registries to discover that a newer image exists; downloading or applying one
@@ -138,12 +141,21 @@ var routedPaths = []string{
 // carries an acquisition id and an optional idempotency key -- nothing that
 // names a container, an image, or any Docker parameter.
 //
+// The rollback paths are the third, and the narrowest: `POST /rollbacks` undoes
+// ONE recreation, stopping the replacement it created and starting the original
+// it preserved. Its request body carries an execution id and an optional
+// idempotency key -- nothing that names a container, a name, an image, or any
+// Docker parameter, and both container identities are read from HarborMaster's
+// own record of that recreation. It removes nothing: the replacement is stopped,
+// renamed aside, and left on the host as evidence.
+//
 // What is STILL absent, and would have to be added to this literal in a diff a
-// reviewer sees: any path that rolls back, restores, restarts, pauses, execs
-// into, or reconfigures a container; any path that removes or prunes an image
-// or a volume; and any path that acts on more than one container. Each would
-// also have to get past the architecture tests that pin the image mutation
-// surface at one method and the container mutation surface at five.
+// reviewer sees: any path that restores from a snapshot, restarts, pauses, execs
+// into, or reconfigures a container; any path that removes or prunes a
+// container, an image, or a volume; and any path that acts on more than one
+// container. Each would also have to get past the architecture tests that pin
+// the image mutation surface at one method, the container mutation surface at
+// five, and the rollback surface at four.
 //
 // Nor is there a plan APPLY, execute, approve, or schedule path. POST
 // /plans/generate produces HarborMaster's own analysis of HarborMaster's own
@@ -202,6 +214,7 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/plans/generate",
 			APIPrefix + "/acquisitions/{id}/cancel",
 			APIPrefix + "/executions/{id}/cancel",
+			APIPrefix + "/rollbacks/{id}/cancel",
 			APIPrefix + "/auth/login",
 			APIPrefix + "/auth/logout",
 			APIPrefix + "/auth/password",

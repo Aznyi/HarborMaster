@@ -99,6 +99,12 @@ type DB struct {
 	// restart recovery reads instead of guessing from the lifecycle state.
 	Executions *ExecutionRepository
 
+	// Rollbacks holds the audit records for manual rollback -- returning a
+	// container to the state a recreation moved it from. Each row carries the
+	// two container identities and a checkpoint saying what is true of the
+	// host, which is what restart recovery reads instead of guessing.
+	Rollbacks *RollbackRepository
+
 	// Users holds accounts, their password verifiers, and the bootstrap state
 	// that says whether this installation has been claimed.
 	Users *UserRepository
@@ -317,6 +323,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Plans:        &PlanRepository{db: sqlDB},
 		Acquisitions: &AcquisitionRepository{db: sqlDB},
 		Executions:   &ExecutionRepository{db: sqlDB},
+		Rollbacks:    &RollbackRepository{db: sqlDB},
 		Users:        &UserRepository{db: sqlDB},
 		Sessions:     &SessionRepository{db: sqlDB},
 		Audit:        &AuditRepository{db: sqlDB},

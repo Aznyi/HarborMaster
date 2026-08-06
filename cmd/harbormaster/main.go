@@ -570,6 +570,41 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Manual rollback.
+	//
+	// HARBORMASTER'S THIRD AND MOST NARROWLY SCOPED DOCKER CAPABILITY. It can
+	// stop the container a recreation put in place and start the one it
+	// replaced -- and nothing else.
+	//
+	// docker.ContainerRollbacker is handed over here and nowhere else. Its four
+	// methods can stop, rename, and start a container by EXACT ID. It cannot
+	// create and it cannot remove: a rollback that could delete would destroy
+	// the failed replacement, which is the evidence of why the rollback was
+	// needed.
+	//
+	// Off unless the deployment asked for it, and configuration validation
+	// refuses to start with rollback on and recreation off. When disabled the
+	// capability stays nil and the service refuses everything -- ABSENT rather
+	// than merely unused.
+	var rollbacker docker.ContainerRollbacker
+	if cfg.Rollback.Enabled {
+		rollbacker = dockerClient
+	}
+	rollbacks := service.NewRollbackService(service.RollbackOptions{
+		Store:      db.Rollbacks,
+		Evidence:   service.NewRollbackEvidence(db.Executions, db.Inventory),
+		Runtime:    dockerClient,
+		Rollbacker: rollbacker,
+		// The same installation key the snapshots and recreations use. The
+		// rollback's preservation check compares the original against itself
+		// across the operation, and digests produced under a different key are
+		// not comparable.
+		Hasher: hasher,
+		Audit:  auditRecorder,
+		Config: cfg.Rollback,
+		Logger: logger,
+	})
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -611,7 +646,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(11)
+	background.Add(12)
 
 	go func() {
 		defer background.Done()
@@ -648,6 +683,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		executions.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		rollbacks.Run(ctx)
 	}()
 	go func() {
 		defer background.Done()
@@ -695,6 +734,7 @@ func run() error {
 
 		Acquisitions: acquisitions,
 		Executions:   executions,
+		Rollbacks:    rollbacks,
 
 		Auth:       auth,
 		Users:      users,
