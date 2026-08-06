@@ -58,6 +58,11 @@ type Server struct {
 	// yields a 503 rather than a broken route.
 	plans   PlanReader
 	planner PlanGenerator
+
+	// acquisitions answers the image acquisition endpoints -- the only ones in
+	// this API that can change the Docker host. Nil in a deployment that has
+	// not opted in, which yields a 503 rather than a broken route.
+	acquisitions AcquisitionService
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -167,6 +172,11 @@ type Options struct {
 	Plans   PlanReader
 	Planner PlanGenerator
 
+	// Acquisitions is the image acquisition capability. Nil disables the
+	// endpoints entirely, which is the correct behaviour for a deployment that
+	// has not asked for the ability to write to its Docker host.
+	Acquisitions AcquisitionService
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -216,6 +226,8 @@ func NewServer(opts Options) *Server {
 
 		plans:   opts.Plans,
 		planner: opts.Planner,
+
+		acquisitions: opts.Acquisitions,
 
 		now: now,
 
@@ -429,6 +441,26 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET "+APIPrefix+"/plans/{id}", s.handlePlanDetail)
 	mux.HandleFunc(APIPrefix+"/plans/{id}", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// Image acquisition. THE ONLY ENDPOINTS IN THIS API THAT CHANGE THE DOCKER
+	// HOST, and the change is one thing: downloading an approved, digest-pinned
+	// image into the local store.
+	//
+	// No container is touched by any of them. There is deliberately no route
+	// that applies an image, recreates a container, restores one, or removes an
+	// image -- and no capability behind one, so adding a route would not be
+	// enough to build one.
+	mux.HandleFunc("GET "+APIPrefix+"/acquisitions", s.handleAcquisitions)
+	mux.HandleFunc("POST "+APIPrefix+"/acquisitions", s.handleAcquisitionCreate)
+	mux.HandleFunc(APIPrefix+"/acquisitions", s.handleMethodNotAllowed("GET, HEAD, POST"))
+
+	// Three segments, so this never overlaps the two-segment
+	// "/acquisitions/{id}" pattern below.
+	mux.HandleFunc("POST "+APIPrefix+"/acquisitions/{id}/cancel", s.handleAcquisitionCancel)
+	mux.HandleFunc(APIPrefix+"/acquisitions/{id}/cancel", s.handleMethodNotAllowed("POST"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/acquisitions/{id}", s.handleAcquisitionDetail)
+	mux.HandleFunc(APIPrefix+"/acquisitions/{id}", s.handleMethodNotAllowed("GET, HEAD"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)

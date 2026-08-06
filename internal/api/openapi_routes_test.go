@@ -52,6 +52,9 @@ func documentedPaths(t *testing.T) []string {
 // Each entry is exercised below, so a path listed here that the router does not
 // actually serve fails too.
 var routedPaths = []string{
+	APIPrefix + "/acquisitions",
+	APIPrefix + "/acquisitions/{id}",
+	APIPrefix + "/acquisitions/{id}/cancel",
 	APIPrefix + "/containers",
 	APIPrefix + "/containers/{id}",
 	APIPrefix + "/containers/{id}/raw",
@@ -108,6 +111,17 @@ var routedPaths = []string{
 // does not change a container to satisfy one, and adding a route that did would
 // have to be added to this literal in a diff a reviewer sees.
 //
+// The acquisition paths are the ONE exception to "this API cannot change the
+// Docker host", and the exception is exactly one thing: `POST /acquisitions`
+// downloads an approved, digest-pinned image into the local image store.
+//
+// There is still no path that APPLIES an image: nothing recreates, restarts,
+// stops, or reconfigures a container, and nothing removes or prunes an image.
+// A container keeps running the image it was created from. Adding any of those
+// would have to be added to this literal in a diff a reviewer sees -- and would
+// also have to get past the architecture test that keeps the Docker mutation
+// surface at exactly one method.
+//
 // Nor is there a plan APPLY, execute, approve, or schedule path. POST
 // /plans/generate produces HarborMaster's own analysis of HarborMaster's own
 // database -- it pulls nothing and changes no container. Phase 7 assesses a
@@ -162,7 +176,8 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 		case APIPrefix + "/inventory/refresh",
 			APIPrefix + "/policy/evaluate",
 			APIPrefix + "/images/refresh",
-			APIPrefix + "/plans/generate":
+			APIPrefix + "/plans/generate",
+			APIPrefix + "/acquisitions/{id}/cancel":
 			method = http.MethodPost
 		}
 

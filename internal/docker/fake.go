@@ -347,6 +347,12 @@ func (f *Fake) InspectImage(ctx context.Context, id string) (*domain.Image, erro
 	defer f.mu.Unlock()
 
 	f.ImageCalls++
+	// Lazily created: a Fake built as a struct literal without this map would
+	// panic on the first inspection, which is a sharp edge on a double that
+	// several packages construct by hand.
+	if f.ImageCallsByID == nil {
+		f.ImageCallsByID = make(map[string]int)
+	}
 	f.ImageCallsByID[id]++
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -122,6 +122,37 @@ func Classify(err error) FailureKind {
 	}
 }
 
+// isUniqueViolation reports whether an error is a uniqueness constraint
+// refusing a write.
+//
+// Classified from the SQLite result code rather than from message text, for the
+// same reason everything else in this file is: message text is a driver
+// implementation detail, and a check built on it breaks quietly on an upgrade.
+//
+// This is not a failure in the sense the rest of this file means. A unique
+// index doing its job is frequently the CORRECT outcome of a race -- two
+// requests to acquire the same image arrive together, one inserts, and the
+// other must be told that work is already in progress rather than being handed
+// an internal error.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	// The extended code distinguishes which constraint fired; the primary code
+	// says only that one did. Both spellings are accepted because a driver is
+	// entitled to report either.
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_UNIQUE, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+		return true
+	}
+	return sqliteErr.Code()&0xff == sqlite3.SQLITE_CONSTRAINT
+}
+
 // isNotADatabaseMessage catches the driver's own pre-SQLite header rejection.
 //
 // A message check is a last resort and is deliberately narrow: it matches only

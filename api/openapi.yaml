@@ -14,10 +14,18 @@ info:
     implemented yet, and will be added to this document at the same time they
     are added to the server.
 
-    The one endpoint that accepts a write method is
-    `POST /api/v1/inventory/refresh`. It mutates HarborMaster's own records --
-    re-reading the host and replacing what HarborMaster has stored -- and
-    changes nothing on the Docker host.
+    **One exception, added in Phase 8.** `POST /api/v1/acquisitions` downloads
+    an approved, digest-pinned image into the daemon's local image store. That
+    is the entire write capability, and it is worth stating what it still
+    cannot do: it changes no container. A container keeps running the image it
+    was created from, and there is no endpoint anywhere in this API that stops,
+    starts, recreates, or reconfigures one, nor one that removes or prunes an
+    image. Acquisition is off by default and must be enabled deliberately.
+
+    Every other endpoint that accepts a write method mutates HarborMaster's own
+    records only -- `POST /api/v1/inventory/refresh` re-reads the host and
+    replaces what HarborMaster has stored, and changes nothing on the Docker
+    host.
 
     ### Operating the API safely
 
@@ -175,6 +183,40 @@ tags:
       `resolved` are engine-owned: an operator cannot declare a difference
       resolved, because resolution is something the world does rather than
       something a person asserts.
+
+  - name: Image acquisition
+    description: |
+      Downloading an approved image to this host.
+
+      **This is HarborMaster's only ability to change the Docker host**, and the
+      change is one thing: layers arrive in the daemon's local image store.
+
+      **It is not an update.** No container is touched. A container keeps
+      running the image it was created from; an acquired image is another entry
+      in the store beside it. There is no apply, recreate, restart, rollback, or
+      restore endpoint, and no capability behind one -- the Docker adapter's
+      entire mutation surface is a single method, pinned by an architecture
+      test.
+
+      **There is no target parameter.** The request body carries a PLAN ID and
+      an optional idempotency key. No registry, repository, digest, tag,
+      platform, or pull option can be supplied; the target is derived from the
+      change plan and revalidated immediately before the download.
+
+      **Every acquisition is digest-pinned.** A tag can move between the moment a
+      change was approved and the moment it is fetched, so a plan with no
+      resolved digest cannot be acquired at all.
+
+      **The transfer is not the proof.** After a successful pull the image is
+      re-inspected through the read-only path and its digest and platform are
+      compared against what was approved. A mismatch is a failure, recorded with
+      the evidence -- and never retried automatically.
+
+      **Nothing happens on a schedule.** Every acquisition is requested by an
+      operator. HarborMaster never downloads an image on its own.
+
+      Off by default. A deployment gains the ability to write to its Docker host
+      only by asking for it.
 
   - name: Change plans
     description: |
@@ -2612,6 +2654,261 @@ paths:
         "503":
           $ref: "#/components/responses/PlanningUnavailable"
 
+  /api/v1/acquisitions:
+    get:
+      tags: [Image acquisition]
+      summary: Images HarborMaster has downloaded
+      operationId: listAcquisitions
+      description: |
+        Every attempt to acquire an image, newest first, with the estate
+        aggregate.
+
+        Each record is the audit trail of one DOWNLOAD. None of them describes a
+        container being changed, because that operation does not exist.
+
+        The summary carries `enabled`, so an empty list in a deployment that has
+        not opted in is not read as "nothing has ever been downloaded".
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: state
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/AcquisitionState" }
+        - name: failure
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/AcquisitionFailure" }
+        - name: activeOnly
+          in: query
+          description: Only work still in progress.
+          schema: { type: boolean }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [requestedAt, completedAt, state, container, id]
+            default: requestedAt
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of acquisitions, with the estate aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Acquisition" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/AcquisitionSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AcquisitionUnavailable"
+
+    post:
+      tags: [Image acquisition]
+      summary: Download an approved image to this host
+      operationId: requestAcquisition
+      description: |
+        **The only endpoint in this API that changes the Docker host.**
+
+        Downloads the image an approved change plan names into the daemon's
+        local image store, and answers 202 immediately.
+
+        ### What it does not do
+
+        **It does not update the container.** Nothing is stopped, started,
+        recreated, or reconfigured; the container keeps running the image it was
+        created from. Applying the acquired image is an operator's job with
+        their own tooling. There is no endpoint in this API that would do it and
+        no capability behind one.
+
+        ### What it accepts
+
+        A plan id, and optionally an idempotency key. **No registry,
+        repository, digest, tag, platform, or pull option** -- unknown fields
+        are rejected rather than ignored, so a target cannot be smuggled in. The
+        image is derived from the plan.
+
+        ### What it checks first
+
+        The full preflight runs SYNCHRONOUSLY before the 202, so a refusal is
+        immediate rather than arriving as a failed background job, and it runs
+        AGAIN immediately before the download. That second run is what closes
+        the gap between "a plan said this was reasonable" and "we are fetching
+        it": the plan must still be current and still recommend the change, the
+        container must still exist, the registry evidence must be fresh, and the
+        digest must be the one that was approved.
+
+        A refusal is a 409 (or a 404 / 429 / 503 where the situation warrants)
+        carrying a `refusal` field naming the specific check that said no.
+
+        ### After the transfer
+
+        The image is re-inspected through the read-only path and its digest and
+        platform compared against what was approved. A mismatch is recorded as a
+        failure with the evidence, and is never retried automatically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcquisitionRequest" }
+      responses:
+        "202":
+          description: The download was accepted and runs in the background.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Acquisition" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          description: |
+            The change plan or its container no longer exists. Carries the
+            specific refusal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcquisitionRefusalResponse" }
+        "409":
+          description: |
+            A preflight check refused. The world has moved since the plan was
+            written, or an acquisition for this image is already running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcquisitionRefusalResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          description: |
+            Too many acquisitions are already running, or the write rate limit
+            was exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcquisitionRefusalResponse" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AcquisitionUnavailable"
+
+  /api/v1/acquisitions/{id}:
+    get:
+      tags: [Image acquisition]
+      summary: One acquisition, with its audit trail
+      operationId: getAcquisition
+      description: |
+        One acquisition and the bounded record of what happened to it, oldest
+        entry first.
+
+        The trail records state transitions and periodic progress. It is not a
+        copy of the daemon's pull stream: that stream is unbounded and
+        registry-influenced, and every string relayed from it is truncated and
+        stripped of control characters before it is stored.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: |
+            A server-generated acquisition identifier, `acq_` followed by twenty
+            hexadecimal characters.
+          schema:
+            type: string
+            pattern: "^acq_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The acquisition and its audit trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [acquisition, events]
+                properties:
+                  acquisition: { $ref: "#/components/schemas/Acquisition" }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/AcquisitionEvent" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AcquisitionUnavailable"
+
+  /api/v1/acquisitions/{id}/cancel:
+    post:
+      tags: [Image acquisition]
+      summary: Stop a download
+      operationId: cancelAcquisition
+      description: |
+        Stops an acquisition an operator no longer wants.
+
+        This changes nothing on the host beyond ending a transfer partway, which
+        leaves the daemon's image store as it was. It takes no body.
+
+        **Verification cannot be cancelled.** Once a transfer completes the
+        bytes are already on the host, and stopping the confirmation step would
+        leave an unverified image with no record saying so. An acquisition in
+        `verifying` answers 409.
+
+        An acquisition that finished between the request and the write is not an
+        error: the operator's intent was that it stop, and it has.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^acq_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The acquisition, now cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Acquisition" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: |
+            The acquisition has already finished, or has passed the point where
+            stopping it is safe.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AcquisitionUnavailable"
+
 
 components:
   headers:
@@ -2773,6 +3070,24 @@ components:
       description: |
         Drift detection is not configured or is disabled by configuration.
         Records already collected remain readable; only evaluation stops.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    AcquisitionUnavailable:
+      description: |
+        Image acquisition is not available in this deployment.
+
+        Returned by the WRITE endpoints whenever acquisition is switched off,
+        which is the default: a HarborMaster in this state holds no write
+        capability against the Docker host at all -- the capability is absent
+        rather than merely unused.
+
+        The READ endpoints stay available and answer 200 with `summary.enabled`
+        set to false, so records already stored remain readable and an empty
+        list is not mistaken for "nothing has ever been downloaded". They answer
+        503 only when the feature is not wired at all.
       content:
         application/json:
           schema:
@@ -5318,6 +5633,274 @@ components:
           description: |
             The most recent failure was a rate limit, which an operator should
             read very differently from an outage.
+
+    AcquisitionState:
+      type: string
+      description: |
+        Where one acquisition has got to.
+
+        `queued`, `validating`, `pulling` and `verifying` are active; the rest
+        are terminal and nothing moves out of them.
+
+        `succeeded` means the image is present locally and its digest was
+        confirmed. It does NOT mean a container was updated -- no container is
+        touched by any acquisition.
+      enum:
+        - queued
+        - validating
+        - pulling
+        - verifying
+        - succeeded
+        - failed
+        - cancelled
+        - expired
+
+    AcquisitionFailure:
+      type: string
+      description: |
+        Why an acquisition did not succeed.
+
+        `digestMismatch` is the serious one: the image now on the host is not
+        the one that was approved. It is never retried automatically, because
+        repeating a pull that produced the wrong content is how a transient
+        substitution becomes a persistent one.
+
+        `verification` is distinct from a mismatch: the check could not be
+        PERFORMED, which establishes nothing at all.
+      enum:
+        - preflight
+        - dockerUnavailable
+        - registry
+        - transfer
+        - timeout
+        - digestMismatch
+        - platformMismatch
+        - verification
+        - internal
+
+    AcquisitionRefusal:
+      type: string
+      description: |
+        Which preflight check refused.
+
+        A refusal means the safety model WORKED: something about the world no
+        longer matches what was approved. Each value names one way that can
+        happen between a plan being written and its image being fetched.
+      enum:
+        - planMissing
+        - planSuperseded
+        - planStale
+        - recommendation
+        - digestUnavailable
+        - digestChanged
+        - platformUnavailable
+        - restoreReadiness
+        - policyViolation
+        - registryStale
+        - duplicate
+        - dockerUnavailable
+        - limit
+        - targetRefused
+        - disabled
+        - containerMissing
+
+    AcquisitionRefusalResponse:
+      type: object
+      description: |
+        The error envelope plus the specific check that refused, so a client can
+        branch on WHICH check said no without parsing prose.
+      required: [error, refusal]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              description: |
+                HarborMaster's own fixed phrase for this refusal. Never a daemon
+                or registry string.
+        refusal: { $ref: "#/components/schemas/AcquisitionRefusal" }
+        requestId: { type: string }
+
+    AcquisitionTarget:
+      type: object
+      description: |
+        The immutable image an acquisition names, derived entirely from a change
+        plan. There is no request field that supplies any of it.
+      required: [registry, repository, digest]
+      properties:
+        registry:
+          type: string
+          description: The host the image lives on, e.g. `docker.io`.
+        repository:
+          type: string
+          description: The path within it, e.g. `library/nginx`.
+        digest:
+          type: string
+          description: |
+            The manifest digest. Always present: an acquisition without one
+            could fetch content that changed after approval.
+        reference:
+          type: string
+          description: |
+            The familiar form for display, e.g. `nginx:1.27.1`. Never used to
+            perform the download.
+        platform: { $ref: "#/components/schemas/Platform" }
+
+    AcquisitionRequest:
+      type: object
+      description: |
+        An operator's ask. Two fields, and neither names an image.
+
+        Unknown fields are REJECTED rather than ignored, so a registry,
+        repository, digest, tag, or pull option cannot be smuggled in.
+      required: [planId]
+      additionalProperties: false
+      properties:
+        planId:
+          type: string
+          description: The approved change plan. The target comes from it.
+          pattern: "^plan_[0-9a-f]{20}$"
+        requestKey:
+          type: string
+          description: |
+            An optional idempotency key, so a retried request -- or a
+            double-clicked button -- returns the existing record rather than
+            starting a second download. Printable ASCII, at most 100 characters.
+          maxLength: 100
+
+    Acquisition:
+      type: object
+      description: |
+        One immutable record of an attempt to acquire an image.
+
+        Identity, target, and approval are written once. The lifecycle fields
+        advance forwards and stop at a terminal state; a completed acquisition
+        is never rewritten by a later attempt.
+
+        **No field here describes a container being changed**, because that
+        operation does not exist.
+      required:
+        - acquisitionId
+        - planId
+        - containerId
+        - containerName
+        - target
+        - state
+        - requestedAt
+        - expiresAt
+        - planDigest
+      properties:
+        acquisitionId:
+          type: string
+          pattern: "^acq_[0-9a-f]{20}$"
+        planId:
+          type: string
+          description: |
+            The change plan that approved this image. A plain reference: an
+            audit record must survive its plan being pruned.
+        containerId: { type: string }
+        containerName: { type: string }
+        target: { $ref: "#/components/schemas/AcquisitionTarget" }
+        state: { $ref: "#/components/schemas/AcquisitionState" }
+        failure: { $ref: "#/components/schemas/AcquisitionFailure" }
+        message:
+          type: string
+          description: |
+            HarborMaster's own sentence about the outcome, from a fixed
+            vocabulary keyed by `failure`. **Never a daemon error or a registry
+            response**, so a socket path or attacker-influenced string cannot
+            reach a client.
+        refusal: { $ref: "#/components/schemas/AcquisitionRefusal" }
+        acquiredImageId:
+          type: string
+          description: |
+            What VERIFICATION found on the host, as opposed to what was
+            expected. On a mismatch this is the evidence, which is why it is
+            recorded even when it disagrees with the target.
+        acquiredDigest: { type: string }
+        acquiredPlatform: { $ref: "#/components/schemas/Platform" }
+        sizeBytes:
+          type: integer
+          format: int64
+          description: |
+            The local image size from inspection. Authoritative, unlike the
+            transfer's own progress counters.
+        layers:
+          type: integer
+          description: |
+            How many layers the transfer touched. An estimate for display:
+            layers already present locally are never counted.
+        bytesTransferred:
+          type: integer
+          format: int64
+          description: An estimate, for the same reason as `layers`.
+        progress:
+          type: string
+          description: |
+            The most recent status line, e.g. `Downloading`. Relayed by the
+            daemon from the registry, so it is truncated, stripped of control
+            characters, and rate-limited before it is stored.
+        requestedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            When a still-queued request is abandoned. An expired request was
+            never validated and never pulled: running it later would be acting
+            on an approval whose evidence has aged.
+        requestKey: { type: string }
+        planDigest:
+          type: string
+          description: |
+            The plan's input fingerprint AS APPROVED. What the preflight compares
+            against to establish that the evidence has not moved.
+
+    AcquisitionEvent:
+      type: object
+      description: |
+        One bounded entry in an acquisition's audit trail.
+
+        Records state transitions and periodic progress, three times bounded:
+        the adapter rate-limits emission, the service caps its own writes, and
+        the repository caps the stored count per acquisition.
+      required: [state, at]
+      properties:
+        state: { $ref: "#/components/schemas/AcquisitionState" }
+        detail:
+          type: string
+          description: |
+            A short note in HarborMaster's own words, or a sanitised progress
+            status. Rendered as text, never as markup.
+        bytesTransferred: { type: integer, format: int64 }
+        layers: { type: integer }
+        at: { type: string, format: date-time }
+
+    AcquisitionSummary:
+      type: object
+      description: The dashboard aggregate.
+      properties:
+        total: { type: integer }
+        active: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        byState:
+          type: object
+          additionalProperties: { type: integer }
+        byFailure:
+          type: object
+          additionalProperties: { type: integer }
+        lastCompletedAt: { type: string, format: date-time }
+        enabled:
+          type: boolean
+          description: |
+            Whether acquisition is switched on at all, so an empty list is not
+            read as "nothing has ever been downloaded".
 
     RiskBand:
       type: string

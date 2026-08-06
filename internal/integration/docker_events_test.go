@@ -15,9 +15,15 @@
 // ONE THING TO NOTE ABOUT THESE TESTS. The Docker mutations below -- creating
 // containers, networks, volumes -- are performed by shelling out to the `docker`
 // CLI, never through internal/docker. That is deliberate and load-bearing:
-// HarborMaster's adapter has no write path, so a test that needed one would not
-// compile. Seeing the writes go through an external binary is the visible proof
-// that HarborMaster itself mutated nothing.
+// seeing the writes go through an external binary is the visible proof that
+// HarborMaster itself mutated nothing.
+//
+// This used to be enforced by the adapter having no write path at all. Since
+// Phase 8 it has exactly one -- pulling a digest-pinned image -- so the property
+// is now narrower and stated explicitly: nothing in THIS file uses it, and
+// nothing anywhere can use the adapter to touch a container, because no such
+// method exists. acquisition_test.go exercises that one write directly, and
+// asserts that the container count is unchanged either side of it.
 package integration
 
 import (

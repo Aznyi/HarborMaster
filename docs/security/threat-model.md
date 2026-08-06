@@ -32,6 +32,15 @@ Two consequences follow, and they shape everything below:
    *Docker API* read-only: the writes an API request needs are still permitted.
    The deployment documentation says this in the same words.
 
+**As of Phase 8, HarborMaster issues one write to that socket**: pulling an
+approved, digest-pinned image. This does not change consequence 1 — the process
+was already root-equivalent by virtue of holding the socket at all, and the
+defence was never "HarborMaster only reads". What it changes is the set of
+things a bug in HarborMaster's own logic could cause, so that set is deliberately
+tiny: one method, on its own interface, reachable from one service, that adds an
+image to the local store and can remove nothing and touch no container. It is
+off by default.
+
 ---
 
 ## 2. Assets
@@ -123,6 +132,9 @@ largest residual risk in the product.
 | 5 policy read endpoints | GET | Definitions, the rule catalogue, violations, summary, per-container view |
 | `POST /api/v1/plans/generate` | POST | Schedules a plan generation pass and answers 202. Generates HarborMaster's own analysis of HarborMaster's own database: pulls nothing, changes no container, schedules no change. Coalesced and rate limited |
 | 3 plan read endpoints | GET | Plans with the estate summary, one plan, one container's planning view. No PATCH and no DELETE: plans are immutable |
+| `POST /api/v1/acquisitions` | POST | **The only endpoint that changes the Docker host.** Downloads an approved, digest-pinned image into the local image store. Changes no container. Off by default |
+| `POST /api/v1/acquisitions/{id}/cancel` | POST | Stops a download. Changes nothing on the host |
+| 2 acquisition read endpoints | GET | The history and one record with its audit trail |
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
 
@@ -137,6 +149,28 @@ asynchronous evaluate endpoint are what stop it being used to occupy the
 process. Under R1 (no authentication) an attacker who can reach the port can
 also **disable a policy and hide non-compliance from the dashboard** — the
 definition and its history survive, but the report stops being trustworthy.
+
+**The acquisition surface is the significant change in Phase 8**, and it is
+worth being explicit about what an anonymous caller can do with it under R1.
+
+They can cause HarborMaster to download an image to the host — but only an image
+that a current change plan recommends, for a container that exists, from a
+registry the inventory already references, at a digest the registry is currently
+serving. They cannot supply a target: the request body carries a plan id and
+nothing else, and unknown fields are rejected. They cannot cause a container to
+change, because no such capability exists anywhere in the process.
+
+The realistic abuses are therefore resource abuse rather than compromise:
+repeatedly requesting downloads to consume disk or uplink. That is bounded by
+global and per-registry concurrency, a pull timeout, the write rate limiter, the
+duplicate-work index, and the fact that a plan must independently recommend each
+image. An attacker who can reach the port can also **cancel a legitimate
+download**, which is a nuisance rather than a compromise: nothing is left in a
+partial state that HarborMaster reports as acquired.
+
+The disk-consumption risk is real and is recorded as R25. The mitigation an
+operator has today is the one that matters most everywhere else in this document:
+do not expose the port.
 
 **The change planning surface adds no capability**, which is the point worth
 stating. `POST /plans/generate` is the third asynchronous "do a pass" endpoint,
@@ -217,7 +251,13 @@ well-meaning "show the diagnosis in the UI" change.
 
 | Threat | Vector | Mitigation | Residual |
 | --- | --- | --- | --- |
-| **T**ampering | A future method mutates Docker | `TestRuntimeExposesNoMutationMethods` and `TestRuntimeSurfaceIsTheExpectedReadOnlySet` fail the build | Low |
+| **T**ampering | A future method mutates Docker | `TestRuntimeExposesNoMutationMethods` and `TestRuntimeSurfaceIsTheExpectedReadOnlySet` fail the build on the read-only interface; `TestTheMutationSurfaceIsExactlyOneMethod` and `TestTheMutationInterfaceCannotTouchAContainer` fail it on the write interface | Low |
+| **T**ampering | The pull capability is used from somewhere that skips the preflight | `TestTheMutationCapabilityIsNotReferencedOutsideItsOwners` fails the build if any package outside the acquisition service names it | Low |
+| **T**ampering | An attacker aims the pull at content of their choosing | The API accepts a plan id, not a target. The digest comes from the plan and the registry record, both server-side; unknown request fields are rejected | Low |
+| **T**ampering | A tag moves between approval and transfer | Pulls are digest-pinned with no tag-producing branch, and the digest is re-checked immediately before the transfer | Low |
+| **T**ampering | The daemon or registry serves different content than requested | The image is re-inspected read-only after the pull and its digest and platform compared; a mismatch fails closed and is never retried | Low |
+| **D**enial of service | Repeated pulls exhaust disk or saturate the uplink | Global and per-registry concurrency limits, a pull timeout, a request deadline, and a duplicate-work index. Requests are manual and rate limited | Medium |
+| **D**enial of service | A hostile registry floods the progress stream | Bounded in three independent places: the adapter truncates and rate-limits, the service caps its writes, the repository caps stored rows | Low |
 | **I**nfo disclosure | Socket path in an API error | `docker.SanitizeError` maps every failure to a fixed phrase | Low |
 | **I**nfo disclosure | Raw daemon payload reaching a client | Only HarborMaster domain models are serialised; raw inspection is redacted before storage | Low |
 | **D**enial of service | Unbounded inspection concurrency | Worker semaphore, bounded by `INVENTORY_WORKERS` (max 64) | Low |
@@ -330,6 +370,9 @@ Ordered by severity. These are accepted, not solved.
 | R15 | **Anyone who can reach the API can withdraw or disable a policy**, which stops it being evaluated and resolves its open violations | **Medium** | Follows from R1; the policy surface has no separate authentication because HarborMaster has none | The definition and every violation it found are retained, so the change is visible and reversible rather than destructive; loopback bind and an authenticating proxy |
 | R16 | **A policy is only as good as the configuration HarborMaster can see.** Capability rules evaluate declared `capAdd` and cannot see the daemon's default set; `networkAllowlist` evaluates attached networks and cannot distinguish `container:<id>` namespace sharing from having no network | **Medium** | The alternative is hardcoding a claim about a daemon HarborMaster has not asked, which would be confidently wrong rather than honestly narrow | Stated in each rule's catalogue description, in the violation's reason, and in the editor; the network rule fails closed on an empty attachment set |
 | R17 | **Compliance reflects the last inventory refresh, not the live host.** A container changed between refreshes is reported against stale configuration until the next pass | **Low** | Evaluating against the daemon on demand would put a Docker call behind an unauthenticated endpoint | A pass runs after every successful refresh and after a targeted refresh commits; the inventory generation is recorded on every violation |
+| R25 | **An anonymous caller can cause image downloads.** Under R1, anyone who can reach the port can request acquisitions and consume disk space and uplink bandwidth | **Medium** | Follows from R1. The alternative -- requiring a credential HarborMaster does not have a concept of -- is authentication, which is the fix for R1 itself | Off by default; every acquisition needs a plan that independently recommends it; global and per-registry concurrency limits, a pull timeout, a write rate limiter, and a duplicate-work index; loopback bind and an authenticating proxy |
+| R26 | **A pulled image consumes disk that HarborMaster does not reclaim.** There is no delete or prune capability, so acquired images accumulate until an operator removes them | **Low** | Adding image deletion would be a second, larger mutation capability -- one that can destroy something rather than add to it -- and is a worse trade than accumulation | Concurrency limits bound the rate; `docker image prune` is an operator's tool; every acquisition is recorded, so what was downloaded is always attributable |
+| R27 | **A digest mismatch means unapproved content is on the host.** Verification catches it and records it, but the layers are already in the local store | **Low** | The bytes arrive before anything can inspect them; catching it afterwards is the only point at which it CAN be caught | Never reported as acquired, never retried automatically, logged at error level with the evidence; no container is changed, so nothing runs it |
 | R22 | **A risk score is a judgement, not a measurement.** The weights are chosen by people and can be wrong for a given estate; a plan that reads "proceed" is not a guarantee the change is safe | **Medium** | Any risk model has this property, and the alternative — no assessment — leaves an operator with the same decision and less information. Making the weights configurable would make plans irreproducible between deployments, which costs more than it gains | Every factor names the rule that produced it and its contribution, so a verdict is auditable rather than opaque; the planner version is recorded on every plan and a rule change forces regeneration; nothing acts on a plan automatically |
 | R23 | **A plan is only as fresh as its inputs.** It rests on the last inventory refresh, the last registry lookup, and the last drift and policy passes, so a world that moved since any of those is assessed against stale evidence | **Low** | Reading live state would put a Docker call and a registry call behind an unauthenticated endpoint, which is a larger risk than staleness | A pass runs after every successful inventory refresh; each plan records when it was generated and the registry status it rested on; the UI reports a non-OK registry status as `cannot advise` rather than as a verdict |
 | R24 | **The freshness rule can act on a stale clock.** The evaluation time is excluded from the fingerprint deliberately, so an image crossing the 48-hour freshness boundary does not by itself produce a new plan | **Low** | Including a clock would make every fingerprint unique and defeat duplicate suppression entirely, which is what keeps the table from growing on every refresh | Documented at the fingerprint; the next genuine input change regenerates the plan, and the factor is worth 8 points of 100 |

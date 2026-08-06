@@ -87,6 +87,12 @@ type DB struct {
 	// instruction -- nothing executes one, and nothing behind this can.
 	Plans *PlanRepository
 
+	// Acquisitions holds the audit records for image acquisition -- the one
+	// operation in HarborMaster that changes the Docker host. Every row is a
+	// record of a download; none of them describes a container being changed,
+	// because that capability does not exist.
+	Acquisitions *AcquisitionRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -293,6 +299,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Policies:     &PolicyRepository{db: sqlDB},
 		ImageIntel:   &ImageIntelRepository{db: sqlDB},
 		Plans:        &PlanRepository{db: sqlDB},
+		Acquisitions: &AcquisitionRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

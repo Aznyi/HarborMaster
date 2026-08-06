@@ -316,6 +316,61 @@ const (
 	DefaultPlannerRetentionAge  = 90 * 24 * time.Hour
 	DefaultPlannerPruneInterval = 6 * time.Hour
 
+	// Image acquisition defaults.
+	//
+	// This is the one feature that can change the Docker host, so its default
+	// is the conservative one: OFF. A deployment opts in deliberately, and the
+	// bounds below exist to keep an opted-in deployment from being able to
+	// saturate its own disk or a public registry.
+	//
+	// DefaultAcquisitionEnabled is false. Every other feature in HarborMaster
+	// defaults to on because every other feature only reads.
+	DefaultAcquisitionEnabled = false
+	// DefaultAcquisitionRequireSnapshot keeps the restore-readiness gate on. An
+	// operator acquiring an image is usually about to act on it with their own
+	// tooling, and having a recorded configuration to refer back to is the
+	// point of the gate.
+	DefaultAcquisitionRequireSnapshot = true
+
+	// DefaultAcquisitionMaxConcurrent bounds simultaneous transfers. Low,
+	// because each one is a sustained download competing for the same disk and
+	// the same uplink.
+	DefaultAcquisitionMaxConcurrent = 2
+	// DefaultAcquisitionMaxPerRegistry bounds simultaneous transfers against
+	// ONE registry. Anonymous rate limits are shared by egress address, so a
+	// host that hammers a public registry gets everything behind that address
+	// throttled.
+	DefaultAcquisitionMaxPerRegistry = 1
+
+	// DefaultAcquisitionPullTimeout bounds one transfer. Generous, because a
+	// multi-gigabyte image over a slow link is not a fault -- but bounded,
+	// because a transfer that never finishes holds a slot forever.
+	DefaultAcquisitionPullTimeout = 30 * time.Minute
+	// DefaultAcquisitionRequestTTL is how long a queued request stays valid.
+	// Past it the request is abandoned rather than started: the evidence behind
+	// the approval has aged, and acting on it would be acting on a stale check.
+	DefaultAcquisitionRequestTTL = 1 * time.Hour
+	// DefaultAcquisitionRegistryFreshness is how recent a successful registry
+	// lookup must be for its digest to be acted on.
+	DefaultAcquisitionRegistryFreshness = 24 * time.Hour
+
+	// DefaultAcquisitionMaxEvents bounds the audit trail per acquisition, which
+	// is what stops a chatty pull turning one operator action into an unbounded
+	// number of writes.
+	DefaultAcquisitionMaxEvents     = 200
+	DefaultAcquisitionSweepInterval = 1 * time.Minute
+	DefaultAcquisitionPruneInterval = 6 * time.Hour
+	// DefaultAcquisitionRetentionAge is how long a COMPLETED audit record is
+	// kept. Long, because it is the evidence that an image was downloaded.
+	DefaultAcquisitionRetentionAge = 180 * 24 * time.Hour
+
+	// Acquisition bounds.
+	MinAcquisitionPullTimeout   = 1 * time.Minute
+	MinAcquisitionSweepInterval = 10 * time.Second
+	MinAcquisitionRequestTTL    = 1 * time.Minute
+	MaxAcquisitionConcurrent    = 8
+	MaxAcquisitionEvents        = 2000
+
 	// Planner bounds.
 	MinPlannerInterval      = 1 * time.Minute
 	MinPlannerPruneInterval = 1 * time.Minute
@@ -720,6 +775,86 @@ type Planner struct {
 	PruneInterval time.Duration
 }
 
+// Acquisition holds settings for safe image acquisition.
+//
+// # This is the one capability that changes the host
+//
+// Everything else HarborMaster does reads: a local Docker socket, a local
+// SQLite file, and -- for image intelligence -- a public registry. This feature
+// downloads an approved image into the daemon's local image store, which is a
+// write.
+//
+// **It does not update containers.** A container keeps running the image it was
+// created from; an acquired image is another entry in the store beside it.
+// There is no setting here that recreates, restarts, or reconfigures anything,
+// because HarborMaster has no such capability.
+//
+// # Off by default
+//
+// Alone among HarborMaster's features. A deployment gains the ability to write
+// to its Docker host only by asking for it.
+type Acquisition struct {
+	// Enabled turns acquisition on. When false the endpoints report the feature
+	// disabled and no pull can be requested or performed. Records already
+	// stored remain readable.
+	Enabled bool
+
+	// RequireSnapshot refuses an acquisition for a container with no usable
+	// configuration snapshot.
+	//
+	// On by default. Downloading an image puts nothing at risk by itself, so
+	// this gate is about what an operator does NEXT: having a recorded
+	// configuration to refer back to is the difference between a considered
+	// change and an irreversible one. A deployment that does not capture
+	// snapshots can turn it off.
+	RequireSnapshot bool
+
+	// MaxConcurrent bounds simultaneous transfers across all registries, and
+	// MaxPerRegistry bounds them against any one registry.
+	//
+	// The second is the one that matters to a third party: anonymous rate
+	// limits are shared by egress address, and a host that opens several
+	// transfers at once against a public registry gets everything behind that
+	// address throttled.
+	MaxConcurrent  int
+	MaxPerRegistry int
+
+	// PullTimeout bounds one transfer. A pull that exceeds it is cancelled and
+	// recorded as timed out rather than left holding a slot.
+	PullTimeout time.Duration
+
+	// RequestTTL is how long a queued request stays valid. Past it the request
+	// EXPIRES unstarted: the evidence behind the approval has aged, and running
+	// it later would be acting on a check nobody has repeated.
+	RequestTTL time.Duration
+
+	// RegistryFreshness is how recent a successful registry lookup must be for
+	// its digest to be acted on. Older evidence does not establish that the
+	// digest is still what is being served, and the digest is the entire safety
+	// property.
+	RegistryFreshness time.Duration
+
+	// MaxEventsPerAcquisition bounds the audit trail for one acquisition. The
+	// daemon's progress stream is unbounded and registry-influenced, so this is
+	// the last of three independent bounds on how much of it is persisted.
+	MaxEventsPerAcquisition int
+
+	// SweepInterval is how often the queue is re-examined for expired requests
+	// and for work that a limit was blocking. Zero disables the periodic sweep,
+	// leaving request and completion as the triggers.
+	SweepInterval time.Duration
+
+	// RetentionAge is how long a COMPLETED acquisition record is kept, and
+	// PruneInterval how often that runs. Zero retention keeps them forever,
+	// which is valid but unbounded.
+	//
+	// A completed record is the evidence that an image was downloaded, so this
+	// is deliberately long and the most recent record per container is never
+	// pruned.
+	RetentionAge  time.Duration
+	PruneInterval time.Duration
+}
+
 // Drift holds settings for configuration drift detection.
 //
 // Drift compares a container's CURRENT configuration against its baseline
@@ -800,6 +935,7 @@ type Config struct {
 	Policy      Policy
 	ImageIntel  ImageIntel
 	Planner     Planner
+	Acquisition Acquisition
 }
 
 var (
@@ -1119,6 +1255,37 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Acquisition.Enabled, err = boolVar(lookup, "ACQUISITION_ENABLED", DefaultAcquisitionEnabled)
+	collect(err)
+	cfg.Acquisition.RequireSnapshot, err = boolVar(lookup, "ACQUISITION_REQUIRE_SNAPSHOT", DefaultAcquisitionRequireSnapshot)
+	collect(err)
+	cfg.Acquisition.PullTimeout, err = durationVar(lookup, "ACQUISITION_PULL_TIMEOUT", DefaultAcquisitionPullTimeout)
+	collect(err)
+	cfg.Acquisition.RequestTTL, err = durationVar(lookup, "ACQUISITION_REQUEST_TTL", DefaultAcquisitionRequestTTL)
+	collect(err)
+	cfg.Acquisition.RegistryFreshness, err = durationVar(lookup, "ACQUISITION_REGISTRY_FRESHNESS", DefaultAcquisitionRegistryFreshness)
+	collect(err)
+	cfg.Acquisition.SweepInterval, err = durationVar(lookup, "ACQUISITION_SWEEP_INTERVAL", DefaultAcquisitionSweepInterval)
+	collect(err)
+	cfg.Acquisition.RetentionAge, err = durationVar(lookup, "ACQUISITION_RETENTION_AGE", DefaultAcquisitionRetentionAge)
+	collect(err)
+	cfg.Acquisition.PruneInterval, err = durationVar(lookup, "ACQUISITION_PRUNE_INTERVAL", DefaultAcquisitionPruneInterval)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"ACQUISITION_MAX_CONCURRENT", DefaultAcquisitionMaxConcurrent, &cfg.Acquisition.MaxConcurrent},
+		{"ACQUISITION_MAX_PER_REGISTRY", DefaultAcquisitionMaxPerRegistry, &cfg.Acquisition.MaxPerRegistry},
+		{"ACQUISITION_MAX_EVENTS", DefaultAcquisitionMaxEvents, &cfg.Acquisition.MaxEventsPerAcquisition},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -1204,8 +1371,76 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Policy.validate()...)
 	errs = append(errs, c.ImageIntel.validate()...)
 	errs = append(errs, c.Planner.validate()...)
+	errs = append(errs, c.Acquisition.validate()...)
 
 	return errors.Join(errs...)
+}
+
+// validate checks the image acquisition settings.
+//
+// Validated even when acquisition is disabled, for the same reason every other
+// section is: a configuration error that only surfaces the day someone flips
+// the feature on is a worse failure than one caught at startup. That reasoning
+// is sharper here than anywhere else, because the day someone flips this one on
+// is the day HarborMaster gains write access to a privileged socket.
+func (a Acquisition) validate() []error {
+	var errs []error
+
+	if a.PullTimeout < MinAcquisitionPullTimeout {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_PULL_TIMEOUT must be at least %s",
+			envPrefix, MinAcquisitionPullTimeout))
+	}
+	if a.RequestTTL < MinAcquisitionRequestTTL {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_REQUEST_TTL must be at least %s",
+			envPrefix, MinAcquisitionRequestTTL))
+	}
+	// Zero is the documented way to disable the periodic sweep, leaving request
+	// and completion as the triggers. A tiny non-zero one would poll the queue
+	// continuously for no benefit.
+	if a.SweepInterval != 0 && a.SweepInterval < MinAcquisitionSweepInterval {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_SWEEP_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinAcquisitionSweepInterval))
+	}
+	if a.PruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+	// Registry evidence older than this is refused. A zero or negative window
+	// would mean "any age is acceptable", which would defeat the freshness
+	// check entirely rather than relaxing it.
+	if a.RegistryFreshness <= 0 {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_REGISTRY_FRESHNESS must be positive", envPrefix))
+	}
+	// Zero keeps completed records forever, which is valid but unbounded.
+	// Negative is not a way to do anything.
+	if a.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sACQUISITION_RETENTION_AGE must not be negative", envPrefix))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"ACQUISITION_MAX_CONCURRENT", a.MaxConcurrent, 1, MaxAcquisitionConcurrent},
+		{"ACQUISITION_MAX_PER_REGISTRY", a.MaxPerRegistry, 1, MaxAcquisitionConcurrent},
+		{"ACQUISITION_MAX_EVENTS", a.MaxEventsPerAcquisition, 1, MaxAcquisitionEvents},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	// A per-registry limit above the global one is not an error the bounds
+	// above can catch, and it would be a quietly misleading configuration: the
+	// stated per-registry ceiling would never be reachable.
+	if a.MaxPerRegistry > a.MaxConcurrent {
+		errs = append(errs, fmt.Errorf(
+			"%sACQUISITION_MAX_PER_REGISTRY (%d) must not exceed %sACQUISITION_MAX_CONCURRENT (%d)",
+			envPrefix, a.MaxPerRegistry, envPrefix, a.MaxConcurrent))
+	}
+
+	return errs
 }
 
 // validate checks the change planner settings.

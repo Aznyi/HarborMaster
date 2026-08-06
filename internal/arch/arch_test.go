@@ -7,9 +7,11 @@
 //   - HarborMaster talks to a privileged Docker socket through exactly one
 //     adapter package, so the SDK cannot spread into the domain, services,
 //     repositories, or API handlers.
-//   - That adapter is read-only. Gaining the ability to start, stop, remove, or
-//     exec into a container must require editing the Runtime interface, which
-//     is what makes it visible in review.
+//   - That adapter's OBSERVATION surface is read-only, and its MUTATION surface
+//     is exactly one method: pulling an approved, digest-pinned image. Gaining
+//     the ability to start, stop, remove, or exec into a container must require
+//     editing an interface and a test whose subject is that limit, which is what
+//     makes it visible in review.
 //
 // The import rules are checked by parsing every Go file's import declarations
 // with go/parser rather than by grepping. Grep would match the module paths
@@ -166,6 +168,148 @@ func TestRuntimeSurfaceIsTheExpectedReadOnlySet(t *testing.T) {
 		if !got[name] {
 			t.Errorf("docker.Runtime no longer has method %q; update this test if the removal is intended", name)
 		}
+	}
+}
+
+// ---------------------------------------------------------- the mutation --
+
+// Phase 8 gave HarborMaster its first Docker mutation: pulling an approved
+// image. The three tests below are what keep it at exactly one.
+//
+// The rule is not "no mutation" any more, so it has to be stated precisely:
+// there is ONE mutating method, on its OWN interface, and every service that
+// does not need it receives docker.Runtime instead and therefore cannot reach
+// it. Capability is granted by what a constructor is handed.
+
+// TestTheMutationSurfaceIsExactlyOneMethod pins the entire write capability.
+//
+// If this test needs editing, the change under review is HarborMaster gaining a
+// new power over a privileged socket. That is the point: the diff cannot be
+// quiet.
+func TestTheMutationSurfaceIsExactlyOneMethod(t *testing.T) {
+	acquirerType := reflect.TypeOf((*docker.ImageAcquirer)(nil)).Elem()
+
+	if got := acquirerType.NumMethod(); got != 1 {
+		t.Fatalf("docker.ImageAcquirer has %d methods, want exactly 1\n"+
+			"\tthis interface is the WHOLE of HarborMaster's ability to change the Docker host; "+
+			"a second method is a second capability and needs its own review, its own threat "+
+			"model entry, and its own tests", got)
+	}
+	if name := acquirerType.Method(0).Name; name != "PullByDigest" {
+		t.Errorf("the mutation method is %q, want PullByDigest\n"+
+			"\tthe name states the safety property: a pull that is not digest-pinned is a pull "+
+			"whose content can change after approval", name)
+	}
+}
+
+// containerVerbs are capabilities HarborMaster must never have over a container.
+//
+// Pulling an image changes the image store and nothing else -- a running
+// container keeps running the image it was created from. These verbs are the
+// ones that would cross from "acquire" into "apply", which is a different phase
+// and a much larger privilege.
+var containerVerbs = []string{
+	"attach", "commit", "connect", "copy", "create", "delete", "disconnect",
+	"exec", "kill", "pause", "prune", "recreate", "remove", "rename", "restart",
+	"restore", "rm", "rollback", "run", "start", "stop", "unpause", "update",
+	"wait",
+}
+
+// TestTheMutationInterfaceCannotTouchAContainer fails if the acquirer grows a
+// method that could change something that is running.
+//
+// Deliberately separate from the count above. A reviewer relaxing the count
+// still has to get past this, and the two failures say different things.
+func TestTheMutationInterfaceCannotTouchAContainer(t *testing.T) {
+	acquirerType := reflect.TypeOf((*docker.ImageAcquirer)(nil)).Elem()
+
+	for i := 0; i < acquirerType.NumMethod(); i++ {
+		name := acquirerType.Method(i).Name
+		lowered := strings.ToLower(name)
+
+		for _, verb := range containerVerbs {
+			if strings.HasPrefix(lowered, verb) {
+				t.Errorf("docker.ImageAcquirer has method %q, which looks like %q\n"+
+					"\tHarborMaster acquires images; it does not apply them. Changing a container "+
+					"is not part of this capability and must not be added to it.",
+					name, verb)
+			}
+		}
+	}
+}
+
+// acquisitionAllowed are the packages permitted to hold the mutation
+// capability.
+//
+// internal/docker implements it. internal/service holds it in exactly one
+// service. cmd/harbormaster wires that service. internal/arch is this test.
+//
+// Note who is ABSENT: internal/api. A handler that could pull directly would
+// bypass the preflight revalidation entirely, and preflight is the whole safety
+// model -- the API asks the service for work, and the service decides.
+var acquisitionAllowed = map[string]bool{
+	"internal/docker":  true,
+	"internal/service": true,
+	"cmd/harbormaster": true,
+	"internal/arch":    true,
+	// The live-Docker suite exercises the pull directly against a real daemon,
+	// which is the end-to-end proof that the adapter behaves as the fake models
+	// it -- and it asserts that the container count is unchanged either side.
+	// Build-tagged, so it is never part of an ordinary build.
+	"internal/integration": true,
+}
+
+// TestTheMutationCapabilityIsNotReferencedOutsideItsOwners fails if a package
+// that has no business pulling names the acquirer type.
+//
+// An import-level rule, with the honest limit that comes with one: it sees the
+// package a file imports, not what it does with it. internal/api imports
+// internal/docker for its read-only error types, so this checks the SOURCE for
+// the identifier rather than the import list.
+func TestTheMutationCapabilityIsNotReferencedOutsideItsOwners(t *testing.T) {
+	root := moduleRoot(t)
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor", "bin", "dist", "data", "web":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
+		if acquisitionAllowed[filepath.ToSlash(filepath.Dir(rel))] {
+			return nil
+		}
+
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, identifier := range []string{"ImageAcquirer", "PullByDigest"} {
+			if strings.Contains(string(source), identifier) {
+				t.Errorf("%s references %s\n"+
+					"\tthe pull capability belongs to the acquisition service alone. A package that "+
+					"can pull directly bypasses the preflight revalidation, which is the entire "+
+					"safety model of this feature.",
+					rel, identifier)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk module: %v", err)
 	}
 }
 

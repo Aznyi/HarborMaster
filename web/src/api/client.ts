@@ -72,6 +72,13 @@ import type {
   PlanListResponse,
   PlanQuery,
 } from "./planTypes";
+import type {
+  Acquisition,
+  AcquisitionDetailResponse,
+  AcquisitionListResponse,
+  AcquisitionQuery,
+  AcquisitionRequest,
+} from "./acquisitionTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -1006,4 +1013,98 @@ export function generateChangePlans(
   options?: RequestOptions,
 ): Promise<PlanGenerateAccepted> {
   return request<PlanGenerateAccepted>("/plans/generate", options, "POST");
+}
+
+/**
+ * Image acquisition.
+ *
+ * THE ONLY FUNCTIONS IN THIS CLIENT THAT CHANGE THE DOCKER HOST, and the change
+ * is one thing: downloading an approved, digest-pinned image into the local
+ * store.
+ *
+ * **No container is changed by any of them.** There is deliberately no function
+ * that applies an image, recreates a container, restores one, or removes an
+ * image — HarborMaster has no such capability and the API exposes no such
+ * endpoint.
+ *
+ * # No target crosses this boundary
+ *
+ * `requestAcquisition` takes a PLAN ID. There is no registry, repository,
+ * digest, tag, or pull option parameter anywhere below; the target is derived
+ * server-side from the plan and revalidated immediately before the download.
+ */
+
+/** Builds the acquisition listing query string from closed vocabularies. */
+function buildAcquisitionQuery(query: AcquisitionQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  if (query.activeOnly !== undefined) {
+    params.set("activeOnly", String(query.activeOnly));
+  }
+
+  for (const state of query.state ?? []) params.append("state", state);
+  for (const failure of query.failure ?? []) params.append("failure", failure);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/acquisitions */
+export function listAcquisitions(
+  query: AcquisitionQuery = {},
+  options?: RequestOptions,
+): Promise<AcquisitionListResponse> {
+  return request<AcquisitionListResponse>(
+    `/acquisitions${buildAcquisitionQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/acquisitions/{id} */
+export function getAcquisition(
+  acquisitionId: string,
+  options?: RequestOptions,
+): Promise<AcquisitionDetailResponse> {
+  return request<AcquisitionDetailResponse>(
+    `/acquisitions/${encodeURIComponent(acquisitionId)}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/acquisitions
+ *
+ * Asks HarborMaster to download the image an approved change plan names.
+ * Returns once the request is *accepted*, not once the download finishes: the
+ * server answers 202 and the transfer runs in the background.
+ *
+ * **It changes no container.** The image lands in the local store; acting on it
+ * afterwards is an operator's job with their own tooling.
+ */
+export function requestAcquisition(
+  body: AcquisitionRequest,
+  options?: RequestOptions,
+): Promise<Acquisition> {
+  return request<Acquisition>("/acquisitions", options, "POST", body);
+}
+
+/**
+ * POST /api/v1/acquisitions/{id}/cancel
+ *
+ * Stops work HarborMaster is doing. It changes nothing on the host beyond
+ * ending a transfer partway, which leaves the daemon's image store as it was.
+ */
+export function cancelAcquisition(
+  acquisitionId: string,
+  options?: RequestOptions,
+): Promise<Acquisition> {
+  return request<Acquisition>(
+    `/acquisitions/${encodeURIComponent(acquisitionId)}/cancel`,
+    options,
+    "POST",
+  );
 }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 
 import type { ChangePlan } from "../api/planTypes";
+import { AcquireImageAction } from "../components/AcquireImageAction";
 import { DetailSection } from "../components/DetailSection";
 import { PageIntro } from "../components/PageIntro";
 import { Pagination } from "../components/Pagination";
@@ -79,6 +80,19 @@ export function ContainerPlan() {
           <DetailSection title="What is being compared">
             <PlanDigests plan={current} />
             <PlanEvidence plan={current} />
+          </DetailSection>
+
+          {/* The one action in HarborMaster that changes the host. Offered from
+              the plan because the plan is what approves it -- there is nowhere
+              in the UI to aim a download freely. */}
+          <DetailSection
+            title="Acquire this image"
+            description={
+              "Downloads the proposed image to this host so it is ready to " +
+              "use. It does not update the container."
+            }
+          >
+            <AcquireImageAction plan={current} onRequested={state.refresh} />
           </DetailSection>
         </>
       ) : (

@@ -214,6 +214,43 @@ would be confidently wrong:
   not an answer of "no", and reporting it as a mismatch would double-count a
   failure already scored.
 
+## 3e. Safe image acquisition
+
+Phase 8 gave HarborMaster its FIRST Docker mutation. This section states the
+limit rather than the capability, because the limit is the design.
+
+**HarborMaster can download an approved, digest-pinned image into the daemon's
+local image store. It cannot change a container, and it cannot remove an image.**
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| The mutation surface is ONE method | `docker.ImageAcquirer` has exactly one method. Three architecture tests pin the count, refuse container verbs on it, and refuse any package outside the acquisition service from referencing it | `internal/arch` |
+| The read-only surface is unchanged | `docker.Runtime` still has its seven observation methods, pinned by the pre-existing tests. Every other service receives that interface and therefore cannot pull | `internal/docker/inventory.go` |
+| Capability is granted, not assumed | The acquirer is nil unless the deployment opted in, and is handed to exactly one service in `main` | `cmd/harbormaster/main.go` |
+| No pull is expressible without a digest | `PullTarget.Reference()` has no branch that produces a tag, and `Validate` refuses an absent or malformed digest before the daemon is contacted | `internal/docker/acquire.go` |
+| The target is not caller text | The request body carries a plan id; registry, repository, and digest are derived from the plan. Unknown JSON fields are rejected | `internal/api/acquisition_handlers.go` |
+| The repository path is an allowlist | Refuses traversal, a second `@`, upper case, and anything outside the distribution character set, because the value is about to be parsed by someone else's reference parser | `validRepositoryPath` |
+| The registry host clears the SSRF gate | Same `domain.ContactableRegistryHost` an image reference clears. The daemon performs the transfer, but a host HarborMaster would not contact is not one it should ask the daemon to contact | `PullTarget.Validate` |
+| No credential can be supplied | `ImagePullOptions` is built inside the adapter with `RegistryAuth` and `PrivilegeFunc` unset, and no caller reaches it. A private repository fails as unauthorized | `Client.PullByDigest` |
+| The pull is revalidated first | The full preflight runs again inside the worker, immediately before the transfer. This is the TOCTOU defence | `AcquisitionService.preflight` |
+| The transfer is not the proof | The image is re-inspected through the read-only path; digest and platform are compared and a mismatch fails closed | `AcquisitionService.verify` |
+| Progress is bounded three times | The adapter rate-limits and truncates, the service caps its writes, the repository caps stored rows | adapter / service / repository |
+| Daemon errors never reach a response | Every failure maps to a fixed HarborMaster phrase keyed by classification; the Engine error is logged, never rendered | `classifyPullError` |
+| Duplicate work is a database invariant | A partial unique index over the active states, so two racing requests cannot both start | `0009_acquisitions.sql` |
+| Interrupted work is failed, not resumed | An unverified transfer must never be recorded as acquired | `RecoverInterrupted` |
+
+**Four conclusions the feature refuses to draw**, each because the alternative
+would be confidently wrong:
+
+- **A successful pull is not a successful acquisition.** Only verification can
+  conclude that, and a check that could not be performed establishes nothing.
+- **Missing evidence is not approval.** A plan whose recommendation is `unknown`
+  refuses alongside one that recommends against the change.
+- **An old registry lookup does not establish a current digest.** Evidence past
+  the freshness window refuses rather than being used.
+- **A restart does not license resuming a transfer.** The image on the host now
+  may not be the one that pull produced.
+
 ## 4. Trust boundaries in code
 
 | Boundary | Enforcement point |
@@ -386,7 +423,7 @@ Listing these so their absence reads as a decision rather than an oversight.
 | --- | --- |
 | Authentication | Deferred to a later phase. **The largest residual risk.** |
 | RBAC | Follows authentication |
-| Any Docker mutation | The product's central guarantee |
+| Any Docker mutation beyond one image pull | Phase 8 added exactly one: downloading an approved, digest-pinned image. Everything else remains absent, and the mutation interface is pinned at one method by test |
 | Restore / rollback / update | Later phases; snapshots prepare for them |
 | Arbitrary command execution | Never. Not a feature, a category of vulnerability |
 | Template or plugin execution | Same |
@@ -400,4 +437,8 @@ Listing these so their absence reads as a decision rather than an oversight.
 | Registry credentials | Every lookup is anonymous. A private repository reports `unauthorized` rather than becoming a reason to store somebody's registry password |
 | Insecure / plaintext registries | HTTPS with verification, always. A local registry is reported as unsupported and never contacted |
 | Proxy support for registry requests | A proxy is an internal address, which the dial guard exists to refuse |
-| Image pull, push, delete, or prune | Reading a registry answers a question; fetching from one is a mutation of local state |
+| Image push, delete, or prune | Still absent. Acquisition ADDS to the local store and can remove nothing |
+| Applying an acquired image | Downloading and running are different capabilities. A container keeps running the image it was created from; recreating it is a later phase |
+| Automatic or scheduled pulls | Every acquisition is requested by a person. A timer that pulled would be a capability nobody asked for at the moment it acted |
+| Tag-only pulls | A tag can move between approval and transfer. There is no branch in the adapter that produces one |
+| A pull target in the API | The request carries a plan id. An endpoint that accepted a registry and repository would be a general-purpose downloader wearing HarborMaster's authority |

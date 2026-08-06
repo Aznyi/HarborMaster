@@ -59,8 +59,16 @@ issue is being actively exploited, say so and we will treat it as an emergency.
 **In scope:**
 
 - Any path that lets HarborMaster create, modify, start, stop, remove, or exec
-  into a container. HarborMaster is read-only with respect to Docker, and a
-  break in that guarantee is the most serious class of bug this project has.
+  into a container. HarborMaster has exactly ONE Docker write capability --
+  downloading an approved, digest-pinned image into the local image store -- and
+  it touches no container. A break in that limit is the most serious class of
+  bug this project has.
+- Any path that causes an image to be downloaded without a current change plan
+  that recommends it, or that lets a caller choose the registry, repository, or
+  digest. The target is derived server-side and revalidated immediately before
+  the transfer; a way around either is in scope.
+- Any path that reports an image as acquired without the post-transfer digest
+  and platform verification having passed.
 - Disclosure of a secret: an environment variable value, a registry credential,
   a token, a private key, or the snapshot HMAC key, through the API, the UI, the
   database, the event stream, or a log record.

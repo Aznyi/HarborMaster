@@ -436,6 +436,33 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Safe image acquisition.
+	//
+	// HARBORMASTER'S ONLY DOCKER MUTATION, and the only place in this function
+	// where a write capability is handed to anything. Every other service above
+	// receives dockerClient through the read-only docker.Runtime interface;
+	// this one receives it a second time through docker.ImageAcquirer, which
+	// has exactly one method: pull a digest-pinned image.
+	//
+	// It does not update containers. A container keeps running the image it was
+	// created from; an acquired image is another entry in the local store.
+	//
+	// Off unless the deployment asked for it. When disabled the acquirer stays
+	// nil and the service refuses everything -- so the capability is absent
+	// rather than merely unused.
+	var acquirer docker.ImageAcquirer
+	if cfg.Acquisition.Enabled {
+		acquirer = dockerClient
+	}
+	acquisitions := service.NewAcquisitionService(service.AcquisitionOptions{
+		Store:    db.Acquisitions,
+		Evidence: service.NewPlanEvidence(db.Plans, db.ImageIntel, db.Containers),
+		Runtime:  dockerClient,
+		Acquirer: acquirer,
+		Config:   cfg.Acquisition,
+		Logger:   logger,
+	})
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -477,7 +504,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(7)
+	background.Add(8)
 
 	go func() {
 		defer background.Done()
@@ -506,6 +533,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		planner.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		acquisitions.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -542,6 +573,8 @@ func run() error {
 
 		Plans:   db.Plans,
 		Planner: planner,
+
+		Acquisitions: acquisitions,
 
 		Logger:         logger,
 		Config:         cfg.Server,

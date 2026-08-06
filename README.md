@@ -9,13 +9,19 @@ happened. The eventual goal is image updates with validation and rollback. The
 order matters — the observation and recovery machinery is built first, so that
 by the time HarborMaster can change a container it can already undo it.
 
-> **Read-only today.** HarborMaster inventories the containers, images,
-> networks, and volumes on a Docker host, reports their normalized
-> configuration, and subscribes to the Docker event stream to keep that
-> inventory current. It cannot pull images, create, recreate, update, restart,
-> or remove containers, and it has no command-execution path. Watching events
-> does not change that: an event only ever causes HarborMaster to re-read the
-> host. See [Status](#status) for what is and is not here yet.
+> **Observation, plus one narrow write.** HarborMaster inventories the
+> containers, images, networks, and volumes on a Docker host, reports their
+> normalized configuration, and subscribes to the Docker event stream to keep
+> that inventory current. Watching events does not change anything: an event
+> only ever causes HarborMaster to re-read the host.
+>
+> Its one ability to change the host is **downloading an approved,
+> digest-pinned image** into the local image store — off by default, requested
+> by a person, and verified afterwards. Even then **it does not update
+> containers**: it cannot create, recreate, start, stop, restart, or remove a
+> container, cannot delete or prune an image, and has no command-execution path.
+> See [Safe image acquisition](#safe-image-acquisition) for the limits and
+> [Status](#status) for what is and is not here yet.
 
 ## Contents
 
@@ -28,6 +34,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Policy engine](#policy-engine)
 - [Image intelligence](#image-intelligence)
 - [Change planning](#change-planning)
+- [Safe image acquisition](#safe-image-acquisition)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -1045,6 +1052,115 @@ them rather than describing them.
 pass over a large estate would hold an unauthenticated request open for minutes.
 It is coalesced, so calling it in a loop produces one pass rather than a backlog.
 
+## Safe image acquisition
+
+HarborMaster can download an approved image to your host. This is its **only**
+ability to change the Docker host, and it is off by default.
+
+### It does not update containers
+
+Worth stating first, because it is the thing most easily assumed. Acquiring an
+image puts layers in the daemon's local image store. **No container is stopped,
+started, recreated, or reconfigured** — a container keeps running the image it
+was created from, and an acquired image sits in the store beside it, ready for
+you to use with your own tooling.
+
+There is no endpoint, no setting, and no button that applies an image, and none
+that deletes or prunes one.
+
+### The mutation surface is one method
+
+`docker.Runtime` — which every other service receives — remains read-only, with
+its exact method set pinned by a test. The write capability lives on its own
+interface, `docker.ImageAcquirer`, with **exactly one method**: pull a
+digest-pinned image. Three architecture tests keep it there:
+
+- the interface has exactly one method, named `PullByDigest`;
+- no method on it may be named for a container operation;
+- no package outside the acquisition service may even reference it — so a
+  handler cannot pull directly and bypass the checks below.
+
+Capability is granted by what a constructor is handed. A service that only needs
+to observe never receives the acquirer and therefore cannot pull.
+
+### Every acquisition is digest-pinned
+
+A tag can move between the moment a change is approved and the moment it is
+fetched. So the target is always `registry/repository@sha256:…`, assembled
+inside the adapter from validated components — there is no branch that produces
+a tag, and a plan with no resolved digest cannot be acquired at all.
+
+The request itself carries **no target**: an operator supplies a plan id, and
+the registry, repository, and digest are derived from that plan. Unknown JSON
+fields are rejected rather than ignored, so a target cannot be smuggled in.
+
+### The plan is revalidated immediately before the pull
+
+The gap between "a plan said this was reasonable" and "we are downloading it" is
+a time-of-check/time-of-use window. The preflight runs twice — once when the
+operator asks, so the answer is immediate, and again inside the worker, which is
+the run that matters. It refuses when:
+
+the plan is missing, superseded, or does not recommend the change · the
+recommendation is `unknown` · there is no proposed digest, or it has changed
+since approval · the image does not publish this platform · the registry
+evidence is missing, failed, or older than the freshness window · the container
+is gone · a critical policy violation is open · there is no usable snapshot ·
+Docker is unavailable · another acquisition for the same image is running · a
+concurrency limit would be exceeded.
+
+A refusal is reported with the **specific check** that said no, because "the
+digest moved" and "the daemon is down" call for different things from an
+operator.
+
+### The transfer is not the proof
+
+A completed pull means the daemon accepted the request and reported no error. It
+does not establish what is in the local store: the daemon resolves the reference
+itself, and a registry can serve different content than expected.
+
+So after every transfer the image is **re-inspected through the read-only path**
+and its digest and platform compared against what was approved. Only that
+comparison can conclude "succeeded", and it fails closed — a check that could
+not be performed is its own classification, distinct from a mismatch.
+
+A digest mismatch is logged at error level and is **never retried
+automatically**: repeating a pull that produced the wrong content is how a
+transient substitution becomes a persistent one.
+
+### Bounded everywhere, and never automatic
+
+Global and per-registry concurrency, a pull timeout, a request deadline after
+which a queued request expires unstarted, and three independent bounds on how
+much of the daemon's progress stream is persisted. The per-registry limit is the
+one that matters to a third party: anonymous rate limits are shared by egress
+address.
+
+**Nothing happens on a schedule.** Every acquisition is requested by a person.
+The worker's periodic ticks only expire stale requests and prune old records; a
+HarborMaster left running with nobody asking it for anything downloads nothing,
+forever.
+
+### Records are audit records
+
+At most one acquisition per (container, digest) can be active — a partial unique
+index, so the guarantee holds when two requests race rather than depending on a
+check winning. A completed record is never rewritten by a later attempt, and
+retention never removes the most recent one per container.
+
+No column can hold a credential, a raw daemon error, or a registry response
+body. The operator-facing message is built from a fixed HarborMaster vocabulary
+keyed by the failure classification.
+
+### After a restart
+
+An acquisition left in `pulling` is a claim about a process that no longer
+exists. Those rows are **failed honestly rather than resumed**: the transfer was
+never verified, and an unverified image must never be recorded as acquired.
+Re-verifying instead would mean asserting that the image on the host now is the
+one that particular pull produced, which is exactly the assumption verification
+exists to avoid making.
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -1711,8 +1827,28 @@ than a public issue.
   filtering, sorting and pagination, container detail, redacted raw inspection,
   images, networks, volumes, event history, event-engine status, and the live
   event stream
-- **Web interface**: populated Dashboard with event-engine status, Containers
-  table, container detail with twelve sections, Images, and a live Events page
+- **Configuration snapshots**: immutable captures of a container's
+  configuration, deduplicated by checksum, with restore-readiness validation
+  and configuration comparison. Readiness answers "could this be restored";
+  HarborMaster does not restore.
+- **Configuration drift**: the differences between a container's baseline
+  snapshot and its configuration now, reusing the same comparison engine, with
+  operator status transitions that never suppress re-evaluation
+- **Policy engine**: administrator-defined rules that every container's
+  configuration is checked against, as typed structs from a closed catalogue.
+  Reporting only; nothing is enforced or remediated.
+- **Image intelligence**: anonymous HTTPS lookups against registry manifest and
+  tag-listing endpoints to discover whether a newer image is published.
+  HarborMaster's only outbound egress, behind layered SSRF defences.
+- **Change planning**: deterministic risk assessment of each proposed image
+  change, combining every source above. Analysis only; nothing executes a plan.
+- **Safe image acquisition**: downloading an approved, digest-pinned image into
+  the local image store. **HarborMaster's only Docker write**, off by default,
+  requested by a person, revalidated immediately before the transfer, and
+  verified afterwards. It does not update containers.
+- **Web interface**: Dashboard, Containers with detail, Images, Updates,
+  Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions, and a live
+  Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -1722,12 +1858,16 @@ than a public issue.
 
 ### What is not built yet
 
-- Configuration snapshots and drift detection — the snapshot store exists from
-  the earlier phase, but no service captures one. Snapshots and the current
-  inventory are separate concepts and remain separate.
-- Image update checks, image pulls, and container recreation
+- **Applying an acquired image.** HarborMaster can download one; recreating a
+  container to run it is a later phase. Downloading and running are different
+  capabilities, and only the first exists.
 - Container start, stop, restart, and removal
+- Restore from a snapshot. Readiness validation answers whether it *could*
+  work; nothing performs it.
+- Image deletion and pruning. Acquisition adds to the local store and can
+  remove nothing.
 - Health validation with automatic rollback, and deployment history
+- Automatic or scheduled pulls. Every acquisition is requested by a person.
 - Notifications
 - Authentication and authorization
 - Multi-host management — the schema is keyed by host, but exactly one host row
@@ -1755,7 +1895,10 @@ than a public issue.
   full reconciliation.
 
 The order is deliberate. The observation and recovery machinery comes first, so
-that by the time HarborMaster can change a container it can already undo it.
+that by the time HarborMaster can change a container it can already undo it. The
+first write capability — acquiring an image — was added only once snapshots,
+drift, policy, registry intelligence, and risk assessment existed to decide
+whether it should happen at all.
 
 ## License
 
