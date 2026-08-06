@@ -93,6 +93,12 @@ type DB struct {
 	// because that capability does not exist.
 	Acquisitions *AcquisitionRepository
 
+	// Executions holds the audit records for container recreation -- the only
+	// operation in HarborMaster that changes something that is RUNNING. Each
+	// row carries a checkpoint saying what is true of the host, which is what
+	// restart recovery reads instead of guessing from the lifecycle state.
+	Executions *ExecutionRepository
+
 	// path is retained so a backup can refuse to write over the live database.
 	path string
 	// openReport records what the reliability checks found at open, so the
@@ -300,6 +306,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		ImageIntel:   &ImageIntelRepository{db: sqlDB},
 		Plans:        &PlanRepository{db: sqlDB},
 		Acquisitions: &AcquisitionRepository{db: sqlDB},
+		Executions:   &ExecutionRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

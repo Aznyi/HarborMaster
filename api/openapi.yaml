@@ -188,15 +188,14 @@ tags:
     description: |
       Downloading an approved image to this host.
 
-      **This is HarborMaster's only ability to change the Docker host**, and the
-      change is one thing: layers arrive in the daemon's local image store.
+      The change is one thing: layers arrive in the daemon's local image store.
 
-      **It is not an update.** No container is touched. A container keeps
-      running the image it was created from; an acquired image is another entry
-      in the store beside it. There is no apply, recreate, restart, rollback, or
-      restore endpoint, and no capability behind one -- the Docker adapter's
-      entire mutation surface is a single method, pinned by an architecture
-      test.
+      **It is not an update.** No container is touched by anything in this
+      section. A container keeps running the image it was created from; an
+      acquired image is another entry in the store beside it. Applying one is a
+      separate capability with a separate interface and a separate section --
+      see Container recreation -- and an acquisition service handed the pull
+      capability cannot reach it.
 
       **There is no target parameter.** The request body carries a PLAN ID and
       an optional idempotency key. No registry, repository, digest, tag,
@@ -217,6 +216,55 @@ tags:
 
       Off by default. A deployment gains the ability to write to its Docker host
       only by asking for it.
+
+  - name: Container recreation
+    description: |
+      Replacing ONE container with a new one built from its own configuration
+      and an image that is already on this host.
+
+      **This is HarborMaster's largest privilege.** Image acquisition writes to
+      the image store, which affects nothing that is serving. This stops a
+      running container and replaces it.
+
+      **The request names an ACQUISITION and nothing else.** No container, no
+      image, no digest, no tag, no command, no mount, no capability, no
+      privilege flag, no timeout, no force. Unknown fields are rejected rather
+      than ignored, so nothing can be smuggled in. Everything about what will
+      happen is derived from the acquisition, which was derived from a plan.
+
+      **An acquisition is single use.** One recreation per acquisition, ever,
+      with no override parameter. A second recreation of the same container
+      needs a fresh plan -- assessed against the world as it is now -- and a
+      fresh acquisition to prove the image is still present.
+
+      **The original is parked, not removed.** It is stopped and renamed aside,
+      and it is removed only after the replacement has passed all four proofs
+      (health or stability, image digest, configuration preservation, network
+      attachment) AND the success has been recorded durably. Any failure before
+      that leaves both containers on the host.
+
+      **There is no rollback.** A failure after the first mutation quarantines
+      the replacement, preserves both containers, and records a manual recovery
+      plan of fixed-vocabulary steps. HarborMaster never executes that plan:
+      there is no endpoint that runs one and no capability behind one. An
+      automatic undo would be another unattended mutation, performed at exactly
+      the moment HarborMaster has demonstrated that its model of the host is
+      wrong.
+
+      **Configuration is reproduced, secrets are not re-derived.** The
+      container's live configuration is read into a value the execution service
+      cannot inspect, log, or serialise, and handed straight back to the daemon.
+      What the service and this API can see is a VALUE-FREE projection:
+      environment NAMES, mount destinations, network names, capability lists.
+      A sensitive value contributes a keyed digest and never a value.
+
+      **Nothing happens on a schedule, and nothing is retried.** Every
+      recreation is requested by an operator, acts on one container, and stops
+      at its first failure.
+
+      Off by default, and refused at startup unless image acquisition is on too:
+      an execution names an acquisition, and with acquisition off there can
+      never be one to name.
 
   - name: Change plans
     description: |
@@ -2909,6 +2957,285 @@ paths:
         "503":
           $ref: "#/components/responses/AcquisitionUnavailable"
 
+  /api/v1/executions:
+    get:
+      tags: [Container recreation]
+      summary: Containers HarborMaster has recreated
+      operationId: listExecutions
+      description: |
+        Every recreation attempt, newest first, with the estate aggregate.
+
+        The ordering puts work that NEEDS ATTENTION above everything else: a
+        failure that left containers on this host is what an operator opens this
+        page to find.
+
+        The summary carries `enabled`, so an empty list in a deployment that has
+        not opted in is not read as "nothing has ever been recreated", and
+        `needsAttention`, which counts the failures a person still has to
+        settle.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: state
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/ExecutionState" }
+        - name: failure
+          in: query
+          description: Repeatable, or comma-separated.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/ExecutionFailure" }
+        - name: activeOnly
+          in: query
+          description: Only work still in progress.
+          schema: { type: boolean }
+        - name: needsAttention
+          in: query
+          description: |
+            Only failures that left containers on this host for an operator to
+            settle. Selected from the CHECKPOINT rather than from the failure
+            classification, because the checkpoint is what says whether anything
+            was actually changed.
+          schema: { type: boolean }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [requestedAt, completedAt, state, container, id]
+            default: requestedAt
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: A page of recreations, with the estate aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Execution" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/ExecutionSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ExecutionUnavailable"
+
+    post:
+      tags: [Container recreation]
+      summary: Recreate one container on an already-acquired image
+      operationId: requestExecution
+      description: |
+        **The only endpoint in this API that changes something RUNNING.**
+
+        Stops one container, creates a replacement from its own configuration
+        and the acquired image, starts it, proves it, and removes the original.
+        Answers 202 immediately; the work runs in the background.
+
+        ### What it accepts
+
+        An ACQUISITION ID, and optionally an idempotency key. **No container, no
+        image, no digest, no tag, no command, no mount, no capability, no
+        privilege flag, no timeout, and no force.** Unknown fields are rejected
+        rather than ignored. Everything about what will happen is derived from
+        the acquisition, which was derived from a change plan.
+
+        There is no `allowReuse`, no `force`, and no `skipVerification`. An
+        acquisition is single use: a second recreation needs a fresh plan and a
+        fresh acquisition.
+
+        ### What it checks first
+
+        The full preflight runs SYNCHRONOUSLY before the 202, so a refusal is
+        immediate rather than arriving as a failed background job, and it runs
+        AGAIN immediately before the first mutation. Every prerequisite is
+        re-read: the acquisition succeeded and is fresh and unused, the plan is
+        current and still recommends the change, the container exists and is
+        still on the assessed image, the inventory is fresh, a usable snapshot
+        exists, the policy evaluation is fresh and complete with no critical
+        violation, the registry evidence is fresh, and the image is still
+        present locally carrying the approved digest for this platform.
+
+        A refusal is a 409 (or a 404 / 429 / 503 where the situation warrants)
+        carrying a `refusal` field naming the specific check that said no.
+
+        ### What happens to the containers
+
+        The original is STOPPED and RENAMED to `<name>.hm-old-<executionId>`. It
+        is not removed. The replacement takes the original's name, and the
+        original is removed only after all four proofs pass and the success is
+        recorded durably.
+
+        On any failure after that first stop, the replacement is stopped and
+        renamed to `<name>.hm-failed-<executionId>`, both containers are left in
+        place, and the record carries a manual `recovery` plan. **HarborMaster
+        does not roll back**, and there is no endpoint that would.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecutionRequest" }
+      responses:
+        "202":
+          description: The recreation was accepted and runs in the background.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Execution" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          description: |
+            The acquisition, its plan, or its container no longer exists.
+            Carries the specific refusal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionRefusalResponse" }
+        "409":
+          description: |
+            A preflight check refused. The world has moved since the image was
+            acquired, the acquisition has already been used, or a recreation for
+            this container is already running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionRefusalResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          description: |
+            Too many recreations are already running, or the write rate limit
+            was exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionRefusalResponse" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ExecutionUnavailable"
+
+  /api/v1/executions/{id}:
+    get:
+      tags: [Container recreation]
+      summary: One recreation, with its audit trail
+      operationId: getExecution
+      description: |
+        One recreation and the bounded record of what happened to it, oldest
+        entry first.
+
+        The record carries the CHECKPOINT, which is the field to read first: it
+        says what is true of the host, as opposed to `state`, which says what
+        HarborMaster was doing. After an interrupted recreation only the first
+        question matters.
+
+        When a failure left containers behind, `recovery` carries the manual
+        steps. It is text. Nothing executes it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: |
+            A server-generated execution identifier, `exec_` followed by twenty
+            hexadecimal characters.
+          schema:
+            type: string
+            pattern: "^exec_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The recreation and its audit trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [execution, events]
+                properties:
+                  execution: { $ref: "#/components/schemas/Execution" }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/ExecutionEvent" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ExecutionUnavailable"
+
+  /api/v1/executions/{id}/cancel:
+    post:
+      tags: [Container recreation]
+      summary: Stop a recreation that has not yet changed anything
+      operationId: cancelExecution
+      description: |
+        Stops a recreation an operator no longer wants. It takes no body.
+
+        **Only before the first mutation.** A recreation in `queued`,
+        `validating`, or `capturing` has changed nothing on this host, so
+        stopping it is free. From `creating` onward the original has been
+        stopped and a replacement may exist, and abandoning that would leave the
+        host in a state nobody recorded -- so the only safe direction is
+        forwards, through verification, to a recorded conclusion.
+
+        An execution past that point answers 409. The message says why rather
+        than only refusing, because "you cannot cancel this" invites an operator
+        to try harder while "the container has already been stopped" tells them
+        what to do next.
+
+        A recreation that finished between the request and the write is not an
+        error: the caller is told what the record actually says.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^exec_[0-9a-f]{20}$"
+      responses:
+        "200":
+          description: The recreation, now cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Execution" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/CrossOriginRejected"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: |
+            The recreation has already finished, or has passed the point where
+            stopping it would leave the host in an unrecorded state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ExecutionUnavailable"
+
 
 components:
   headers:
@@ -3088,6 +3415,24 @@ components:
         set to false, so records already stored remain readable and an empty
         list is not mistaken for "nothing has ever been downloaded". They answer
         503 only when the feature is not wired at all.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    ExecutionUnavailable:
+      description: |
+        Container recreation is not available in this deployment.
+
+        The default, and the strongest form of "off" HarborMaster has: when the
+        feature is disabled the Docker adapter's container mutation capability
+        is never handed to anything, so the process holds no ability to stop or
+        replace a container at all. The capability is ABSENT rather than merely
+        unused, and no request can turn it back on.
+
+        The READ endpoints stay available and answer 200 with `summary.enabled`
+        set to false, so records already stored remain readable. They answer 503
+        only when the feature is not wired at all.
       content:
         application/json:
           schema:
@@ -5901,6 +6246,510 @@ components:
           description: |
             Whether acquisition is switched on at all, so an empty list is not
             read as "nothing has ever been downloaded".
+
+    # ------------------------------------------------- container recreation --
+
+    ExecutionState:
+      type: string
+      description: |
+        Where one recreation has got to. A strict, forward-only lifecycle.
+
+        The states up to and including `capturing` change NOTHING on the host
+        and are freely cancellable. `creating` is the MUTATION POINT: from there
+        the original has been stopped, and the recreation must reach a recorded
+        conclusion rather than being abandoned.
+
+        `succeeded` means all four proofs passed, the outcome was recorded, and
+        the original was removed -- in that order.
+      enum:
+        - queued
+        - validating
+        - capturing
+        - creating
+        - starting
+        - verifying
+        - succeeded
+        - failed
+        - cancelled
+        - expired
+
+    ExecutionCheckpoint:
+      type: string
+      description: |
+        What is TRUE OF THE HOST, as opposed to what HarborMaster was doing.
+
+        **The field to read first on any failed or interrupted record.** It is
+        written after each Docker mutation completes and before the next is
+        attempted, so it says what has certainly been done. `state` says only
+        what was being attempted.
+
+        An empty value on a FAILED record whose `mutatedAt` is null means
+        nothing on the host was changed. An empty value on one whose `mutatedAt`
+        is set means a stop was issued and never confirmed -- the recovery plan
+        says so rather than guessing.
+      enum:
+        - ""
+        - originalStopped
+        - originalParked
+        - replacementCreated
+        - replacementStarted
+        - replacementVerified
+        - replacementQuarantined
+        - originalRemoved
+
+    ExecutionFailure:
+      type: string
+      description: |
+        Why a recreation did not succeed. A closed vocabulary; the message an
+        operator reads is built from this and never from a daemon string.
+
+        `preflight`, `capture`, and `secretUnavailable` all happen BEFORE the
+        mutation point and leave the host untouched. Every other value means
+        containers were left behind and the `recovery` plan applies.
+
+        `persistence` is the one to understand: HarborMaster could not record
+        what it had just done, so it STOPPED rather than acting again on an
+        uncertain record. Repeating a stop, a rename, or a remove against a host
+        whose recorded state is unknown is how a recoverable situation becomes
+        an unrecoverable one.
+      enum:
+        - ""
+        - preflight
+        - capture
+        - stop
+        - rename
+        - create
+        - start
+        - healthTimeout
+        - unhealthy
+        - notStable
+        - imageMismatch
+        - preservation
+        - network
+        - secretUnavailable
+        - dockerUnavailable
+        - timeout
+        - interrupted
+        - persistence
+        - internal
+
+    ExecutionRefusal:
+      type: string
+      description: |
+        Which preflight check refused. A refusal means the safety model WORKED
+        and nothing on this host was changed.
+
+        `acquisitionConsumed` is the single-use rule: one recreation per
+        acquisition, ever, with no override. A second one needs a fresh plan and
+        a fresh acquisition.
+      enum:
+        - ""
+        - disabled
+        - acquisitionMissing
+        - acquisitionNotSucceeded
+        - acquisitionStale
+        - acquisitionConsumed
+        - planMissing
+        - planSuperseded
+        - planChanged
+        - recommendation
+        - containerMissing
+        - containerChanged
+        - containerState
+        - inventoryStale
+        - snapshotMissing
+        - restoreReadiness
+        - policyViolation
+        - policyStale
+        - registryStale
+        - imageMissing
+        - digestMismatch
+        - platformMismatch
+        - conflict
+        - limit
+        - dockerUnavailable
+        - secretUnavailable
+        - nameUnavailable
+
+    ExecutionRefusalResponse:
+      type: object
+      description: |
+        The error envelope plus the specific check that refused.
+
+        The extra field exists so a client can branch on WHICH check said no
+        without parsing prose: "a newer plan exists" and "the daemon is down"
+        call for different things from an operator, and both arrive as a 409.
+      required: [error, refusal]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              description: |
+                HarborMaster's own fixed phrase for this refusal. Never a daemon
+                or registry string.
+        refusal: { $ref: "#/components/schemas/ExecutionRefusal" }
+        requestId: { type: string }
+
+    VerificationResult:
+      type: string
+      description: |
+        The outcome of one proof.
+
+        `unknown` means the proof was never reached or could not be performed,
+        and it is NEVER treated as a pass. The parked original is removed only
+        when every proof reads `passed`.
+      enum: [unknown, passed, failed]
+
+    ExecutionTarget:
+      type: object
+      description: |
+        The immutable image a recreation moves a container onto. Derived
+        entirely from the acquisition; no field here is ever filled from caller
+        input.
+      required: [registry, repository, digest]
+      properties:
+        registry: { type: string, example: docker.io }
+        repository: { type: string, example: library/nginx }
+        digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+          description: |
+            The manifest digest. The container is created from
+            `registry/repository@digest`, never from a tag: a tag is a name that
+            can be repointed between approval and application.
+        reference:
+          type: string
+          description: The familiar form, for display only.
+        imageId:
+          type: string
+          description: |
+            The local image the acquisition verified. Recorded so the record
+            ties to what inspection found; the container is created from the
+            digest-pinned reference, not from this.
+        platform: { $ref: "#/components/schemas/Platform" }
+
+    PreservationDifference:
+      type: object
+      description: One configuration field that did not survive the recreation.
+      required: [field, kind]
+      properties:
+        field:
+          type: string
+          example: security.capAdd
+        kind: { type: string, enum: [changed, missing, added] }
+        expected:
+          type: string
+          description: |
+            The original's rendering, bounded and sanitised. Never a raw secret:
+            a sensitive value is rendered as a keyed digest.
+        actual:
+          type: string
+          description: The replacement's rendering, bounded and sanitised.
+
+    PreservationReport:
+      type: object
+      description: |
+        The field-by-field comparison between the original's configuration and
+        the replacement's.
+
+        Both sides are projected through ONE builder, which is what makes the
+        comparison meaningful: a field that is rendered leniently is rendered
+        leniently on both sides, and a field that is not emitted is not claimed
+        to have been checked.
+
+        No value here is a secret. A sensitive environment variable or log
+        option contributes a keyed digest produced under the installation key
+        the snapshots use.
+      required: [status, checked, matched]
+      properties:
+        status: { $ref: "#/components/schemas/VerificationResult" }
+        checked: { type: integer }
+        matched: { type: integer }
+        differences:
+          type: array
+          maxItems: 25
+          items: { $ref: "#/components/schemas/PreservationDifference" }
+        truncated:
+          type: boolean
+          description: |
+            More differences existed than are listed. A wholesale mismatch
+            produces one per field and only the first few are actionable.
+        expectedFingerprint: { type: string }
+        actualFingerprint: { type: string }
+        unverifiable:
+          type: boolean
+          description: |
+            The comparison could not be PERFORMED -- most often because the two
+            projections were produced under different installation keys. Never
+            a pass: a check that could not run establishes nothing.
+        reason: { type: string }
+
+    ExecutionVerification:
+      type: object
+      description: |
+        What each proof concluded. Every field is a tri-state, and `unknown`
+        means the proof was never reached -- deliberately distinct from having
+        failed.
+      required: [health, image, preservation, network]
+      properties:
+        health: { $ref: "#/components/schemas/VerificationResult" }
+        healthState:
+          type: string
+          enum: ["", none, starting, healthy, unhealthy]
+          description: The container health the wait observed.
+        healthChecked:
+          type: boolean
+          description: |
+            Whether the container declares a health check at all. False means
+            `health` reflects the STABILITY window instead, which is weaker
+            evidence: it establishes that the container did not crash on
+            startup and nothing more.
+        stabilitySeconds:
+          type: integer
+          description: |
+            How long the replacement was required to stay running, when it has
+            no health check.
+        image: { $ref: "#/components/schemas/VerificationResult" }
+        preservation: { $ref: "#/components/schemas/VerificationResult" }
+        preservationReport: { $ref: "#/components/schemas/PreservationReport" }
+        network: { $ref: "#/components/schemas/VerificationResult" }
+
+    RecoveryStep:
+      type: object
+      description: |
+        One instruction in a manual recovery plan.
+
+        `command` is rendered for an operator to READ. HarborMaster never
+        executes it, never shells out, and has no capability that could.
+      required: [order, description, destructive]
+      properties:
+        order: { type: integer, minimum: 1 }
+        description:
+          type: string
+          description: HarborMaster's own sentence. Never a daemon string.
+        command:
+          type: string
+          example: docker rename web.hm-old-exec_3f8a1c9e7b2d4a6f0c1e web
+        destructive:
+          type: boolean
+          description: |
+            This step removes something. Called out so an operator reading
+            quickly does not run one by reflex.
+
+    RecoveryPlan:
+      type: object
+      description: |
+        What was left on the host, and what to do about it.
+
+        Present when a recreation failed in a way that left containers behind.
+        **Nothing executes a recovery plan.** There is no endpoint that runs
+        one, no button that applies one, and no capability behind either: it is
+        text, assembled from a fixed vocabulary and from names HarborMaster
+        generated or read from the daemon.
+      required: [urgency, situation, serviceInterrupted]
+      properties:
+        urgency:
+          type: string
+          enum: [informational, attention, urgent]
+          description: |
+            `urgent` means the container is NOT SERVING. `attention` means
+            something was left behind but the service is up. `informational`
+            means nothing needs settling.
+        situation:
+          type: string
+          description: A plain statement of what is true of the host right now.
+        serviceInterrupted:
+          type: boolean
+          description: |
+            Whether the container is currently not serving. The single most
+            important fact on this record.
+        steps:
+          type: array
+          maxItems: 12
+          items: { $ref: "#/components/schemas/RecoveryStep" }
+
+    ExecutionRequest:
+      type: object
+      description: |
+        An operator's ask.
+
+        ONE meaningful field. It does not carry a container, an image, a digest,
+        a tag, a command, a mount, a capability, a privilege flag, a timeout, or
+        a force -- and unknown fields are REJECTED rather than ignored, so
+        nothing can be smuggled in.
+
+        There is deliberately no `allowReuse`: an acquisition is single use.
+      required: [acquisitionId]
+      additionalProperties: false
+      properties:
+        acquisitionId:
+          type: string
+          pattern: "^acq_[0-9a-f]{20}$"
+          description: |
+            The SUCCEEDED acquisition to apply. It transitively identifies the
+            verified digest, the plan that approved it, and the container --
+            which is what makes it structurally impossible to request a
+            recreation onto an image that was never downloaded and verified.
+        requestKey:
+          type: string
+          maxLength: 100
+          pattern: "^[\\x21-\\x7e]*$"
+          description: |
+            Optional idempotency key. A retried request -- or a double-clicked
+            button -- returns the existing record rather than starting a second
+            recreation.
+
+    Execution:
+      type: object
+      description: |
+        One immutable record of one container recreation.
+
+        Identity, target, and approval are written once; the lifecycle fields
+        advance forwards and stop. A second recreation is a second row: history
+        is never overwritten.
+      required:
+        - executionId
+        - acquisitionId
+        - planId
+        - containerId
+        - containerName
+        - oldImage
+        - target
+        - state
+        - verification
+        - originalRemoved
+        - requestedAt
+        - expiresAt
+        - planDigest
+      properties:
+        executionId:
+          type: string
+          pattern: "^exec_[0-9a-f]{20}$"
+          description: |
+            The immutable public identifier, generated server-side from the
+            system entropy source. Random rather than sequential because it
+            appears in URLs AND in container names on this host.
+        acquisitionId:
+          type: string
+          description: The download this recreation applied. Single use.
+        planId: { type: string }
+        snapshotId:
+          type: integer
+          format: int64
+          description: The baseline snapshot this container had beforehand.
+        containerId:
+          type: string
+          description: The ORIGINAL container.
+        containerName:
+          type: string
+          description: The name the replacement takes over.
+        oldImage: { type: string }
+        oldImageId: { type: string }
+        oldImageDigest: { type: string }
+        target: { $ref: "#/components/schemas/ExecutionTarget" }
+        state: { $ref: "#/components/schemas/ExecutionState" }
+        checkpoint: { $ref: "#/components/schemas/ExecutionCheckpoint" }
+        failure: { $ref: "#/components/schemas/ExecutionFailure" }
+        refusal: { $ref: "#/components/schemas/ExecutionRefusal" }
+        message:
+          type: string
+          description: |
+            HarborMaster's own sentence about the outcome. Never a daemon or
+            registry string.
+        replacementId:
+          type: string
+          description: The container that was created.
+        parkedName:
+          type: string
+          description: |
+            The name the original was renamed to, `<name>.hm-old-<executionId>`.
+            Present from the moment the rename lands, so an operator can find
+            the container even if the recreation fails immediately afterwards.
+        quarantineName:
+          type: string
+          description: |
+            The name a FAILED replacement was renamed to,
+            `<name>.hm-failed-<executionId>`. It is stopped and renamed rather
+            than removed, because it is the evidence for why the new image did
+            not work.
+        originalRemoved:
+          type: boolean
+          description: |
+            Whether the parked original was removed. False on a `succeeded`
+            record means the replacement is serving correctly but the original
+            could not be removed -- housekeeping, described by the recovery
+            plan, not a failed recreation.
+        verification: { $ref: "#/components/schemas/ExecutionVerification" }
+        recovery: { $ref: "#/components/schemas/RecoveryPlan" }
+        requestedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        mutatedAt:
+          type: string
+          format: date-time
+          description: |
+            When the host was FIRST changed. Absent means it never was, which is
+            the single most useful fact on a failed record.
+        completedAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            When a still-queued request is abandoned. An expired request never
+            started and changed nothing.
+        requestKey: { type: string }
+        planDigest:
+          type: string
+          description: |
+            The plan's input fingerprint AS APPROVED at acquisition time.
+            Preflight compares it against the plan's current fingerprint, which
+            is the exact time-of-check/time-of-use test across the gap between
+            downloading an image and applying it.
+
+    ExecutionEvent:
+      type: object
+      description: |
+        One bounded entry in a recreation's audit trail.
+
+        Records STATE TRANSITIONS and CHECKPOINTS, every one written by
+        HarborMaster about its own action from a fixed vocabulary. Nothing
+        external influences how many rows one recreation can produce.
+      required: [state, at]
+      properties:
+        state: { $ref: "#/components/schemas/ExecutionState" }
+        checkpoint: { $ref: "#/components/schemas/ExecutionCheckpoint" }
+        detail: { type: string }
+        at: { type: string, format: date-time }
+
+    ExecutionSummary:
+      type: object
+      description: The dashboard aggregate.
+      properties:
+        total: { type: integer }
+        active: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        needsAttention:
+          type: integer
+          description: |
+            Failures that left containers on this host for an operator to
+            settle. The number that matters most on this page.
+        byState:
+          type: object
+          additionalProperties: { type: integer }
+        byFailure:
+          type: object
+          additionalProperties: { type: integer }
+        lastCompletedAt: { type: string, format: date-time }
+        enabled:
+          type: boolean
+          description: |
+            Whether recreation is switched on at all, so an empty list is not
+            read as "nothing has ever been recreated".
 
     RiskBand:
       type: string

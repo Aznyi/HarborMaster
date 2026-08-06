@@ -292,12 +292,20 @@ func (c *Client) PullByDigest(
 		tracker.observe(message.ID, message.Status, current, total)
 	}
 
-	// Wait reports a stream that ended early. Checked separately because
-	// ranging to completion is not the same as the transfer having finished.
-	if err := stream.Wait(ctx); err != nil {
-		return result, classifyPullError(ctx, err)
-	}
-
+	// There is deliberately no stream.Wait call here, and the omission is worth
+	// stating because the opposite reads as more careful.
+	//
+	// Wait is not a completion check to run AFTER the loop -- it IS the loop.
+	// The SDK implements it as `for jm, err := range r.JSONMessages(ctx)` with
+	// the same two error branches this loop has, so it is an ALTERNATIVE to
+	// ranging, not a companion to it. And JSONMessages closes the response body
+	// when it finishes, so calling both makes Wait read a closed body and fail
+	// with "http: read on closed response body" on every successful pull.
+	//
+	// Ranging to completion is therefore sufficient: a truncated stream yields
+	// a decode error, a cancelled context yields the context error, and a
+	// registry or daemon refusal arrives as message.Error -- all three handled
+	// above. Reaching this line means the daemon closed the stream cleanly.
 	result.Messages = tracker.messages
 	result.BytesReported = tracker.bytes
 	result.Layers = tracker.layers()

@@ -67,6 +67,9 @@ var routedPaths = []string{
 	APIPrefix + "/events",
 	APIPrefix + "/events/stream",
 	APIPrefix + "/events/{id}",
+	APIPrefix + "/executions",
+	APIPrefix + "/executions/{id}",
+	APIPrefix + "/executions/{id}/cancel",
 	APIPrefix + "/health",
 	APIPrefix + "/images",
 	APIPrefix + "/images/{id}",
@@ -111,16 +114,23 @@ var routedPaths = []string{
 // does not change a container to satisfy one, and adding a route that did would
 // have to be added to this literal in a diff a reviewer sees.
 //
-// The acquisition paths are the ONE exception to "this API cannot change the
-// Docker host", and the exception is exactly one thing: `POST /acquisitions`
-// downloads an approved, digest-pinned image into the local image store.
+// The acquisition paths were the first exception to "this API cannot change
+// the Docker host", and the exception is exactly one thing: `POST
+// /acquisitions` downloads an approved, digest-pinned image into the local
+// image store. It touches no container.
 //
-// There is still no path that APPLIES an image: nothing recreates, restarts,
-// stops, or reconfigures a container, and nothing removes or prunes an image.
-// A container keeps running the image it was created from. Adding any of those
-// would have to be added to this literal in a diff a reviewer sees -- and would
-// also have to get past the architecture test that keeps the Docker mutation
-// surface at exactly one method.
+// The execution paths are the second, and the larger: `POST /executions` stops
+// ONE container and replaces it with one built from its own configuration and
+// an image that was already downloaded and already verified. Its request body
+// carries an acquisition id and an optional idempotency key -- nothing that
+// names a container, an image, or any Docker parameter.
+//
+// What is STILL absent, and would have to be added to this literal in a diff a
+// reviewer sees: any path that rolls back, restores, restarts, pauses, execs
+// into, or reconfigures a container; any path that removes or prunes an image
+// or a volume; and any path that acts on more than one container. Each would
+// also have to get past the architecture tests that pin the image mutation
+// surface at one method and the container mutation surface at five.
 //
 // Nor is there a plan APPLY, execute, approve, or schedule path. POST
 // /plans/generate produces HarborMaster's own analysis of HarborMaster's own
@@ -170,14 +180,15 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 		// Substitute a concrete value for the wildcard so the request routes.
 		target := strings.ReplaceAll(pattern, "{id}", "1")
 
-		// The two POST-only paths. Everything else answers GET.
+		// The POST-only paths. Everything else answers GET.
 		method := http.MethodGet
 		switch pattern {
 		case APIPrefix + "/inventory/refresh",
 			APIPrefix + "/policy/evaluate",
 			APIPrefix + "/images/refresh",
 			APIPrefix + "/plans/generate",
-			APIPrefix + "/acquisitions/{id}/cancel":
+			APIPrefix + "/acquisitions/{id}/cancel",
+			APIPrefix + "/executions/{id}/cancel":
 			method = http.MethodPost
 		}
 

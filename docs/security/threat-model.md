@@ -32,14 +32,37 @@ Two consequences follow, and they shape everything below:
    *Docker API* read-only: the writes an API request needs are still permitted.
    The deployment documentation says this in the same words.
 
-**As of Phase 8, HarborMaster issues one write to that socket**: pulling an
-approved, digest-pinned image. This does not change consequence 1 — the process
-was already root-equivalent by virtue of holding the socket at all, and the
-defence was never "HarborMaster only reads". What it changes is the set of
-things a bug in HarborMaster's own logic could cause, so that set is deliberately
-tiny: one method, on its own interface, reachable from one service, that adds an
-image to the local store and can remove nothing and touch no container. It is
-off by default.
+**As of Phase 9, HarborMaster issues two kinds of write to that socket**, and
+both are off by default:
+
+1. **Pulling an approved, digest-pinned image** (Phase 8). One method, on its
+   own interface, reachable from one service. Adds to the local image store,
+   removes nothing, touches no container.
+2. **Recreating ONE container** (Phase 9). Five methods — create, start, stop,
+   rename, remove — on their own interface, reachable from one different
+   service.
+
+Neither changes consequence 1. The process was already root-equivalent by virtue
+of holding the socket at all, and the defence was never "HarborMaster only
+reads". What they change is the set of things a bug in HarborMaster's own logic
+could cause, so that set is bounded deliberately and narrowly:
+
+- Both capabilities are `nil` unless the deployment opts in, so a default
+  HarborMaster holds no write access at all — absent, not merely unused.
+- Neither interface can be reached by any package outside its owning service,
+  enforced by source-level architecture tests that name `internal/api` as
+  excluded.
+- The container capability cannot exec, attach, copy, commit, kill, pause,
+  update, or touch an image, a volume, or a network. It cannot force a removal
+  and has no field for removing volumes.
+- Every mutation targets a full 64-character container id read from the daemon
+  moments earlier, so nothing can be aimed by name.
+
+**The honest statement of what Phase 9 costs.** A bug in HarborMaster can now
+stop a running container. The mitigation is not that it cannot happen — it is
+that the original container is preserved through every failure path, that the
+outcome is recorded before the original is removed, and that a person is handed
+the exact steps to restore service. See R27 to R31.
 
 ---
 
@@ -132,9 +155,12 @@ largest residual risk in the product.
 | 5 policy read endpoints | GET | Definitions, the rule catalogue, violations, summary, per-container view |
 | `POST /api/v1/plans/generate` | POST | Schedules a plan generation pass and answers 202. Generates HarborMaster's own analysis of HarborMaster's own database: pulls nothing, changes no container, schedules no change. Coalesced and rate limited |
 | 3 plan read endpoints | GET | Plans with the estate summary, one plan, one container's planning view. No PATCH and no DELETE: plans are immutable |
-| `POST /api/v1/acquisitions` | POST | **The only endpoint that changes the Docker host.** Downloads an approved, digest-pinned image into the local image store. Changes no container. Off by default |
+| `POST /api/v1/acquisitions` | POST | Downloads an approved, digest-pinned image into the local image store. Changes no container. Off by default |
 | `POST /api/v1/acquisitions/{id}/cancel` | POST | Stops a download. Changes nothing on the host |
 | 2 acquisition read endpoints | GET | The history and one record with its audit trail |
+| `POST /api/v1/executions` | POST | **The only endpoint that changes something RUNNING.** Stops one container and replaces it with one built from its own configuration and an already-verified local image. Body carries an acquisition id and an optional idempotency key; unknown fields rejected. Off by default |
+| `POST /api/v1/executions/{id}/cancel` | POST | Stops a recreation that has not yet changed anything. Refused past the mutation point |
+| 2 execution read endpoints | GET | The history and one record with its verification results, recovery plan, and audit trail |
 | `GET /api/v1/events/stream` | GET | Long-lived SSE connection |
 | SPA shell and static assets | GET | Served from an embedded FS |
 
@@ -158,7 +184,8 @@ that a current change plan recommends, for a container that exists, from a
 registry the inventory already references, at a digest the registry is currently
 serving. They cannot supply a target: the request body carries a plan id and
 nothing else, and unknown fields are rejected. They cannot cause a container to
-change, because no such capability exists anywhere in the process.
+change through this endpoint: the acquisition service does not hold the
+container mutation capability.
 
 The realistic abuses are therefore resource abuse rather than compromise:
 repeatedly requesting downloads to consume disk or uplink. That is bounded by
@@ -171,6 +198,44 @@ partial state that HarborMaster reports as acquired.
 The disk-consumption risk is real and is recorded as R25. The mitigation an
 operator has today is the one that matters most everywhere else in this document:
 do not expose the port.
+
+**The recreation surface is the significant change in Phase 9**, and it is the
+most consequential thing in this document after R1 itself.
+
+Under R1, an anonymous caller who can reach the port and finds a deployment with
+`EXECUTION_ENABLED=true` **can take a container down**. Not permanently, not
+silently, and not arbitrarily — but down.
+
+What bounds it:
+
+- **They cannot choose the container or the image.** The request carries an
+  acquisition id. That acquisition must have SUCCEEDED, must be fresh, and must
+  not have been used before; its plan must still be current and still recommend
+  the change; the container must still exist and still be on the assessed image;
+  the inventory, the policy evaluation, and the registry evidence must all be
+  fresh; a usable snapshot must exist; and the image must still be present
+  locally carrying the approved digest. Every one of those is re-checked
+  immediately before anything is stopped.
+- **They cannot manufacture an opportunity.** An acquisition only exists because
+  an operator (or, under R1, an attacker) already went through the acquisition
+  path, which has its own full preflight. Single use means each one buys at most
+  one recreation.
+- **One at a time.** `EXECUTION_MAX_CONCURRENT` defaults to 1 and is capped at
+  4, and a partial unique index allows one active recreation per container.
+- **The container comes back.** The original is stopped and PARKED rather than
+  removed, and is removed only after every proof passes and the success is
+  durably recorded. Every failure path leaves it on the host, and the record
+  carries the commands to restore it.
+
+What is NOT bounded, and is stated rather than mitigated: the container is
+unavailable while the replacement starts and is verified, which is up to
+`EXECUTION_STARTUP_TIMEOUT` (five minutes by default). Recorded as R27.
+
+The design decision worth defending explicitly is the absence of rollback. An
+automatic undo would run at exactly the moment HarborMaster has demonstrated
+that its model of the host is wrong, and it would run unattended. Preserving
+both containers and handing a person precise instructions is slower and less
+impressive, and it cannot make a bad situation worse.
 
 **The change planning surface adds no capability**, which is the point worth
 stating. `POST /plans/generate` is the third asynchronous "do a pass" endpoint,
@@ -245,7 +310,8 @@ well-meaning "show the diagnosis in the UI" change.
 | **D**enial of service | Snapshot flooding | Rate limit, `(container_id, checksum)` dedup index, per-container capture lock | Low |
 | **D**enial of service | SSE connection exhaustion | Subscriber cap with `Retry-After`; bounded per-subscriber queues | Low |
 | **D**enial of service | Refresh flooding against the socket | Rate limit, single-flight refresh lock | Low |
-| **E**levation | Reaching Docker through the API | **No mutation capability exists anywhere in the codebase** | Low |
+| **D**enial of service | Recreation flooding to take containers down | Off by default; one active recreation per container (database index) and `EXECUTION_MAX_CONCURRENT` at 1 by default, 4 maximum; every recreation consumes a single-use acquisition that itself needed a recommending plan; write rate limiter | **Medium if enabled — see R28** |
+| **E**levation | Reaching Docker through the API | The API layer holds NO mutation capability. Architecture tests fail the build if `internal/api` names the image acquirer or the container mutator, so a handler cannot bypass the preflight even by importing the adapter | Low |
 
 ### TB2 — HarborMaster to Docker socket
 
@@ -258,6 +324,14 @@ well-meaning "show the diagnosis in the UI" change.
 | **T**ampering | The daemon or registry serves different content than requested | The image is re-inspected read-only after the pull and its digest and platform compared; a mismatch fails closed and is never retried | Low |
 | **D**enial of service | Repeated pulls exhaust disk or saturate the uplink | Global and per-registry concurrency limits, a pull timeout, a request deadline, and a duplicate-work index. Requests are manual and rate limited | Medium |
 | **D**enial of service | A hostile registry floods the progress stream | Bounded in three independent places: the adapter truncates and rate-limits, the service caps its writes, the repository caps stored rows | Low |
+| **T**ampering | The container mutation capability is used from somewhere that skips the preflight | `TestTheRecreationCapabilityIsNotReferencedOutsideItsOwners` fails the build if any package outside the execution service names `ContainerMutator`, `ConfigCapturer`, `CapturedConfig`, or any of the five method names | Low |
+| **T**ampering | The container mutation surface grows quietly | `TestTheContainerMutationSurfaceIsExactlyFiveMethods` pins the count and the names; `TestTheContainerMutatorCannotReachAnythingElse` refuses exec, attach, copy, commit, image, volume, and network verbs on it | Low |
+| **T**ampering | A mutation is aimed at a container other than the one that was checked | Every request carries a full 64-character container id, validated at the adapter. Nothing can be aimed by name, so no name-resolution window exists | Low |
+| **T**ampering | A recreation silently weakens the replacement's security posture | The replacement is re-inspected read-only and compared field by field against the original, including privileged, readonly rootfs, no-new-privileges, capabilities, security options, sysctls, devices, and namespaces. Any divergence fails closed and the original is not removed | Low |
+| **T**ampering | A crash leaves the host in a state HarborMaster misreports | A checkpoint is written after every mutation and before the next. Recovery reads checkpoints and issues no Docker call. An unconfirmed stop is reported as unconfirmed, not as "nothing changed" | Low |
+| **I**nfo disclosure | The create payload carries real secrets out of the adapter | `CapturedConfig` holds them in unexported fields; `LogValue`, `String`, and `MarshalJSON` are redacted; an architecture test pins the exported surface; round-trip tests put a known secret through `fmt` (including `%#v`), `slog`, and `encoding/json` | Low |
+| **D**enial of service | A recreation holds a container down indefinitely | `EXECUTION_STARTUP_TIMEOUT` bounds the wait, the whole mutating half runs under a derived budget, and the poll interval is bounded below so the wait cannot busy-loop the socket | Low |
+| **E**levation | A recreation is used to run something the plan never approved | The container is created from the digest-pinned reference the acquisition verified. Config, host config, and networking come from the container's OWN inspection and are never assembled from caller input; there is no request field for a command, mount, capability, or privilege flag | Low |
 | **I**nfo disclosure | Socket path in an API error | `docker.SanitizeError` maps every failure to a fixed phrase | Low |
 | **I**nfo disclosure | Raw daemon payload reaching a client | Only HarborMaster domain models are serialised; raw inspection is redacted before storage | Low |
 | **D**enial of service | Unbounded inspection concurrency | Worker semaphore, bounded by `INVENTORY_WORKERS` (max 64) | Low |
@@ -373,6 +447,11 @@ Ordered by severity. These are accepted, not solved.
 | R25 | **An anonymous caller can cause image downloads.** Under R1, anyone who can reach the port can request acquisitions and consume disk space and uplink bandwidth | **Medium** | Follows from R1. The alternative -- requiring a credential HarborMaster does not have a concept of -- is authentication, which is the fix for R1 itself | Off by default; every acquisition needs a plan that independently recommends it; global and per-registry concurrency limits, a pull timeout, a write rate limiter, and a duplicate-work index; loopback bind and an authenticating proxy |
 | R26 | **A pulled image consumes disk that HarborMaster does not reclaim.** There is no delete or prune capability, so acquired images accumulate until an operator removes them | **Low** | Adding image deletion would be a second, larger mutation capability -- one that can destroy something rather than add to it -- and is a worse trade than accumulation | Concurrency limits bound the rate; `docker image prune` is an operator's tool; every acquisition is recorded, so what was downloaded is always attributable |
 | R27 | **A digest mismatch means unapproved content is on the host.** Verification catches it and records it, but the layers are already in the local store | **Low** | The bytes arrive before anything can inspect them; catching it afterwards is the only point at which it CAN be caught | Never reported as acquired, never retried automatically, logged at error level with the evidence; no container is changed, so nothing runs it |
+| R28 | **An anonymous caller can take a container down.** Under R1, with `EXECUTION_ENABLED=true`, anyone who can reach the port can spend a succeeded acquisition on a recreation and interrupt the service for as long as the startup verification takes | **High if enabled** | Follows from R1 and is the reason the feature is off by default. The alternative — requiring a credential HarborMaster has no concept of — is authentication, which is the fix for R1 itself | Off by default, and refused at startup unless acquisition is also on; each recreation consumes a single-use acquisition that itself needed a recommending plan; one active recreation per container; `EXECUTION_MAX_CONCURRENT` defaults to 1; the original is preserved through every failure; loopback bind and an authenticating proxy |
+| R29 | **A container is unavailable while its replacement is verified.** Up to `EXECUTION_STARTUP_TIMEOUT` — five minutes by default — plus the stop and create | **Medium** | Removing the wait would mean removing the verification, which is the only thing that establishes the replacement works. A recreation that reported success on an unproved container would be worse than a slow one | Tune `EXECUTION_STARTUP_TIMEOUT` down for fast-starting services; a container with a health check gets a verdict as soon as the daemon has one rather than waiting out the clock; an explicit `unhealthy` fails immediately |
+| R30 | **A failed recreation leaves two containers on the host and does not restore service by itself** | **Medium** | Deliberate. An automatic rollback is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong | The original is never removed before the replacement is fully proved; the failed replacement is stopped and renamed off the production name; the record carries a `recovery` plan naming both containers by name and id with the exact commands; the summary counts these separately as `needsAttention`, and retention never prunes them |
+| R31 | **A recreation interrupted between a mutation and its checkpoint leaves HarborMaster uncertain what it did** | **Low** | Certainty here would need a two-phase commit against the Docker daemon, which the Engine API does not offer | The window is one Docker call wide; the pipeline stops rather than acting again on an uncertain record; recovery reports the uncertainty as uncertainty and tells the operator which single question to answer, rather than guessing in either direction |
+| R32 | **Configuration preservation can only reproduce what the daemon reports.** A container created with tooling that keeps state outside the container's own inspection — an external orchestrator's bookkeeping, for instance — is reproduced faithfully as Docker sees it and not as that tooling sees it | **Medium** | HarborMaster reads one source of truth, and inventing a second would mean guessing | The projection is compared field by field and any divergence fails closed with the original preserved; Compose-managed containers keep their Compose labels, so `compose up` continues to recognise the replacement; anonymous volumes are carried forward explicitly rather than recreated empty |
 | R22 | **A risk score is a judgement, not a measurement.** The weights are chosen by people and can be wrong for a given estate; a plan that reads "proceed" is not a guarantee the change is safe | **Medium** | Any risk model has this property, and the alternative — no assessment — leaves an operator with the same decision and less information. Making the weights configurable would make plans irreproducible between deployments, which costs more than it gains | Every factor names the rule that produced it and its contribution, so a verdict is auditable rather than opaque; the planner version is recorded on every plan and a rule change forces regeneration; nothing acts on a plan automatically |
 | R23 | **A plan is only as fresh as its inputs.** It rests on the last inventory refresh, the last registry lookup, and the last drift and policy passes, so a world that moved since any of those is assessed against stale evidence | **Low** | Reading live state would put a Docker call and a registry call behind an unauthenticated endpoint, which is a larger risk than staleness | A pass runs after every successful inventory refresh; each plan records when it was generated and the registry status it rested on; the UI reports a non-OK registry status as `cannot advise` rather than as a verdict |
 | R24 | **The freshness rule can act on a stale clock.** The evaluation time is excluded from the fingerprint deliberately, so an image crossing the 48-hour freshness boundary does not by itself produce a new plan | **Low** | Including a clock would make every fingerprint unique and defeat duplicate suppression entirely, which is what keeps the table from growing on every refresh | Documented at the fingerprint; the next genuine input change regenerates the plan, and the factor is worth 8 points of 100 |

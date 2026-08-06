@@ -20,6 +20,7 @@ import {
 } from "../components/AcquisitionBadges";
 import { DetailSection } from "../components/DetailSection";
 import { PageIntro } from "../components/PageIntro";
+import { RecreateContainerAction } from "../components/RecreateContainerAction";
 import {
   DisconnectedState,
   ErrorState,
@@ -169,6 +170,22 @@ export function AcquisitionDetail() {
             <dt className="text-content-muted">Size on disk</dt>
             <dd className="text-content">{formatBytes(acquisition.sizeBytes)}</dd>
           </dl>
+        </DetailSection>
+      )}
+
+      {/* The one place a recreation can be started from.
+          Deliberately here rather than on the plan page: a recreation needs an
+          image that is already on this host and already verified, and this is
+          the record that establishes both. */}
+      {acquisition.state === "succeeded" && (
+        <DetailSection
+          title="Apply this image"
+          description="Recreate the container on the image above. This stops it."
+        >
+          <RecreateContainerAction
+            acquisition={acquisition}
+            onRequested={state.refresh}
+          />
         </DetailSection>
       )}
 

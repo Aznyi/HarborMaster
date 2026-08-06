@@ -371,6 +371,87 @@ const (
 	MaxAcquisitionConcurrent    = 8
 	MaxAcquisitionEvents        = 2000
 
+	// DefaultExecutionEnabled is false, and it is the most consequential
+	// default in HarborMaster.
+	//
+	// Turning this on gives HarborMaster the ability to STOP AND REPLACE a
+	// running container. Acquisition, the only other write, adds an entry to
+	// the image store and changes nothing that is running; this changes
+	// something that is serving. It is off until a deployment asks for it.
+	DefaultExecutionEnabled = false
+
+	// DefaultExecutionStartupTimeout bounds the wait for a replacement to
+	// become healthy. Generous, because a startup probe with a start period is
+	// normal and an application that takes two minutes to warm up is not
+	// unhealthy.
+	DefaultExecutionStartupTimeout = 5 * time.Minute
+	// DefaultExecutionStabilityPeriod is how long a container with NO health
+	// check must stay running to count as stable.
+	//
+	// Short by necessity and honest about what it proves: staying up for thirty
+	// seconds establishes that the container did not crash on startup, and
+	// nothing more. A container that declares a health check gets a real
+	// verdict; this is the weaker evidence available when it does not.
+	DefaultExecutionStabilityPeriod = 30 * time.Second
+	// DefaultExecutionHealthPollInterval is how often the replacement is
+	// re-inspected while waiting.
+	DefaultExecutionHealthPollInterval = 2 * time.Second
+	// DefaultExecutionStopTimeout is how long the ORIGINAL is given to exit on
+	// its own before the daemon terminates it. Matches Docker's own default, so
+	// a container tuned for `docker stop` behaves the same here.
+	DefaultExecutionStopTimeout = 30 * time.Second
+
+	// DefaultExecutionMaxConcurrent bounds simultaneous recreations.
+	//
+	// ONE. Deliberately not tunable upward far: a recreation stops something
+	// that is serving, and doing several at once turns a contained failure into
+	// a multi-container outage nobody chose.
+	DefaultExecutionMaxConcurrent = 1
+
+	// DefaultExecutionRequestTTL is how long a queued request stays valid.
+	// Short, because the preflight evidence behind it ages: a request that has
+	// waited an hour was approved against a host that may no longer look the
+	// same.
+	DefaultExecutionRequestTTL = 15 * time.Minute
+	// DefaultExecutionAcquisitionFreshness is how recent the acquisition must
+	// be. An old download does not establish that the image is still present.
+	DefaultExecutionAcquisitionFreshness = 24 * time.Hour
+	// DefaultExecutionInventoryFreshness is how recent HarborMaster's view of
+	// the host must be before it will change one.
+	DefaultExecutionInventoryFreshness = 15 * time.Minute
+	// DefaultExecutionPolicyFreshness is how recent the policy evaluation must
+	// be. Compliance established last week is not compliance established now.
+	DefaultExecutionPolicyFreshness = 24 * time.Hour
+
+	DefaultExecutionMaxEvents     = 200
+	DefaultExecutionSweepInterval = 1 * time.Minute
+	DefaultExecutionPruneInterval = 6 * time.Hour
+	// DefaultExecutionRetentionAge is how long a COMPLETED record is kept. A
+	// year: this is the record of a container having been replaced, which is
+	// the most consequential thing HarborMaster does and the thing an audit is
+	// most likely to ask about. A failure that left containers behind is never
+	// pruned at all, whatever this says.
+	DefaultExecutionRetentionAge = 365 * 24 * time.Hour
+
+	// Execution bounds.
+	MinExecutionStartupTimeout     = 10 * time.Second
+	MaxExecutionStartupTimeout     = 30 * time.Minute
+	MinExecutionStabilityPeriod    = 1 * time.Second
+	MaxExecutionStabilityPeriod    = 10 * time.Minute
+	MinExecutionHealthPollInterval = 500 * time.Millisecond
+	MinExecutionStopTimeout        = 1 * time.Second
+	MaxExecutionStopTimeout        = 5 * time.Minute
+	MinExecutionRequestTTL         = 1 * time.Minute
+	MinExecutionSweepInterval      = 10 * time.Second
+	// MaxExecutionConcurrent is the hard ceiling on simultaneous recreations.
+	//
+	// Four, and the number is a judgement rather than a technical limit. A
+	// deployment that wants to replace a dozen containers at once wants fleet
+	// updates, which HarborMaster does not have and which would need its own
+	// design, its own blast-radius controls, and its own review.
+	MaxExecutionConcurrent = 4
+	MaxExecutionEvents     = 2000
+
 	// Planner bounds.
 	MinPlannerInterval      = 1 * time.Minute
 	MinPlannerPruneInterval = 1 * time.Minute
@@ -855,6 +936,94 @@ type Acquisition struct {
 	PruneInterval time.Duration
 }
 
+// Execution holds settings for manual container recreation.
+//
+// # This is the capability that changes something that is RUNNING
+//
+// Acquisition writes to the image store, which affects nothing that is serving.
+// This stops a container, creates a replacement, starts it, proves it, and
+// removes what it replaced. It is the largest privilege HarborMaster has, and
+// every setting here bounds it rather than extends it.
+//
+// **It is manual, single, and single-use.** No timer starts a recreation, no
+// setting makes one automatic, nothing here acts on more than one container,
+// and a succeeded acquisition can be executed exactly once. There is
+// deliberately no rollback setting, because there is no rollback.
+//
+// # Off by default
+//
+// Along with acquisition, and for a stronger reason.
+type Execution struct {
+	// Enabled turns recreation on. When false the endpoints report the feature
+	// disabled and no recreation can be requested or performed. Records already
+	// stored remain readable.
+	Enabled bool
+
+	// StartupTimeout bounds the wait for a replacement to become healthy. A
+	// replacement that exceeds it is treated as failed: quarantined, with the
+	// original preserved and a recovery plan recorded.
+	StartupTimeout time.Duration
+
+	// StabilityPeriod is how long a container with NO health check must stay
+	// running to count as stable.
+	//
+	// Weaker evidence than a health check and treated as such. It establishes
+	// that the container did not crash on startup, which is the most that can
+	// be established about a container that does not report on itself.
+	StabilityPeriod time.Duration
+
+	// HealthPollInterval is how often the replacement is re-inspected while
+	// waiting. Bounded below so a wait cannot become a busy loop against the
+	// Docker socket.
+	HealthPollInterval time.Duration
+
+	// StopTimeout is how long the ORIGINAL is given to exit on its own before
+	// the daemon terminates it.
+	StopTimeout time.Duration
+
+	// MaxConcurrent bounds simultaneous recreations. One by default: a
+	// recreation stops something that is serving, and several at once turn a
+	// contained failure into an outage nobody chose.
+	MaxConcurrent int
+
+	// RequestTTL is how long a queued request stays valid. Past it the request
+	// EXPIRES unstarted, having changed nothing.
+	RequestTTL time.Duration
+
+	// The freshness windows. Each answers the same question about a different
+	// piece of evidence: is this recent enough to act on? Acting on a stale
+	// answer is the failure mode the whole preflight exists to prevent, and a
+	// timestamp is the only way to detect the kind of staleness that is nobody's
+	// fault -- evidence that was correct and simply got old.
+	AcquisitionFreshness time.Duration
+	InventoryFreshness   time.Duration
+	PolicyFreshness      time.Duration
+
+	// RequireSnapshot refuses a recreation for a container with no usable
+	// configuration snapshot.
+	//
+	// On by default, and a stronger gate here than for acquisition. Recreating
+	// without a recorded baseline means that if the replacement is wrong, there
+	// is no authoritative account of what the container looked like before.
+	RequireSnapshot bool
+
+	// MaxEventsPerExecution bounds the audit trail for one recreation.
+	MaxEventsPerExecution int
+
+	// SweepInterval is how often the queue is re-examined for expired requests
+	// and for work a limit was blocking. Zero disables the periodic sweep.
+	SweepInterval time.Duration
+
+	// RetentionAge is how long a COMPLETED record is kept, and PruneInterval
+	// how often that runs. Zero retention keeps them forever.
+	//
+	// A failure that left containers on the host is NEVER pruned, whatever this
+	// says: removing it would leave an operator with two unexplained containers
+	// and nothing accounting for them.
+	RetentionAge  time.Duration
+	PruneInterval time.Duration
+}
+
 // Drift holds settings for configuration drift detection.
 //
 // Drift compares a container's CURRENT configuration against its baseline
@@ -936,6 +1105,7 @@ type Config struct {
 	ImageIntel  ImageIntel
 	Planner     Planner
 	Acquisition Acquisition
+	Execution   Execution
 }
 
 var (
@@ -1286,6 +1456,46 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.Execution.Enabled, err = boolVar(lookup, "EXECUTION_ENABLED", DefaultExecutionEnabled)
+	collect(err)
+	cfg.Execution.RequireSnapshot, err = boolVar(lookup, "EXECUTION_REQUIRE_SNAPSHOT", true)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback time.Duration
+		into     *time.Duration
+	}{
+		{"EXECUTION_STARTUP_TIMEOUT", DefaultExecutionStartupTimeout, &cfg.Execution.StartupTimeout},
+		{"EXECUTION_STABILITY_PERIOD", DefaultExecutionStabilityPeriod, &cfg.Execution.StabilityPeriod},
+		{"EXECUTION_HEALTH_POLL_INTERVAL", DefaultExecutionHealthPollInterval, &cfg.Execution.HealthPollInterval},
+		{"EXECUTION_STOP_TIMEOUT", DefaultExecutionStopTimeout, &cfg.Execution.StopTimeout},
+		{"EXECUTION_REQUEST_TTL", DefaultExecutionRequestTTL, &cfg.Execution.RequestTTL},
+		{"EXECUTION_ACQUISITION_FRESHNESS", DefaultExecutionAcquisitionFreshness, &cfg.Execution.AcquisitionFreshness},
+		{"EXECUTION_INVENTORY_FRESHNESS", DefaultExecutionInventoryFreshness, &cfg.Execution.InventoryFreshness},
+		{"EXECUTION_POLICY_FRESHNESS", DefaultExecutionPolicyFreshness, &cfg.Execution.PolicyFreshness},
+		{"EXECUTION_SWEEP_INTERVAL", DefaultExecutionSweepInterval, &cfg.Execution.SweepInterval},
+		{"EXECUTION_RETENTION_AGE", DefaultExecutionRetentionAge, &cfg.Execution.RetentionAge},
+		{"EXECUTION_PRUNE_INTERVAL", DefaultExecutionPruneInterval, &cfg.Execution.PruneInterval},
+	} {
+		value, convErr := durationVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"EXECUTION_MAX_CONCURRENT", DefaultExecutionMaxConcurrent, &cfg.Execution.MaxConcurrent},
+		{"EXECUTION_MAX_EVENTS", DefaultExecutionMaxEvents, &cfg.Execution.MaxEventsPerExecution},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -1372,8 +1582,113 @@ func (c Config) Validate() error {
 	errs = append(errs, c.ImageIntel.validate()...)
 	errs = append(errs, c.Planner.validate()...)
 	errs = append(errs, c.Acquisition.validate()...)
+	errs = append(errs, c.Execution.validate()...)
+
+	// Recreation without acquisition is not a configuration, it is a
+	// contradiction: an execution names an ACQUISITION, and with acquisition
+	// switched off there can never be one to name.
+	//
+	// Caught at startup rather than surfacing as a permanent refusal the first
+	// time an operator presses the button. A cross-section check, so it lives
+	// here rather than in either section's own validate.
+	if c.Execution.Enabled && !c.Acquisition.Enabled {
+		errs = append(errs, fmt.Errorf(
+			"%sEXECUTION_ENABLED requires %sACQUISITION_ENABLED: a recreation names an "+
+				"acquisition, and with acquisition switched off there can never be one",
+			envPrefix, envPrefix))
+	}
 
 	return errors.Join(errs...)
+}
+
+// validate checks the container recreation settings.
+//
+// Validated even when recreation is disabled, and the reasoning that applies to
+// every other section applies most sharply here: the day someone flips this one
+// on is the day HarborMaster gains the ability to stop a running container, and
+// that is not the day to discover a timeout is nonsense.
+func (e Execution) validate() []error {
+	var errs []error
+
+	for _, b := range []struct {
+		name     string
+		value    time.Duration
+		min, max time.Duration
+	}{
+		{"EXECUTION_STARTUP_TIMEOUT", e.StartupTimeout,
+			MinExecutionStartupTimeout, MaxExecutionStartupTimeout},
+		{"EXECUTION_STABILITY_PERIOD", e.StabilityPeriod,
+			MinExecutionStabilityPeriod, MaxExecutionStabilityPeriod},
+		{"EXECUTION_STOP_TIMEOUT", e.StopTimeout,
+			MinExecutionStopTimeout, MaxExecutionStopTimeout},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %s and %s",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	// Bounded below so a wait cannot become a busy loop against the Docker
+	// socket, and below the startup timeout so at least one poll happens.
+	if e.HealthPollInterval < MinExecutionHealthPollInterval {
+		errs = append(errs, fmt.Errorf("%sEXECUTION_HEALTH_POLL_INTERVAL must be at least %s",
+			envPrefix, MinExecutionHealthPollInterval))
+	}
+	if e.HealthPollInterval > e.StartupTimeout {
+		errs = append(errs, fmt.Errorf(
+			"%sEXECUTION_HEALTH_POLL_INTERVAL (%s) must not exceed %sEXECUTION_STARTUP_TIMEOUT (%s), "+
+				"or the replacement would never be checked",
+			envPrefix, e.HealthPollInterval, envPrefix, e.StartupTimeout))
+	}
+
+	if e.RequestTTL < MinExecutionRequestTTL {
+		errs = append(errs, fmt.Errorf("%sEXECUTION_REQUEST_TTL must be at least %s",
+			envPrefix, MinExecutionRequestTTL))
+	}
+	// Zero is the documented way to disable the periodic sweep.
+	if e.SweepInterval != 0 && e.SweepInterval < MinExecutionSweepInterval {
+		errs = append(errs, fmt.Errorf("%sEXECUTION_SWEEP_INTERVAL must be 0 (disabled) or at least %s",
+			envPrefix, MinExecutionSweepInterval))
+	}
+	if e.PruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sEXECUTION_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+	if e.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sEXECUTION_RETENTION_AGE must not be negative", envPrefix))
+	}
+
+	// Every freshness window must be positive. A zero or negative one would
+	// mean "any age is acceptable", which does not relax the check -- it
+	// removes it, while leaving the configuration looking as though the check
+	// is still there.
+	for _, window := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"EXECUTION_ACQUISITION_FRESHNESS", e.AcquisitionFreshness},
+		{"EXECUTION_INVENTORY_FRESHNESS", e.InventoryFreshness},
+		{"EXECUTION_POLICY_FRESHNESS", e.PolicyFreshness},
+	} {
+		if window.value <= 0 {
+			errs = append(errs, fmt.Errorf("%s%s must be positive", envPrefix, window.name))
+		}
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"EXECUTION_MAX_CONCURRENT", e.MaxConcurrent, 1, MaxExecutionConcurrent},
+		{"EXECUTION_MAX_EVENTS", e.MaxEventsPerExecution, 1, MaxExecutionEvents},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the image acquisition settings.

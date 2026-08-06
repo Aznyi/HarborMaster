@@ -34,10 +34,31 @@ module paths written in comments — and fails the build if:
 - the Moby engine monolith is imported;
 - the Moby SDK is imported from any package other than `internal/docker`.
 
-## 2. The read-only guarantee
+## 2. The observation guarantee
 
-HarborMaster's central claim is that it cannot change Docker. Three mechanisms
-uphold it, and all three would have to be defeated together.
+HarborMaster's central claim used to be that it cannot change Docker. As of
+Phase 9 that claim is no longer true as stated, so it is restated precisely
+rather than quietly kept:
+
+**Every service in HarborMaster observes Docker and cannot change it, except
+two — and each of those holds exactly one narrow capability, granted by what its
+constructor is handed.**
+
+| Interface | Methods | Held by |
+| --- | --- | --- |
+| `docker.Runtime` | 7 reads | every service |
+| `docker.ImageAcquirer` | 1 mutation: `PullByDigest` | the acquisition service |
+| `docker.ConfigCapturer` | 1 read: `CaptureConfig` | the execution service |
+| `docker.ContainerMutator` | 5 mutations: create, start, stop, rename, remove | the execution service |
+
+Both capabilities are OFF by default and are `nil` unless the deployment opts
+in, so a default HarborMaster holds no write access to its Docker host at all —
+the capability is absent rather than merely unused.
+
+`CaptureConfig` is a read and is deliberately NOT on `Runtime`: the value it
+returns is the container-create payload, and every service receives `Runtime`.
+Putting it there would hand a container's real environment to the drift engine,
+the policy engine, and the planner, none of which has any use for it.
 
 **One narrow interface.** `docker.Runtime` has exactly seven methods:
 
@@ -57,6 +78,13 @@ added to that list, in a diff a reviewer sees.
 
 Gaining write access therefore requires editing the interface, editing two
 tests, and explaining why in a pull request. That is the point.
+
+**The same discipline applies to the two write interfaces.** Each is pinned by
+its own exact-set test, each by its own verb test, and each by a source-level
+test that fails the build if any package outside its owning service so much as
+names it. `internal/api` is absent from both allowlists: a handler that could
+reach a mutation directly would bypass the preflight revalidation, which is the
+whole safety model.
 
 ## 3. Where secrets are stopped
 
@@ -224,7 +252,7 @@ local image store. It cannot change a container, and it cannot remove an image.*
 
 | Property | Mechanism | File |
 | --- | --- | --- |
-| The mutation surface is ONE method | `docker.ImageAcquirer` has exactly one method. Three architecture tests pin the count, refuse container verbs on it, and refuse any package outside the acquisition service from referencing it | `internal/arch` |
+| The image mutation surface is ONE method | `docker.ImageAcquirer` has exactly one method. Three architecture tests pin the count, refuse container verbs on it, and refuse any package outside the acquisition service from referencing it. This is still true after Phase 9: containers are changed through a DIFFERENT interface held by a DIFFERENT service, so a component able to pull is still unable to apply | `internal/arch` |
 | The read-only surface is unchanged | `docker.Runtime` still has its seven observation methods, pinned by the pre-existing tests. Every other service receives that interface and therefore cannot pull | `internal/docker/inventory.go` |
 | Capability is granted, not assumed | The acquirer is nil unless the deployment opted in, and is handed to exactly one service in `main` | `cmd/harbormaster/main.go` |
 | No pull is expressible without a digest | `PullTarget.Reference()` has no branch that produces a tag, and `Validate` refuses an absent or malformed digest before the daemon is contacted | `internal/docker/acquire.go` |
@@ -250,6 +278,87 @@ would be confidently wrong:
   the freshness window refuses rather than being used.
 - **A restart does not license resuming a transfer.** The image on the host now
   may not be the one that pull produced.
+
+## 3f. Manual container recreation
+
+Phase 9 gave HarborMaster its first CONTAINER mutation, and its largest
+privilege. This section states the limits, because the limits are the design.
+
+**HarborMaster can replace ONE container, ONCE, on an image an operator already
+downloaded and HarborMaster already verified, when a current plan recommends
+it.** It cannot roll back, cannot act on more than one container, cannot run on
+a schedule, and cannot retry.
+
+### The pipeline, and where the point of no return is
+
+```
+queued → validating → capturing │ creating → starting → verifying → succeeded
+└──── changes nothing ─────────┘ └──── the host is being changed ────┘
+        freely cancellable              cancellation refused
+```
+
+The transition into `creating` is the MUTATION POINT. Before it, an operator can
+cancel and nothing has happened. After it, cancellation is refused and the
+in-process cancel function is unregistered — a recreation that has stopped a
+container must reach a RECORDED conclusion, because an abandoned one leaves a
+host in a state nobody chose and nobody wrote down.
+
+### The checkpoint is what survives a crash
+
+`state` says what HarborMaster was doing. `checkpoint` says what is TRUE OF THE
+HOST, and it is written after each Docker mutation succeeds and before the next
+is attempted. After a crash only the second question matters.
+
+**A checkpoint that cannot be written stops the pipeline.** It is the one write
+in HarborMaster whose failure is itself a safety event: the host has been
+changed and HarborMaster cannot prove it recorded the fact. It does NOT retry
+the mutation. Repeating a stop, a rename, or a remove against a host whose
+recorded state is uncertain is how a recoverable situation becomes an
+unrecoverable one.
+
+Restart recovery therefore reads checkpoints and issues **no Docker call at
+all**. It settles each interrupted row from its own checkpoint and attaches a
+manual recovery plan. Resuming would mean continuing a mutation sequence whose
+last step nobody watched; undoing would mean mutating on the strength of the
+same uncertainty.
+
+### The properties
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| The container mutation surface is FIVE methods | `docker.ContainerMutator` pins create, start, stop, rename, remove. Four architecture tests pin the count and names, refuse image/exec/volume/network verbs on it, pin the capture interface at one read, and refuse any package outside the execution service from naming any of it | `internal/arch` |
+| No SDK option struct is reachable | Every method takes a HarborMaster-owned request. There is no field for a command, a mount, a device, a capability, or a force flag | `internal/docker/recreate.go` |
+| Mutations target a FULL container id | Exactly 64 lowercase hex, validated at the adapter. Nothing can be aimed by name, so no window exists in which a name resolves to a container other than the one that was checked | `validContainerID` |
+| Remove cannot force and cannot delete volumes | Both hardcoded false, and `RemoveRequest` has exactly one field. A container's data is not HarborMaster's to delete, and forcing would discard the caller's evidence that it was stopped | `Client.RemoveContainer` |
+| The create payload never leaves `internal/docker` | `CapturedConfig` holds the environment, log options, and SDK structs in UNEXPORTED fields. The service holds the value and hands it back; it cannot read, log, or serialise it | `CapturedConfig` |
+| The secret boundary is tested three ways | Unexported fields (the compiler); an architecture test pinning the exported field and method sets; round-trip tests putting a known secret through `fmt` (including `%#v`), `slog`, and `encoding/json` | `internal/arch`, `internal/docker/recreate_test.go` |
+| The service sees a VALUE-FREE projection | `Summary()` renders environment NAMES, mount destinations, network names, and capability lists. A sensitive value contributes a keyed digest under the installation key the snapshots use | `domain.BuildPreservationSummary` |
+| The original is parked, never removed early | Stopped and renamed `<name>.hm-old-<executionId>`. Removed only after all four proofs pass AND the success is durably recorded | `ExecutionService.succeed` |
+| Four proofs, and `unknown` is not a pass | Health or stability, image digest, configuration preservation, network attachment. `Verification.Passed()` requires all four to read `passed` | `domain.ExecutionVerification` |
+| Anonymous volumes are carried forward | A daemon-created volume is converted to an EXPLICIT mount naming the volume that already exists. Recreating naively would give the replacement an empty volume and orphan the data | `implicitVolumeMounts` |
+| Daemon-assigned values are stripped | A hostname equal to the container's own short id, plus IP addresses, gateways, MAC addresses, and endpoint ids. Sending them back would pin the replacement to a sandbox that is about to be destroyed | `copyConfigForCreate`, `copyNetworksForCreate` |
+| An acquisition is SINGLE USE | A full unique index on `acquisition_id`, not a partial one. One execution per acquisition, ever, with no override parameter | `0010_executions.sql` |
+| One recreation per container | A partial unique index over the active states. Two would both stop it and both fight for its name | `0010_executions.sql` |
+| Container names are DERIVED, never supplied | Built from a name read from the daemon and an id from the system entropy source, then re-validated against an allowlist. Refused in the PREFLIGHT if they cannot be produced, before anything is stopped | `internal/domain/execution_names.go` |
+| Shutdown is bounded and recoverable | The mutation context carries a 10-second grace so a call in flight can finish and its checkpoint land; the pipeline also checks for shutdown at every step boundary, so in the common case it stops at the next one | `executionShutdownGrace`, `shuttingDown` |
+| Recovery plans are text | Assembled from a fixed vocabulary and names HarborMaster generated or read from the daemon. Nothing executes one; there is no endpoint and no capability | `internal/domain/recovery.go` |
+
+### Five conclusions the feature refuses to draw
+
+- **A running replacement is not a successful recreation.** Only all four proofs
+  together can conclude that, and a proof that was not reached establishes
+  nothing.
+- **A failure is not a reason to act again.** HarborMaster does not roll back.
+  It stops, quarantines the replacement, preserves both containers, and records
+  what a person would do.
+- **A recorded state is not a known state after a failed write.** The pipeline
+  stops rather than assume.
+- **An empty checkpoint does not always mean "nothing changed".** With
+  `mutated_at` set it means a stop was issued and never confirmed, and the
+  recovery plan says exactly that rather than guessing in either direction.
+- **A previous approval does not license a second application.** An acquisition
+  is single use; another recreation needs a fresh plan assessed against the
+  world as it is now.
 
 ## 4. Trust boundaries in code
 
@@ -423,8 +532,12 @@ Listing these so their absence reads as a decision rather than an oversight.
 | --- | --- |
 | Authentication | Deferred to a later phase. **The largest residual risk.** |
 | RBAC | Follows authentication |
-| Any Docker mutation beyond one image pull | Phase 8 added exactly one: downloading an approved, digest-pinned image. Everything else remains absent, and the mutation interface is pinned at one method by test |
-| Restore / rollback / update | Later phases; snapshots prepare for them |
+| Any Docker mutation beyond a digest-pinned pull and a single-container recreate | Phase 8 added one image mutation, Phase 9 added five container lifecycle methods. Both surfaces are pinned by test, held by separate services, and off by default. Everything else remains absent |
+| Rollback | **Explicitly not built.** A failed recreation quarantines the replacement, preserves both containers, and records manual steps. An automatic undo is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong |
+| Restore | Later phase; snapshots prepare for it |
+| Automatic, scheduled, or fleet updates | Every recreation is requested by an operator and acts on ONE container. No timer creates work, and `EXECUTION_MAX_CONCURRENT` is capped at four with a default of one |
+| Retrying a recreation | HarborMaster stops at the first failure. A retry is a new plan and a new acquisition |
+| Image or volume deletion | Still absent. `RemoveRequest` can remove a stopped CONTAINER and has no field for volumes or force |
 | Arbitrary command execution | Never. Not a feature, a category of vulnerability |
 | Template or plugin execution | Same |
 | User-controlled file access | Same |

@@ -4,6 +4,8 @@ import { AppShell } from "./components/AppShell";
 import { useHealth } from "./hooks/useHealth";
 import { AcquisitionDetail } from "./pages/AcquisitionDetail";
 import { Acquisitions } from "./pages/Acquisitions";
+import { ExecutionDetail } from "./pages/ExecutionDetail";
+import { Executions } from "./pages/Executions";
 import { ChangePlans } from "./pages/ChangePlans";
 import { ContainerDetailPage } from "./pages/ContainerDetail";
 import { ContainerPlan } from "./pages/ContainerPlan";
@@ -52,6 +54,8 @@ export function App() {
         <Route path="/plans/container/:id" element={<ContainerPlan />} />
         <Route path="/acquisitions" element={<Acquisitions />} />
         <Route path="/acquisitions/:id" element={<AcquisitionDetail />} />
+        <Route path="/executions" element={<Executions />} />
+        <Route path="/executions/:id" element={<ExecutionDetail />} />
         <Route path="/events" element={<Events />} />
         <Route path="/settings" element={<Settings health={health} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

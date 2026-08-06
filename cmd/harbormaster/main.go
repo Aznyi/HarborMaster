@@ -463,6 +463,48 @@ func run() error {
 		Logger:   logger,
 	})
 
+	// Manual container recreation.
+	//
+	// HARBORMASTER'S LARGEST PRIVILEGE. Acquisition above writes to the image
+	// store, which affects nothing that is serving. This can stop a running
+	// container and replace it.
+	//
+	// Two capabilities are handed over here and nowhere else in this function:
+	// docker.ConfigCapturer, which reads a container's live configuration into
+	// an opaque value, and docker.ContainerMutator, whose five methods are the
+	// whole of HarborMaster's ability to change a container. Every other
+	// service above holds dockerClient only through the read-only
+	// docker.Runtime interface and therefore cannot reach either.
+	//
+	// Off unless the deployment asked for it, and configuration validation
+	// refuses to start with recreation on and acquisition off. When disabled
+	// both stay nil and the service refuses everything -- so the capability is
+	// ABSENT rather than merely unused.
+	var (
+		capturer docker.ConfigCapturer
+		mutator  docker.ContainerMutator
+	)
+	if cfg.Execution.Enabled {
+		capturer = dockerClient
+		mutator = dockerClient
+	}
+	executions := service.NewExecutionService(service.ExecutionOptions{
+		Store: db.Executions,
+		Evidence: service.NewExecutionEvidence(
+			db.Acquisitions, db.Plans, db.Containers,
+			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
+		Runtime:  dockerClient,
+		Capturer: capturer,
+		Mutator:  mutator,
+		// The same installation key the snapshots use. Configuration
+		// preservation compares sensitive values as keyed digests, and digests
+		// produced under a different key are not comparable -- so sharing the
+		// key is what makes the comparison mean anything.
+		Hasher: hasher,
+		Config: cfg.Execution,
+		Logger: logger,
+	})
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -504,7 +546,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(8)
+	background.Add(9)
 
 	go func() {
 		defer background.Done()
@@ -537,6 +579,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		acquisitions.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		executions.Run(ctx)
 	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
@@ -575,6 +621,7 @@ func run() error {
 		Planner: planner,
 
 		Acquisitions: acquisitions,
+		Executions:   executions,
 
 		Logger:         logger,
 		Config:         cfg.Server,

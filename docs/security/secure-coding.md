@@ -28,6 +28,40 @@ Handlers read HarborMaster's inventory. A read endpoint that can generate
 privileged socket traffic is a denial-of-service amplifier: one HTTP request
 becomes a full host sweep, repeatable at will.
 
+**1.5 Never widen a mutation interface without editing its test.**
+There are exactly two: `docker.ImageAcquirer` (one method) and
+`docker.ContainerMutator` (five). Each is pinned by an exact-set test, a verb
+test, and a source-level test naming the packages allowed to reference it.
+Adding a method means editing tests whose entire subject is that limit — which
+is what makes the change visible in review.
+
+**1.6 Never take a Docker SDK option struct as a parameter.**
+Every mutation method takes a HarborMaster-owned request struct built from
+validated components. An exported SDK options field is a field somebody can
+eventually fill from a request body.
+
+**1.7 Always target a mutation by full container id.**
+Sixty-four lowercase hex, validated at the adapter. A short id or a name can
+resolve to a different container than the one the preflight checked, and the
+whole safety model rests on those being the same container.
+
+**1.8 Never add an exported field or method to `docker.CapturedConfig`.**
+It holds a container's real environment and log-driver credentials in unexported
+fields, and that is the entire secret boundary for recreation. If a caller needs
+to know something about a captured configuration, add it to the value-free
+projection `Summary` returns.
+
+**1.9 A failed checkpoint stops the pipeline; it never triggers a retry.**
+Repeating a stop, a rename, or a remove against a host whose recorded state is
+uncertain is how a recoverable situation becomes an unrecoverable one. Record
+the uncertainty and hand it to a person.
+
+**1.10 Never remove the original before the replacement is proved AND the
+success is durable.**
+All four verifications must read `passed` — an `unknown` is not a pass — and the
+success record must have been written. If either is missing, preserve both
+containers and fail closed.
+
 ---
 
 ## 2. Secrets

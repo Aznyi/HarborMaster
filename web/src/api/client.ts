@@ -79,6 +79,13 @@ import type {
   AcquisitionQuery,
   AcquisitionRequest,
 } from "./acquisitionTypes";
+import type {
+  Execution,
+  ExecutionDetailResponse,
+  ExecutionListResponse,
+  ExecutionQuery,
+  ExecutionRequest,
+} from "./executionTypes";
 
 /** Versioned base path. Relative, so the app works behind any mount point. */
 export const API_BASE = "/api/v1";
@@ -1104,6 +1111,101 @@ export function cancelAcquisition(
 ): Promise<Acquisition> {
   return request<Acquisition>(
     `/acquisitions/${encodeURIComponent(acquisitionId)}/cancel`,
+    options,
+    "POST",
+  );
+}
+
+/**
+ * Container recreation.
+ *
+ * # The only calls in this client that change something RUNNING
+ *
+ * `requestExecution` takes an ACQUISITION ID. There is no container, image,
+ * digest, command, mount, capability, timeout, or force parameter anywhere
+ * below, and the server rejects unknown fields rather than ignoring them.
+ * Everything about what will happen is derived server-side from the
+ * acquisition, and revalidated immediately before the first mutation.
+ *
+ * There is deliberately no rollback, restore, retry, or force call, and no
+ * server capability behind one.
+ */
+
+/** Builds the execution listing query string from closed vocabularies. */
+function buildExecutionQuery(query: ExecutionQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  if (query.activeOnly !== undefined) {
+    params.set("activeOnly", String(query.activeOnly));
+  }
+  if (query.needsAttention !== undefined) {
+    params.set("needsAttention", String(query.needsAttention));
+  }
+
+  for (const state of query.state ?? []) params.append("state", state);
+  for (const failure of query.failure ?? []) params.append("failure", failure);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/executions */
+export function listExecutions(
+  query: ExecutionQuery = {},
+  options?: RequestOptions,
+): Promise<ExecutionListResponse> {
+  return request<ExecutionListResponse>(
+    `/executions${buildExecutionQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/executions/{id} */
+export function getExecution(
+  executionId: string,
+  options?: RequestOptions,
+): Promise<ExecutionDetailResponse> {
+  return request<ExecutionDetailResponse>(
+    `/executions/${encodeURIComponent(executionId)}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/executions
+ *
+ * Asks HarborMaster to recreate one container on an image it has already
+ * downloaded and verified. Returns once the request is *accepted*, not once the
+ * recreation finishes: the server answers 202 and the work runs in the
+ * background.
+ *
+ * **This stops a running container.** The original is parked rather than
+ * removed, and it is removed only after the replacement passes every proof.
+ */
+export function requestExecution(
+  body: ExecutionRequest,
+  options?: RequestOptions,
+): Promise<Execution> {
+  return request<Execution>("/executions", options, "POST", body);
+}
+
+/**
+ * POST /api/v1/executions/{id}/cancel
+ *
+ * Stops a recreation that has not yet changed anything. Past the mutation point
+ * the server answers 409: a recreation that has stopped a container must reach
+ * a recorded conclusion.
+ */
+export function cancelExecution(
+  executionId: string,
+  options?: RequestOptions,
+): Promise<Execution> {
+  return request<Execution>(
+    `/executions/${encodeURIComponent(executionId)}/cancel`,
     options,
     "POST",
   );

@@ -165,6 +165,42 @@ is lost, and no operator action is required.**
 | An event batch | Whole batches only. The unique index on the fingerprint rejects a duplicate on replay. |
 | A migration | The last **complete** migration. The interrupted one is retried on the next start. |
 | Event engine state | Timestamps and the reconnect count, so "has this been flapping" survives a restart. |
+| An image acquisition | Nothing is resumed. An unverified transfer is failed, because the image on the host now may not be the one that pull produced. |
+| **A container recreation** | The **checkpoint**, which says what was done to the host. Nothing is resumed and nothing is undone. See below. |
+
+### A container recreation interrupted by a restart
+
+This is the only crash that can leave something on the host rather than only in
+the database, so it is worth reading before it happens.
+
+**HarborMaster makes no Docker call during recovery.** It reads each interrupted
+row's checkpoint, records the outcome as `interrupted`, and attaches a recovery
+plan. Resuming would mean continuing a mutation sequence whose last step nobody
+watched; undoing would mean mutating on the strength of the same uncertainty.
+
+| Checkpoint | What is on the host | What the plan says |
+| --- | --- | --- |
+| *(empty, `mutatedAt` unset)* | Nothing was changed | Nothing to do |
+| *(empty, `mutatedAt` set)* | **Unknown.** A stop was issued and never confirmed | Check whether the container is running; start it if not |
+| `originalStopped` | The original is stopped under its own name | `docker start <name>` |
+| `originalParked` | The original is stopped and renamed aside | Rename it back, then start it |
+| `replacementCreated` / `replacementStarted` | Both containers exist; neither is serving | Read the replacement's logs, then rename the original back and start it |
+| `replacementVerified` | The replacement is running and proved; the original is still parked | Confirm, then remove the parked original |
+| `originalRemoved` | The recreation completed | Nothing to do |
+
+The record is never pruned while it is in this state, and the list page counts
+it under **Needs attention**. Find them with:
+
+```sh
+curl -s localhost:8080/api/v1/executions?needsAttention=true | jq
+```
+
+A container HarborMaster parked is identifiable on the host by its name:
+
+```sh
+docker ps -a --filter 'name=.hm-old-'    # originals waiting to be settled
+docker ps -a --filter 'name=.hm-failed-' # replacements kept for diagnosis
+```
 
 `diagnose` reports `rows still running` if any refresh row is left in the
 `running` state. It should always be zero: a refresh is recorded only when it
@@ -190,7 +226,7 @@ On `SIGINT` or `SIGTERM`, in order:
 
 1. The HTTP server drains. In-flight requests and open SSE streams end first.
 2. Background services stop: the inventory loop, the event engine, snapshot
-   retention.
+   retention, image acquisition, container recreation.
 3. The Docker client and the database close. The database **must** close last,
    or a final event flush would write to a closed handle.
 
@@ -209,6 +245,24 @@ rolled back by the database; an unbounded hang is not recoverable.
 
 `Close` checkpoints the write-ahead log (`wal_checkpoint(TRUNCATE)`), so a clean
 stop leaves no log to replay and a subsequent file copy is complete.
+
+### Shutting down mid-recreation
+
+A container recreation is the one background task that can be holding a
+container down when the signal arrives, so it gets its own discipline:
+
+- The pipeline checks for shutdown **at every step boundary** and stops there,
+  with its checkpoint current. In the common case no grace is used at all.
+- A Docker call already in flight gets a **10-second grace** — under the default
+  shutdown budget, deliberately, so this feature cannot be the reason a shutdown
+  overruns. That is enough for the call to return and its checkpoint to land.
+- The verification wait watches the shutdown signal separately from the mutation
+  budget. It is entirely reads, so abandoning it changes nothing.
+
+The result is that a recreation interrupted by a shutdown lands on a recorded
+checkpoint, and the next start settles it from the table above. A shutdown mid-
+recreation is therefore recoverable by an operator following a plan, rather than
+a container in a state nobody wrote down.
 
 ---
 

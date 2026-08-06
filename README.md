@@ -15,13 +15,21 @@ by the time HarborMaster can change a container it can already undo it.
 > that inventory current. Watching events does not change anything: an event
 > only ever causes HarborMaster to re-read the host.
 >
-> Its one ability to change the host is **downloading an approved,
-> digest-pinned image** into the local image store — off by default, requested
-> by a person, and verified afterwards. Even then **it does not update
-> containers**: it cannot create, recreate, start, stop, restart, or remove a
-> container, cannot delete or prune an image, and has no command-execution path.
-> See [Safe image acquisition](#safe-image-acquisition) for the limits and
-> [Status](#status) for what is and is not here yet.
+> It has exactly two abilities to change the host, both **off by default** and
+> both requested by a person:
+>
+> 1. **Downloading an approved, digest-pinned image** into the local image
+>    store, verified afterwards. It touches no container. See
+>    [Safe image acquisition](#safe-image-acquisition).
+> 2. **Recreating ONE container** on an image it already downloaded and
+>    verified, preserving that container's configuration. The original is kept
+>    until the replacement is proved, and there is **no automatic rollback**.
+>    See [Manual container recreation](#manual-container-recreation).
+>
+> Everything else remains absent: no automatic or scheduled updates, no fleet
+> updates, no rollback, no restore, no image deletion or pruning, and no
+> command-execution path of any kind. See [Status](#status) for what is and is
+> not here yet.
 
 ## Contents
 
@@ -35,6 +43,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Image intelligence](#image-intelligence)
 - [Change planning](#change-planning)
 - [Safe image acquisition](#safe-image-acquisition)
+- [Manual container recreation](#manual-container-recreation)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -292,19 +301,33 @@ make docker-smoke   # build and run deployments/smoke-test.sh against it
 
 HarborMaster reads the local Docker host and stores a normalized picture of it.
 
-### The read-only guarantee
+### The observation guarantee
 
-`internal/docker` is the only package that talks to the Docker Engine, and it
-exposes exactly five operations: `Ping`, `ListContainers`, `InspectContainer`,
-`InspectImage`, `ListNetworks`, and `ListVolumes`. Every one is an observation.
-There is no method that creates, starts, stops, removes, pulls, or executes
-anything, and no accessor that hands the underlying SDK client to another
-package. Gaining the ability to mutate Docker requires editing that package,
-which makes it visible in a diff.
+`internal/docker` is the only package that talks to the Docker Engine.
 
-The API has one endpoint that accepts a write method,
-`POST /api/v1/inventory/refresh`. It re-reads the host and replaces
-HarborMaster's own records. It changes nothing on the Docker host.
+The interface every service receives, `docker.Runtime`, exposes seven
+operations: `Ping`, `ListContainers`, `InspectContainer`, `InspectImage`,
+`ListNetworks`, `ListVolumes`, and `StreamEvents`. Every one is an observation,
+and its exact method set is pinned by a test. There is no accessor that hands
+the underlying SDK client to another package.
+
+Two capabilities sit outside it, each on its own interface, each held by exactly
+one service, and each `nil` unless the deployment opts in:
+
+| Interface | Methods | Held by |
+| --- | --- | --- |
+| `docker.ImageAcquirer` | 1: pull a digest-pinned image | the acquisition service |
+| `docker.ContainerMutator` | 5: create, start, stop, rename, remove | the execution service |
+
+Capability is granted by what a constructor is handed. The inventory, drift,
+policy, planning, and image-intelligence services all receive `Runtime` and
+therefore cannot change anything, and architecture tests fail the build if any
+package outside a capability's owner so much as names it — `internal/api`
+included.
+
+The inventory itself is unchanged: `POST /api/v1/inventory/refresh` re-reads the
+host and replaces HarborMaster's own records, and changes nothing on the Docker
+host.
 
 ### How a refresh works
 
@@ -1054,24 +1077,24 @@ It is coalesced, so calling it in a loop produces one pass rather than a backlog
 
 ## Safe image acquisition
 
-HarborMaster can download an approved image to your host. This is its **only**
-ability to change the Docker host, and it is off by default.
+HarborMaster can download an approved image to your host. It is off by default.
 
-### It does not update containers
+### Acquiring an image does not update a container
 
 Worth stating first, because it is the thing most easily assumed. Acquiring an
 image puts layers in the daemon's local image store. **No container is stopped,
-started, recreated, or reconfigured** — a container keeps running the image it
-was created from, and an acquired image sits in the store beside it, ready for
-you to use with your own tooling.
+started, recreated, or reconfigured by an acquisition** — a container keeps
+running the image it was created from, and an acquired image sits in the store
+beside it.
 
-There is no endpoint, no setting, and no button that applies an image, and none
-that deletes or prunes one.
+Applying one is a separate, separately-enabled capability held by a different
+service: see [Manual container recreation](#manual-container-recreation). There
+is still no endpoint, setting, or button that deletes or prunes an image.
 
-### The mutation surface is one method
+### The image mutation surface is one method
 
 `docker.Runtime` — which every other service receives — remains read-only, with
-its exact method set pinned by a test. The write capability lives on its own
+its exact method set pinned by a test. The pull capability lives on its own
 interface, `docker.ImageAcquirer`, with **exactly one method**: pull a
 digest-pinned image. Three architecture tests keep it there:
 
@@ -1160,6 +1183,129 @@ never verified, and an unverified image must never be recorded as acquired.
 Re-verifying instead would mean asserting that the image on the host now is the
 one that particular pull produced, which is exactly the assumption verification
 exists to avoid making.
+
+## Manual container recreation
+
+HarborMaster can replace one container with a new one built from its own
+configuration, running an image it already downloaded and verified.
+
+**This is the largest thing HarborMaster does, and the only thing that changes
+something running.** It is off by default, and refuses to start unless image
+acquisition is enabled too.
+
+### What it does, in order
+
+```
+stop the original  →  rename it aside  →  create the replacement  →  start it
+                                                                        ↓
+       remove the original  ←  record the success  ←  prove all four checks
+```
+
+The original is **parked, not removed**: stopped and renamed
+`<name>.hm-old-<executionId>`. It is removed only after every verification
+passes *and* the success has been written durably. Any failure before that point
+leaves it exactly where it is, which is what makes an unsuccessful recreation
+recoverable by hand rather than an outage with no way back.
+
+### The four proofs
+
+All four must pass. A check that was never reached reads `unknown`, and an
+`unknown` is never treated as a pass.
+
+| Proof | What it establishes |
+| --- | --- |
+| **Health** or **stability** | The replacement works. A container with a health check gets a real verdict; one without must stay running for a configured window, which is recorded as the weaker evidence it is |
+| **Image** | It is running the digest that was approved, not a tag that happens to point there |
+| **Configuration** | Its configuration matches the original's, field by field — including capabilities, security options, read-only rootfs, namespaces, limits, mounts, and ports |
+| **Network** | It is attached to every network the original was on, with the same aliases |
+
+### There is no rollback
+
+Deliberately. When a recreation fails after the first mutation, HarborMaster:
+
+- stops the replacement and renames it `<name>.hm-failed-<executionId>`, so a
+  container that failed its checks is not left serving under the production
+  name;
+- **removes neither container** — both are evidence;
+- records a manual recovery plan naming both by name and id, with the exact
+  commands to restore service.
+
+An automatic undo would be another unattended mutation, performed at exactly the
+moment HarborMaster has demonstrated that its model of the host is wrong. The
+UI, the API, and the record all say this in as many words, and the confirmation
+dialog says it before you act.
+
+### Configuration is reproduced, and secrets are not re-derived
+
+The container's live configuration is read into a value the execution service
+**cannot inspect, log, or serialise** — its environment, log-driver options, and
+SDK structures live in unexported fields inside `internal/docker`, and it is
+handed straight back to the daemon. What the service and the API can see is a
+value-free projection: environment *names*, mount destinations, network names,
+capability lists. A sensitive value contributes a keyed digest and never a
+value, under the same installation key the snapshots use.
+
+Anonymous volumes are carried forward **explicitly**, naming the volume that
+already exists. Recreating naively would give the replacement a brand new empty
+volume and orphan the original's data, which is data loss dressed up as an
+update.
+
+### The mutation surface is five methods
+
+`docker.ContainerMutator`: create, start, stop, rename, remove. Four
+architecture tests keep it there — the exact set, a verb check that refuses
+exec/attach/copy/image/volume/network operations, a pin on the exported surface
+of the captured configuration, and a source-level rule that no package outside
+the execution service may name any of it.
+
+`RemoveContainer` cannot force and cannot remove volumes. There is no field for
+either: a container's data is not HarborMaster's to delete, and forcing would
+discard the evidence that the container was already stopped.
+
+### Every prerequisite is re-checked immediately before anything is stopped
+
+An acquisition that succeeded, is fresh, and has not been used before; a plan
+that is current and still recommends the change and whose fingerprint still
+matches; a container that exists and is still on the assessed image and in a
+usable state; a fresh inventory; a usable snapshot; a fresh, complete policy
+evaluation with no critical violation; fresh registry evidence; and the image
+still present locally carrying the approved digest for this platform.
+
+The whole set runs when you ask, so a refusal is immediate, and **again**
+immediately before the first mutation.
+
+### One use per acquisition
+
+A succeeded acquisition can be executed exactly once, enforced by a unique
+index. There is no override parameter. A second recreation of the same container
+needs a fresh plan — assessed against the world as it is now — and a fresh
+acquisition to prove the image is still there.
+
+### Requesting one
+
+```sh
+curl -X POST localhost:8080/api/v1/executions \
+  -H 'Content-Type: application/json' \
+  -d '{"acquisitionId":"acq_…"}'
+```
+
+That is the whole request. There is no container, image, digest, command,
+mount, capability, timeout, or force parameter, and unknown fields are rejected
+rather than ignored.
+
+In the UI the control lives on a succeeded acquisition's page, behind a
+confirmation that states the three facts that matter — the container will be
+stopped and recreated, the image is already here, rollback is not automatic —
+and requires you to type the container's name.
+
+### After a restart
+
+A recreation interrupted mid-flight is settled from its **checkpoint**, which
+records what was actually done to the host rather than what HarborMaster was
+doing. Recovery issues **no Docker call at all**: it records the outcome and
+attaches the recovery plan for that exact situation. See
+[`docs/engineering/reliability.md`](docs/engineering/reliability.md) for the
+table of checkpoints and what each one means for the host.
 
 ## Reliability and recovery
 
@@ -1843,12 +1989,19 @@ than a public issue.
 - **Change planning**: deterministic risk assessment of each proposed image
   change, combining every source above. Analysis only; nothing executes a plan.
 - **Safe image acquisition**: downloading an approved, digest-pinned image into
-  the local image store. **HarborMaster's only Docker write**, off by default,
-  requested by a person, revalidated immediately before the transfer, and
-  verified afterwards. It does not update containers.
+  the local image store. Off by default, requested by a person, revalidated
+  immediately before the transfer, and verified afterwards. It does not update
+  containers.
+- **Manual container recreation**: replacing one container with a new one built
+  from its own configuration, on an already-verified local image.
+  **HarborMaster's only write to something running**, off by default, requested
+  by a person, revalidated immediately before the first mutation, checkpointed
+  after every step, and proved four ways before the original is removed. There
+  is no automatic rollback: a failure preserves both containers and records the
+  manual steps.
 - **Web interface**: Dashboard, Containers with detail, Images, Updates,
-  Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions, and a live
-  Events page
+  Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions,
+  Recreations, and a live Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -1858,16 +2011,20 @@ than a public issue.
 
 ### What is not built yet
 
-- **Applying an acquired image.** HarborMaster can download one; recreating a
-  container to run it is a later phase. Downloading and running are different
-  capabilities, and only the first exists.
-- Container start, stop, restart, and removal
+- **Automatic rollback.** Explicitly not built. A failed recreation quarantines
+  the replacement, preserves both containers, and records the manual steps.
+- **Automatic, scheduled, or fleet updates.** Every recreation is requested by a
+  person and acts on exactly one container.
+- **Retrying a recreation.** HarborMaster stops at the first failure. A retry is
+  a new plan and a new acquisition.
+- Standalone container start, stop, restart, and removal. The five lifecycle
+  methods exist only inside the recreation pipeline and are not reachable from
+  the API.
 - Restore from a snapshot. Readiness validation answers whether it *could*
   work; nothing performs it.
-- Image deletion and pruning. Acquisition adds to the local store and can
-  remove nothing.
-- Health validation with automatic rollback, and deployment history
-- Automatic or scheduled pulls. Every acquisition is requested by a person.
+- Image deletion and pruning. Acquisition adds to the local store, recreation
+  removes only the container it replaced, and neither can remove an image or a
+  volume.
 - Notifications
 - Authentication and authorization
 - Multi-host management — the schema is keyed by host, but exactly one host row

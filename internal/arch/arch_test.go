@@ -202,12 +202,13 @@ func TestTheMutationSurfaceIsExactlyOneMethod(t *testing.T) {
 	}
 }
 
-// containerVerbs are capabilities HarborMaster must never have over a container.
+// containerVerbs are capabilities the IMAGE acquirer must never have.
 //
 // Pulling an image changes the image store and nothing else -- a running
 // container keeps running the image it was created from. These verbs are the
-// ones that would cross from "acquire" into "apply", which is a different phase
-// and a much larger privilege.
+// ones that would cross from "acquire" into "apply", which is a different
+// capability with a different interface, a different owner, and its own tests
+// further down this file.
 var containerVerbs = []string{
 	"attach", "commit", "connect", "copy", "create", "delete", "disconnect",
 	"exec", "kill", "pause", "prune", "recreate", "remove", "rename", "restart",
@@ -220,6 +221,11 @@ var containerVerbs = []string{
 //
 // Deliberately separate from the count above. A reviewer relaxing the count
 // still has to get past this, and the two failures say different things.
+//
+// Still true after Phase 9. HarborMaster CAN now change a container, but not
+// through this interface: the two capabilities are held by two services and
+// granted by two constructor arguments, so a component able to pull is still
+// unable to apply.
 func TestTheMutationInterfaceCannotTouchAContainer(t *testing.T) {
 	acquirerType := reflect.TypeOf((*docker.ImageAcquirer)(nil)).Elem()
 
@@ -230,11 +236,330 @@ func TestTheMutationInterfaceCannotTouchAContainer(t *testing.T) {
 		for _, verb := range containerVerbs {
 			if strings.HasPrefix(lowered, verb) {
 				t.Errorf("docker.ImageAcquirer has method %q, which looks like %q\n"+
-					"\tHarborMaster acquires images; it does not apply them. Changing a container "+
-					"is not part of this capability and must not be added to it.",
+					"\tHarborMaster acquires images through this interface and applies them "+
+					"through docker.ContainerMutator. Merging the two would mean a service that "+
+					"can download can also replace, which is the separation these tests keep.",
 					name, verb)
 			}
 		}
+	}
+}
+
+// ------------------------------------------------- the container mutation --
+
+// Phase 9 gave HarborMaster its first CONTAINER mutation: replacing one
+// container with a new one built from its own configuration. That is a
+// materially larger privilege than pulling an image, and the tests below keep
+// it at exactly the size it was reviewed at.
+//
+// Four things are pinned, each separately so a failure says which one changed:
+//
+//  1. The mutation interface has exactly five methods, with exactly these names.
+//  2. It cannot reach an image, a volume, a network, or an exec.
+//  3. The captured configuration exposes no field or method that could carry a
+//     secret out of internal/docker.
+//  4. No package outside the execution service can name any of it.
+
+// TestTheContainerMutationSurfaceIsExactlyFiveMethods pins the whole container
+// write capability.
+//
+// If this test needs editing, the change under review is HarborMaster gaining a
+// new power over running containers on a privileged socket. That is the point:
+// the diff cannot be quiet.
+func TestTheContainerMutationSurfaceIsExactlyFiveMethods(t *testing.T) {
+	mutatorType := reflect.TypeOf((*docker.ContainerMutator)(nil)).Elem()
+
+	want := map[string]bool{
+		"CreateContainer": true,
+		"StartContainer":  true,
+		"StopContainer":   true,
+		"RenameContainer": true,
+		"RemoveContainer": true,
+	}
+
+	if got := mutatorType.NumMethod(); got != len(want) {
+		t.Fatalf("docker.ContainerMutator has %d methods, want exactly %d\n"+
+			"\tthis interface is the WHOLE of HarborMaster's ability to change a running "+
+			"container; a sixth method is a sixth capability and needs its own review, its "+
+			"own threat model entry, and its own tests", got, len(want))
+	}
+
+	got := make(map[string]bool, mutatorType.NumMethod())
+	for i := 0; i < mutatorType.NumMethod(); i++ {
+		got[mutatorType.Method(i).Name] = true
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("docker.ContainerMutator gained method %q\n"+
+				"\tevery method here is a capability against a privileged socket, and this set "+
+				"is exactly what the recreation pipeline needs and nothing more", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("docker.ContainerMutator no longer has method %q; update this test if the "+
+				"removal is intended", name)
+		}
+	}
+}
+
+// forbiddenMutatorVerbs are capabilities the container mutator must never gain.
+//
+// Recreating a container needs five verbs. These are the ones that would turn
+// it into something else: a way to run commands inside a container, to read or
+// write its filesystem, to delete data, or to touch the image store.
+//
+// "container" is deliberately absent even though every legal method contains
+// it, and the five legal names are checked by the exact-set test above rather
+// than by this one.
+var forbiddenMutatorVerbs = []string{
+	"attach", "build", "commit", "connect", "copy", "delete", "disconnect",
+	"exec", "export", "image", "import", "kill", "load", "login", "logout",
+	"logs", "network", "pause", "plugin", "prune", "pull", "push", "put",
+	"resize", "restore", "rollback", "save", "tag", "unpause", "update",
+	"volume", "wait", "write",
+}
+
+// TestTheContainerMutatorCannotReachAnythingElse fails if the mutator grows a
+// method outside container lifecycle.
+//
+// Deliberately separate from the exact-set test. A reviewer relaxing that one
+// still has to get past this, and the two failures say different things: one
+// says "the surface grew", this says "the surface grew INTO something it was
+// never meant to touch".
+func TestTheContainerMutatorCannotReachAnythingElse(t *testing.T) {
+	mutatorType := reflect.TypeOf((*docker.ContainerMutator)(nil)).Elem()
+
+	for i := 0; i < mutatorType.NumMethod(); i++ {
+		name := mutatorType.Method(i).Name
+		lowered := strings.ToLower(name)
+
+		for _, verb := range forbiddenMutatorVerbs {
+			if strings.Contains(lowered, verb) {
+				t.Errorf("docker.ContainerMutator has method %q, which contains %q\n"+
+					"\tthis interface recreates containers. Executing inside one, copying files "+
+					"in or out, deleting images or volumes, and reconfiguring networks are all "+
+					"different capabilities and none of them belongs here.",
+					name, verb)
+			}
+		}
+	}
+}
+
+// TestTheConfigCapturerIsExactlyOneRead pins the capture surface.
+//
+// CaptureConfig is a READ, which is why it is not on ContainerMutator: a read
+// there would inflate the pinned count above and make that test say something
+// less true than it does. It gets its own interface and its own pin.
+func TestTheConfigCapturerIsExactlyOneRead(t *testing.T) {
+	capturerType := reflect.TypeOf((*docker.ConfigCapturer)(nil)).Elem()
+
+	if got := capturerType.NumMethod(); got != 1 {
+		t.Fatalf("docker.ConfigCapturer has %d methods, want exactly 1\n"+
+			"\tit exists to hand ONE value to ONE service; anything else it grew would be "+
+			"reachable by whoever holds the capture capability", got)
+	}
+	if name := capturerType.Method(0).Name; name != "CaptureConfig" {
+		t.Errorf("the capture method is %q, want CaptureConfig", name)
+	}
+}
+
+// TestTheRuntimeCannotCaptureAConfiguration fails if the read-only runtime
+// grows the capture method.
+//
+// A capture is a read, so it would pass every mutation check in this file. It
+// still must not be on Runtime: the value it returns is the CREATE PAYLOAD, and
+// every service in HarborMaster receives Runtime. Putting it there would hand a
+// container's real environment to the drift engine, the policy engine, the
+// planner, and the API's inventory reader, none of which has any use for it.
+func TestTheRuntimeCannotCaptureAConfiguration(t *testing.T) {
+	runtimeType := reflect.TypeOf((*docker.Runtime)(nil)).Elem()
+
+	for i := 0; i < runtimeType.NumMethod(); i++ {
+		name := runtimeType.Method(i).Name
+		if strings.Contains(strings.ToLower(name), "capture") {
+			t.Errorf("docker.Runtime has method %q\n"+
+				"\ta captured configuration is the create payload, and every service receives "+
+				"Runtime. It belongs on docker.ConfigCapturer, which only the execution service "+
+				"is given.", name)
+		}
+	}
+}
+
+// ---------------------------------------------- the captured configuration --
+
+// TestCapturedConfigExposesNoSecretSurface pins what a CapturedConfig lets the
+// world see.
+//
+// # What this protects
+//
+// A CapturedConfig holds a container's real environment values, its log-driver
+// options, and the SDK structures that will be sent to the daemon. It is handed
+// to the execution service, which must be able to pass it back into
+// CreateContainer and must NOT be able to read it, log it, or serialise it.
+//
+// The unexported fields are what enforce that. This test is what stops the
+// enforcement being undone by a well-meaning addition -- an `Env []string` for
+// a diff view, a `Config` accessor for a test, a `HostConfig()` for a future
+// feature. Each is a reasonable thing to want, and each would move secret
+// values out of the one package allowed to hold them.
+//
+// # Why identifiers rather than types
+//
+// A type check would happily pass an `Env []string`. The point is not that the
+// exported surface holds safe TYPES; it is that it holds exactly these five
+// fields and these six methods, every one of which has been looked at.
+func TestCapturedConfigExposesNoSecretSurface(t *testing.T) {
+	capturedType := reflect.TypeOf(docker.CapturedConfig{})
+
+	wantFields := map[string]bool{
+		"ContainerID":    true,
+		"ContainerName":  true,
+		"ImageReference": true,
+		"ImageID":        true,
+		"CapturedAt":     true,
+	}
+
+	for i := 0; i < capturedType.NumField(); i++ {
+		field := capturedType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if !wantFields[field.Name] {
+			t.Errorf("docker.CapturedConfig gained exported field %q\n"+
+				"\tthis struct holds a container's real environment values and log-driver "+
+				"credentials. An exported field is readable by the execution service, by "+
+				"anything that logs it, and by any encoder that reaches it. Only identifiers "+
+				"belong here -- add the field unexported, and expose a value-free projection "+
+				"through Summary if a caller needs to know something about it.",
+				field.Name)
+		}
+		delete(wantFields, field.Name)
+	}
+	for name := range wantFields {
+		t.Errorf("docker.CapturedConfig no longer has exported field %q; update this test if "+
+			"the removal is intended", name)
+	}
+
+	// The methods, pinned for the same reason: an accessor is an exported field
+	// with extra steps.
+	wantMethods := map[string]bool{
+		// Reports whether the capture is complete enough to create from.
+		"Valid": true,
+		// The VALUE-FREE projection. The one way the service learns anything
+		// about the contents.
+		"Summary": true,
+		// The normalised, MASKED view. Safe because domain.EnvVar.RawValue is
+		// `json:"-"` and its Value field already holds the masked form.
+		"Detail": true,
+		// Redacted renderings, which exist precisely so the defaults cannot
+		// spill the struct into a log or a response.
+		"LogValue":    true,
+		"String":      true,
+		"MarshalJSON": true,
+	}
+
+	pointerType := reflect.TypeOf(&docker.CapturedConfig{})
+	for i := 0; i < pointerType.NumMethod(); i++ {
+		name := pointerType.Method(i).Name
+		if !wantMethods[name] {
+			t.Errorf("docker.CapturedConfig gained exported method %q\n"+
+				"\tan accessor on this type is a way for a secret to leave internal/docker. If "+
+				"a caller needs to know something about the configuration, add it to the "+
+				"value-free projection Summary returns.", name)
+		}
+		delete(wantMethods, name)
+	}
+	for name := range wantMethods {
+		t.Errorf("docker.CapturedConfig no longer has method %q; update this test if the "+
+			"removal is intended", name)
+	}
+}
+
+// recreationAllowed are the packages permitted to hold the container mutation
+// capability.
+//
+// internal/docker implements it. internal/service holds it in exactly one
+// service. cmd/harbormaster wires that service. internal/arch is this test.
+//
+// Note who is ABSENT: internal/api. A handler that could stop a container
+// directly would bypass the preflight revalidation, the checkpointing, and the
+// verification -- which together are the entire safety model of this feature.
+var recreationAllowed = map[string]bool{
+	"internal/docker":  true,
+	"internal/service": true,
+	"cmd/harbormaster": true,
+	"internal/arch":    true,
+	// The live-Docker suite exercises the recreation against a real daemon,
+	// which is the end-to-end proof that the adapter behaves as the fake models
+	// it. Build-tagged, so it is never part of an ordinary build.
+	"internal/integration": true,
+}
+
+// recreationIdentifiers are the names that grant, or carry, the ability to
+// change a container.
+//
+// CapturedConfig is included even though it is inert: a package that can hold
+// one is a package being handed a container's real configuration, and that
+// deserves the same visibility as the mutation itself.
+var recreationIdentifiers = []string{
+	"ContainerMutator", "ConfigCapturer", "CapturedConfig",
+	"CreateContainer", "StartContainer", "StopContainer",
+	"RenameContainer", "RemoveContainer",
+}
+
+// TestTheRecreationCapabilityIsNotReferencedOutsideItsOwners fails if a package
+// that has no business recreating names the mutation capability.
+//
+// An import-level rule would not do here: internal/api imports internal/docker
+// for its read-only error types, so this checks the SOURCE for the identifiers
+// rather than the import list -- the same technique, and the same honest limit,
+// as the acquisition test above.
+func TestTheRecreationCapabilityIsNotReferencedOutsideItsOwners(t *testing.T) {
+	root := moduleRoot(t)
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor", "bin", "dist", "data", "web":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
+		if recreationAllowed[filepath.ToSlash(filepath.Dir(rel))] {
+			return nil
+		}
+
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, identifier := range recreationIdentifiers {
+			if strings.Contains(string(source), identifier) {
+				t.Errorf("%s references %s\n"+
+					"\tthe ability to stop and replace a container belongs to the execution "+
+					"service alone. A package that can reach it directly bypasses the preflight "+
+					"revalidation, the checkpointing, and the verification -- which together are "+
+					"the entire safety model of this feature.",
+					rel, identifier)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk module: %v", err)
 	}
 }
 

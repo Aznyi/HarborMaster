@@ -63,6 +63,10 @@ type Server struct {
 	// this API that can change the Docker host. Nil in a deployment that has
 	// not opted in, which yields a 503 rather than a broken route.
 	acquisitions AcquisitionService
+	// executions answers the container recreation endpoints -- the only ones in
+	// this API that change something that is RUNNING. Nil in a deployment that
+	// has not opted in, which yields a 503 rather than a broken route.
+	executions ExecutionService
 	// now is injectable so a status change's timestamp is deterministic in
 	// tests.
 	now func() time.Time
@@ -177,6 +181,15 @@ type Options struct {
 	// has not asked for the ability to write to its Docker host.
 	Acquisitions AcquisitionService
 
+	// Executions is the container recreation capability. Nil disables the
+	// endpoints entirely, which is the correct behaviour for a deployment that
+	// has not asked for the ability to stop and replace its containers.
+	//
+	// Nothing behind this can be aimed: the request body carries an acquisition
+	// id and nothing else, and the service revalidates every prerequisite
+	// before touching Docker.
+	Executions ExecutionService
+
 	// Now is injectable so a status change's timestamp is deterministic in
 	// tests. Nil uses the wall clock.
 	Now func() time.Time
@@ -228,6 +241,7 @@ func NewServer(opts Options) *Server {
 		planner: opts.Planner,
 
 		acquisitions: opts.Acquisitions,
+		executions:   opts.Executions,
 
 		now: now,
 
@@ -461,6 +475,31 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET "+APIPrefix+"/acquisitions/{id}", s.handleAcquisitionDetail)
 	mux.HandleFunc(APIPrefix+"/acquisitions/{id}", s.handleMethodNotAllowed("GET, HEAD"))
+
+	// Container recreation. THE ONLY ENDPOINTS IN THIS API THAT CHANGE
+	// SOMETHING RUNNING.
+	//
+	// POST /executions stops one container and replaces it with one built from
+	// its own configuration and an image that is already on this host and was
+	// already verified. The request body carries an ACQUISITION ID and an
+	// optional idempotency key -- no container, no image, no digest, no Docker
+	// parameter of any kind.
+	//
+	// There is deliberately no rollback route, no restore route, no route that
+	// recreates more than one container, and no route that removes an image or
+	// a volume -- and no capability behind any of them, so adding a route would
+	// not be enough to build one.
+	mux.HandleFunc("GET "+APIPrefix+"/executions", s.handleExecutions)
+	mux.HandleFunc("POST "+APIPrefix+"/executions", s.handleExecutionCreate)
+	mux.HandleFunc(APIPrefix+"/executions", s.handleMethodNotAllowed("GET, HEAD, POST"))
+
+	// Three segments, so this never overlaps the two-segment "/executions/{id}"
+	// pattern below.
+	mux.HandleFunc("POST "+APIPrefix+"/executions/{id}/cancel", s.handleExecutionCancel)
+	mux.HandleFunc(APIPrefix+"/executions/{id}/cancel", s.handleMethodNotAllowed("POST"))
+
+	mux.HandleFunc("GET "+APIPrefix+"/executions/{id}", s.handleExecutionDetail)
+	mux.HandleFunc(APIPrefix+"/executions/{id}", s.handleMethodNotAllowed("GET, HEAD"))
 
 	// Any other /api/ path is a JSON 404, never the SPA shell.
 	mux.HandleFunc("/api/", s.handleAPINotFound)
