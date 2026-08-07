@@ -241,6 +241,10 @@ func run() error {
 	dockerClient, err := docker.New(docker.Options{
 		Host:    cfg.Docker.Host,
 		Timeout: cfg.Docker.Timeout,
+		// Empty in every normal deployment: the client negotiates. A pin
+		// exists for a daemon whose negotiation misbehaves, and for the
+		// compatibility matrix in CI.
+		APIVersion: cfg.Docker.APIVersion,
 		// Built from configuration so an operator can extend the patterns, and
 		// applied inside the adapter so values are masked at the boundary
 		// rather than somewhere further out.
@@ -297,9 +301,30 @@ func run() error {
 	})
 
 	health := service.NewHealthService(service.HealthOptions{
-		DB:        db,
-		Docker:    dockerClient,
-		Events:    events,
+		DB:     db,
+		Docker: dockerClient,
+		Events: events,
+		// Which capabilities this deployment has, served only to an
+		// authenticated caller.
+		//
+		// Booleans, never values. An operator looking at an empty page needs to
+		// tell "switched off" from "not working", and nothing else here needs
+		// to leave the process.
+		Features: domain.Features{
+			Inventory:                 cfg.Inventory.Enabled,
+			Events:                    cfg.Events.Enabled,
+			Snapshots:                 cfg.Snapshots.Enabled,
+			Drift:                     cfg.Drift.Enabled,
+			Policy:                    cfg.Policy.Enabled,
+			Planner:                   cfg.Planner.Enabled,
+			ImageIntel:                cfg.ImageIntel.Enabled,
+			Acquisition:               cfg.Acquisition.Enabled,
+			Execution:                 cfg.Execution.Enabled,
+			Rollback:                  cfg.Rollback.Enabled,
+			Automation:                cfg.Automation.Enabled,
+			Notifications:             cfg.Notifications.Enabled,
+			NotificationsAllowPrivate: cfg.Notifications.AllowPrivateDestinations,
+		},
 		Logger:    logger,
 		StartedAt: startedAt,
 	})
@@ -368,6 +393,54 @@ func run() error {
 	diffs := service.NewDiffEngine(cfg.Snapshots)
 	retention := service.NewRetentionService(db.Snapshots, cfg.Snapshots, logger)
 
+	// Which container HarborMaster is running in.
+	//
+	// # This is the thing that stops HarborMaster updating itself
+	//
+	// A self-update is uniquely broken: the process performing the recreation
+	// is inside the container being recreated, so it is killed partway through
+	// and the record of what it was doing is never written. HarborMaster
+	// refuses at four independent layers, and every one of them consults this.
+	//
+	// Resolved from independent signals -- a configured id, /proc, the
+	// hostname, its own label -- none of which is required and any one of which
+	// suffices. It reads no Docker socket: the identity comes from this
+	// process's own view of itself and is resolved against the inventory
+	// HarborMaster already holds.
+	//
+	// A failure to identify is a RESULT, not an error. The zero identity
+	// matches nothing, which means a deployment where every probe fails
+	// excludes nothing -- so the four refusals are what make this safe, not
+	// this alone.
+	self := service.NewSelfIdentifier(service.SelfIdentifierOptions{
+		Containers:   db.Containers,
+		ConfiguredID: cfg.Self.ContainerID,
+		Logger:       logger,
+	})
+
+	// Operator notifications.
+	//
+	// HarborMaster's SECOND outbound egress, after image intelligence. Wired
+	// before every service that raises one, and off unless the deployment
+	// asked: with notifications disabled the Notifier below is nil, every
+	// `raise` in the service layer becomes a nil check, and nothing leaves this
+	// host.
+	//
+	// The engine is constructed either way, because the delivery history and
+	// the destination list stay READABLE when sending is off -- an operator
+	// configures and reviews before switching it on, which is the order those
+	// should happen in.
+	notifications, err := service.WireNotifications(db.Notifications, cfg.Notifications,
+		build.Version, logger)
+	if err != nil {
+		return err
+	}
+	if cfg.Notifications.Enabled && cfg.Notifications.AllowPrivateDestinations {
+		logger.Warn("notification destinations may resolve to private addresses; " +
+			"an administrator who can create a destination can make HarborMaster " +
+			"issue an HTTPS request to anything this container can route to")
+	}
+
 	// Configuration drift.
 	//
 	// The engine reuses the Phase 3 diff engine to compare each container
@@ -390,6 +463,7 @@ func run() error {
 			return service.BuildSpec(detail, detail.Image, hasher)
 		},
 		Config: cfg.Drift,
+		Notify: notifications.Notifier,
 		Logger: logger,
 	})
 
@@ -413,6 +487,7 @@ func run() error {
 		Pruner:      db.Policies,
 		Inventory:   db.Inventory,
 		Config:      cfg.Policy,
+		Notify:      notifications.Notifier,
 		Logger:      logger,
 	})
 
@@ -442,6 +517,7 @@ func run() error {
 			RetryBackoff:   cfg.ImageIntel.RetryBackoff,
 		}),
 		Config: cfg.ImageIntel,
+		Notify: notifications.Notifier,
 		Logger: logger,
 	})
 
@@ -457,6 +533,7 @@ func run() error {
 	planner := service.NewPlannerService(service.PlannerOptions{
 		Store:  db.Plans,
 		Config: cfg.Planner,
+		Notify: notifications.Notifier,
 		Logger: logger,
 	})
 
@@ -535,9 +612,11 @@ func run() error {
 		Evidence: service.NewPlanEvidence(db.Plans, db.ImageIntel, db.Containers),
 		Runtime:  dockerClient,
 		Acquirer: acquirer,
+		Self:     self,
 		// The OUTCOME of a download reaches the security audit log attributed
 		// to the account that asked for it, not just the request.
 		Audit:  auditRecorder,
+		Notify: notifications.Notifier,
 		Config: cfg.Acquisition,
 		Logger: logger,
 	})
@@ -575,6 +654,9 @@ func run() error {
 		Runtime:  dockerClient,
 		Capturer: capturer,
 		Mutator:  mutator,
+		// The LAST line of the self-update defence, and the one that matters
+		// most: this is the layer that actually stops a container.
+		Self: self,
 		// The same installation key the snapshots use. Configuration
 		// preservation compares sensitive values as keyed digests, and digests
 		// produced under a different key are not comparable -- so sharing the
@@ -584,6 +666,7 @@ func run() error {
 		// HarborMaster does -- reaches the security audit log attributed to the
 		// account that asked for it.
 		Audit:  auditRecorder,
+		Notify: notifications.Notifier,
 		Config: cfg.Execution,
 		Logger: logger,
 	})
@@ -619,6 +702,7 @@ func run() error {
 		// not comparable.
 		Hasher: hasher,
 		Audit:  auditRecorder,
+		Notify: notifications.Notifier,
 		Config: cfg.Rollback,
 		Logger: logger,
 	})
@@ -637,6 +721,24 @@ func run() error {
 		Audit:  auditRecorder,
 		Limits: domain.DefaultUpdatePolicyLimits(),
 		Logger: logger,
+	})
+
+	// Notification administration.
+	//
+	// Separate from the engine that delivers, and given the audit recorder
+	// because every write here is an administrator pointing HarborMaster's
+	// second outbound egress somewhere -- including the test send, which
+	// produces a real request without changing a row.
+	notificationAdmin := service.NewNotificationAdminService(service.NotificationAdminOptions{
+		Store:  db.Notifications,
+		Engine: notifications.Service,
+		Audit:  auditRecorder,
+		SMTP: domain.SMTPSettings{
+			Host:     cfg.Notifications.SMTPHost,
+			Port:     cfg.Notifications.SMTPPort,
+			StartTLS: cfg.Notifications.SMTPStartTLS,
+		},
+		Limits: domain.DefaultNotificationLimits(),
 	})
 
 	// THE AUTOMATION ENGINE.
@@ -667,6 +769,11 @@ func run() error {
 		// auditing them twice would make the host-change counter over-report
 		// the one number an administrator most needs to trust.
 		Audit:  auditRecorder,
+		Notify: notifications.Notifier,
+		// So a decision pass never proposes HarborMaster's own container. The
+		// acquisition and execution preflights refuse independently; this is
+		// what stops the request being made in the first place.
+		Self:   self,
 		Config: cfg.Automation,
 		Logger: logger,
 	})
@@ -687,6 +794,26 @@ func run() error {
 	// periodic, manual, and the event engine's reconciliation) funnels through
 	// that commit, one hook covers all four.
 	inventory.AddRefreshObserver(policies)
+
+	// The self identity is re-resolved after every committed refresh. The
+	// container id does not change while the process runs, but the NAME and the
+	// IMAGE can -- a `docker rename`, or an operator recreating HarborMaster
+	// from their own compose file -- and a stale name would exclude the wrong
+	// container.
+	inventory.AddRefreshObserver(self)
+
+	// Resolved ONCE at startup, before anything can decide anything.
+	//
+	// The observer above covers every later refresh, but the first inventory
+	// refresh is asynchronous and an operator can run a manual automation pass
+	// the moment the port opens. An identity that arrived a second too late
+	// would be an identity that did not exclude anything on the one pass
+	// somebody was watching.
+	//
+	// Bounded, and its failure is a result rather than an error: a deployment
+	// where every probe fails carries the zero identity, which matches nothing.
+	// The four refusals are what make that safe, not this.
+	self.Resolve(ctx)
 
 	// SHUTDOWN ORDER, and why it is what it is.
 	//
@@ -766,7 +893,21 @@ func run() error {
 		defer background.Done()
 		auditRecorder.Run(ctx)
 	}()
+	go func() {
+		defer background.Done()
+		notifications.Service.Run(ctx)
+	}()
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
+
+	// The startup integrity verdict, raised once the engine that can deliver it
+	// is running.
+	//
+	// Only for a check that RAN and found damage. An incomplete check
+	// establishes nothing -- invariant 5's converse -- and reporting one as a
+	// failure would page an operator because a timeout expired.
+	if report := db.OpenReport().Integrity; !report.OK && !report.Incomplete {
+		service.NotifyIntegrityFailed(notifications.Notifier, report.Summary())
+	}
 
 	server := api.NewServer(api.Options{
 		Health:       health,
@@ -808,6 +949,11 @@ func run() error {
 
 		Automation:     automation,
 		UpdatePolicies: updatePolicies,
+		// Both are non-nil even when sending is off: an administrator
+		// configures destinations and reviews past deliveries before switching
+		// delivery on, which is the order those should happen in.
+		Notifications:     notifications.Service,
+		NotificationAdmin: notificationAdmin,
 
 		Auth:       auth,
 		Users:      users,

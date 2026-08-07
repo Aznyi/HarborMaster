@@ -197,9 +197,12 @@ tags:
       What registries report about the images the inventory references: resolved
       digests, whether a newer version is published, and per-registry health.
 
-      **This is HarborMaster's only outbound network egress.** Everything else
-      talks to a local Docker socket and a local SQLite file; this feature makes
-      anonymous HTTPS GETs to registry manifest and tag-listing endpoints.
+      **This is one of HarborMaster's two outbound network egresses**, and the
+      only one that is on by default. Everything else talks to a local Docker
+      socket and a local SQLite file; this feature makes anonymous HTTPS GETs to
+      registry manifest and tag-listing endpoints. The second egress is
+      notifications, which is off unless a deployment asks for it and sends only
+      to destinations an administrator configured.
 
       It reads. It does not pull, push, delete, prune, tag, or recreate
       anything, and it holds no registry credentials -- a private repository is
@@ -211,6 +214,33 @@ tags:
       are derived only from image references the inventory already holds, and
       `POST /images/refresh` takes no target of any kind. See
       docs/security/threat-model.md for the layered SSRF defences.
+
+  - name: Notifications
+    description: |
+      Telling an operator that something happened: destinations, the rules that
+      route to them, and the record of what was sent.
+
+      **This is HarborMaster's second outbound egress**, and unlike image
+      intelligence it goes somewhere an administrator typed. So it is off by
+      default, every write needs `notification:manage`, and the same layered
+      SSRF defences apply: HTTPS only, certificates verified, no redirects, no
+      proxy, a hostname rather than an IP literal, and the resolved ADDRESS
+      re-checked at dial time — which is what makes DNS rebinding ineffective.
+
+      **No response in this tag contains a credential.** A webhook URL's path is
+      a bearer token, so it is accepted on the way in and returned by nothing;
+      what a read gets is a scheme and host. The SMTP relay password comes from
+      the environment and is never stored in the database at all.
+
+      **A notification cannot carry a secret**, because there is nowhere in the
+      type to put one. Every title and body is a sentence HarborMaster wrote
+      from a fixed vocabulary; every field is an identifier HarborMaster
+      generated, a container name, an image reference, or a count. No
+      environment value, registry credential, session token, or raw Docker
+      error can reach one, and an architecture test holds that.
+
+      Delivery never blocks the thing it reports on. A rollback whose duration
+      depended on somebody else's webhook server would be a worse rollback.
 
   - name: Policy
     description: |
@@ -5011,6 +5041,641 @@ paths:
           $ref: "#/components/responses/AutomationUnavailable"
 
 
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      summary: Notification status and the vocabularies a rule may select from
+      operationId: notificationStatus
+      description: |
+        Whether delivery is switched on, how many destinations and rules exist,
+        how many destinations are currently failing, and the counts behind the
+        delivery history.
+
+        Also the CLOSED VOCABULARIES: the channels this build can deliver to,
+        the events a rule may select, and the severities it may threshold on.
+        They are served rather than hardcoded in the client so a rule editor is
+        built from the same source of truth the sender uses.
+
+        Available whenever the notification store is: an administrator
+        configures destinations and reviews past deliveries before switching
+        delivery on, which is the order those should happen in. `enabled` says
+        which state the deployment is in.
+      responses:
+        "200":
+          description: The subsystem's state and vocabularies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationStatus" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/destinations:
+    get:
+      tags: [Notifications]
+      summary: Where notifications are sent
+      operationId: listNotificationDestinations
+      description: |
+        Every destination's PUBLIC record.
+
+        **No response in this API contains a webhook URL or an SMTP password.**
+        `endpoint` is the scheme and host only — `https://hooks.slack.com` —
+        because a Slack, Discord, or Teams webhook URL is a bearer token in the
+        shape of a path. The credential lives in a separate type the read paths
+        cannot reach, and an architecture test holds that.
+
+        Archived destinations are excluded by default. Each record carries
+        `lastResult`, `lastError`, and `consecutiveFailures`, so a list answers
+        "is this working" without joining the delivery history.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: A page of destinations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NotificationDestination" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    post:
+      tags: [Notifications]
+      summary: Create a notification destination
+      operationId: createNotificationDestination
+      description: |
+        Requires `notification:manage`, an ADMINISTRATOR permission, for two
+        reasons that each suffice on their own:
+
+        - The body carries a CREDENTIAL. A webhook URL's path is what
+          authorises posting to that channel.
+        - Creating a destination points HarborMaster's **second outbound
+          egress** somewhere new. An operator able to create one could send
+          every container name and update event this host produces to a server
+          they control.
+
+        **The URL is accepted here and returned by nothing.** What comes back is
+        `endpoint`, the scheme and host. There is no endpoint in this API that
+        reveals a stored credential.
+
+        **The URL is constrained.** HTTPS only; a hostname rather than an IP
+        literal; no userinfo; bounded length. The resolved ADDRESS is checked
+        again at dial time, which is what makes DNS rebinding ineffective, and
+        the guard refuses loopback, private, and unique-local addresses unless
+        the deployment set `HARBORMASTER_NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS`.
+        Even then it refuses link-local, multicast, and the cloud metadata
+        endpoint.
+
+        An `email` destination carries recipients rather than a URL, and needs a
+        relay configured through `HARBORMASTER_SMTP_HOST`. The relay password
+        comes from the environment, never from this body, so it can stay out of
+        the database entirely.
+
+        The response carries `warnings`: settings that are legal but worth
+        seeing. They do not refuse the destination.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationDestinationRequest" }
+            examples:
+              slack:
+                summary: A Slack channel
+                value:
+                  name: Operations channel
+                  channel: slack
+                  url: https://hooks.slack.com/services/T000/B000/xxxxxxxx
+                  titlePrefix: "[prod]"
+              email:
+                summary: An operations mailbox
+                value:
+                  name: Operations mailbox
+                  channel: email
+                  emailFrom: harbormaster@example.com
+                  emailTo: [ops@example.com]
+      responses:
+        "201":
+          description: The destination, without its credential.
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationDestinationResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The name is taken, or this deployment already has as many
+            destinations as it allows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/destinations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+    get:
+      tags: [Notifications]
+      summary: One destination's public record
+      operationId: getNotificationDestination
+      description: |
+        The same record the listing carries, with no credential. A malformed
+        identifier returns the same 404 an unknown one does.
+      responses:
+        "200":
+          description: The destination.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationDestination" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    patch:
+      tags: [Notifications]
+      summary: Edit a destination
+      operationId: updateNotificationDestination
+      description: |
+        Requires `notification:manage`.
+
+        **Omitting `url` keeps the stored credential.** That is what lets an
+        administrator rename a destination without re-typing a webhook URL they
+        may not have kept a copy of. Supplying one REPLACES it, and the audit
+        record says so explicitly.
+
+        **`channel` cannot be changed.** A destination whose stored credential
+        is the wrong shape for what it now is — a webhook URL on an email
+        destination — is a state every validation ran before it could exist.
+        Create a new destination instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationDestinationRequest" }
+      responses:
+        "200":
+          description: The destination, without its credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationDestinationResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The name is taken.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    delete:
+      tags: [Notifications]
+      summary: Withdraw a destination
+      operationId: archiveNotificationDestination
+      description: |
+        Requires `notification:manage`.
+
+        **Archives rather than deletes.** Delivery records reference the row,
+        and the history of what was sent must outlive the destination being
+        withdrawn.
+
+        **The stored credential does not survive.** An archived destination
+        cannot send, so keeping its URL would be keeping a credential for no
+        reason; re-entering it is the correct amount of friction.
+
+        Refused with 409 while a rule still routes here. A rule that silently
+        stopped delivering would be indistinguishable from one that never
+        matched.
+      responses:
+        "204":
+          description: Withdrawn.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A notification rule still routes to this destination.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/destinations/{id}/test:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+    post:
+      tags: [Notifications]
+      summary: Send a test notification
+      operationId: testNotificationDestination
+      description: |
+        Requires `notification:manage`, and **is audited like a mutation**,
+        because that is what it is: the one route here that produces outbound
+        network traffic, and "who made this host talk to that server" is exactly
+        the question an audit log exists to answer.
+
+        Queued rather than sent inline. It travels the same queue, the same
+        transport, the same address guard, and the same retry rules as every
+        real notification — a test that took a different path would prove the
+        wrong thing. Its outcome appears in the delivery history.
+
+        Takes no body. There is nowhere in this request to put a URL, an
+        address, or a message: the destination is named by an identifier
+        HarborMaster issued, and the text is a fixed sentence.
+
+        Refused with 409 for a disabled or archived destination, and 503 when
+        delivery is switched off — a queued test on a deployment that never
+        drains the queue would be a control that silently does nothing.
+      responses:
+        "202":
+          description: The test was queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, detail]
+                properties:
+                  status: { type: string, enum: [queued] }
+                  detail: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: This destination is disabled or withdrawn.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/rules:
+    get:
+      tags: [Notifications]
+      summary: What routes notifications to which destinations
+      operationId: listNotificationRules
+      description: |
+        Every routing rule. A rule selects events, sets a minimum severity,
+        names destinations, and optionally suppresses repeats of the same thing
+        within a window.
+
+        Deliberately not a compliance policy and not an update policy. Three
+        subsystems in HarborMaster have something called a policy and they do
+        entirely different things: one REPORTS, one ACTS, and this one ROUTES.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: A page of rules.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NotificationRule" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    post:
+      tags: [Notifications]
+      summary: Create a notification rule
+      operationId: createNotificationRule
+      description: |
+        Requires `notification:manage`.
+
+        **An empty `events` list means EVERY event** — the useful default for a
+        first rule, and the opposite of an update policy's selector, where empty
+        means nothing. The cost of being wrong here is an extra message rather
+        than an unintended container change.
+
+        `cooldownSeconds` suppresses a repeat of the same underlying thing
+        within the window. Zero disables suppression, which is honest rather
+        than convenient: an operator who wants every occurrence gets every one.
+        The response warns when a rule has none.
+
+        A rule naming a destination that does not exist is refused. One that
+        silently delivered nothing would be indistinguishable from one that
+        never matched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationRuleRequest" }
+            examples:
+              failuresOnly:
+                summary: The rule most deployments want first
+                value:
+                  name: Things that went wrong
+                  minimumSeverity: warning
+                  destinations: [ndst_0123456789abcdef0123]
+                  cooldownSeconds: 900
+      responses:
+        "201":
+          description: The rule.
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRuleResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The name is taken, or this deployment already has as many rules as
+            it allows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/rules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^nrul_[0-9a-f]{20}$" }
+    get:
+      tags: [Notifications]
+      summary: One routing rule
+      operationId: getNotificationRule
+      responses:
+        "200":
+          description: The rule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRule" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    patch:
+      tags: [Notifications]
+      summary: Edit a routing rule
+      operationId: updateNotificationRule
+      description: |
+        Requires `notification:manage`. Every field is optional; omitting one
+        leaves it alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NotificationRuleRequest" }
+      responses:
+        "200":
+          description: The rule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRuleResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The name is taken.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+    delete:
+      tags: [Notifications]
+      summary: Withdraw a routing rule
+      operationId: archiveNotificationRule
+      description: |
+        Requires `notification:manage`. Archives rather than deletes: delivery
+        records name the rule that routed them, and that attribution must
+        survive the rule being withdrawn.
+      responses:
+        "204":
+          description: Withdrawn.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/deliveries:
+    get:
+      tags: [Notifications]
+      summary: What was sent, to where, and whether it arrived
+      operationId: listNotificationDeliveries
+      description: |
+        The delivery history. Requires `notification:read`, which every role
+        holds: "was anybody told about this" is a question an operator needs to
+        answer, and a delivery record carries no credential by construction.
+
+        **What a record contains:** the sanitised notification HarborMaster
+        composed, the destination's NAME, the rule that routed it, the outcome,
+        the attempt count, an HTTP status code, and HarborMaster's own sentence
+        about any failure.
+
+        **What it never contains:** the destination URL, the SMTP password, or
+        the response body. The first two are credentials; the third is
+        third-party text that would carry into a page an operator reads.
+
+        `failed=true` is the filter for the dead letter — what HarborMaster
+        tried to say and could not.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: destinationId
+          in: query
+          schema: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+        - name: container
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: result
+          in: query
+          description: |
+            Repeatable, or comma-separated, up to 32 values. An unrecognised
+            value is rejected rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/DeliveryResult" }
+        - name: event
+          in: query
+          description: Repeatable, or comma-separated, up to 32 values.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/NotificationEvent" }
+        - name: failed
+          in: query
+          description: Only the dead letter.
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: A page of delivery records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NotificationDelivery" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+  /api/v1/notifications/deliveries/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^ndlv_[0-9a-f]{20}$" }
+    get:
+      tags: [Notifications]
+      summary: One delivery record
+      operationId: getNotificationDelivery
+      description: |
+        The whole record, including the payload HarborMaster sent, so "what did
+        it actually say" is answerable without reproducing the conditions.
+      responses:
+        "200":
+          description: The delivery record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationDelivery" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/NotificationsUnavailable"
+
+
 components:
   securitySchemes:
     sessionCookie:
@@ -5326,6 +5991,24 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    NotificationsUnavailable:
+      description: |
+        The notification subsystem is not configured in this deployment.
+
+        Returned when the notification store is absent, which is not the same
+        as delivery being switched off: with `HARBORMASTER_NOTIFICATIONS_ENABLED`
+        false these endpoints still answer, so an administrator can configure
+        destinations and review past deliveries before turning sending on. The
+        `enabled` field on `GET /api/v1/notifications` says which state the
+        deployment is in.
+
+        The test-send route is the exception: it returns 503 when delivery is
+        off, because a queued test on a deployment that never drains the queue
+        would be a control that silently does nothing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
     AutomationUnavailable:
       description: |
         The automation engine is not configured in this deployment.
@@ -5547,8 +6230,77 @@ components:
             `up`, because running on periodic reconciliation alone is a
             supported configuration.
           $ref: "#/components/schemas/Component"
+        features:
+          description: |
+            Which capabilities this deployment has. **Authenticated callers
+            only** — an anonymous caller receives the overall status and nothing
+            else.
+
+            Reported so "is that feature off, or broken" is answerable. Almost
+            everything HarborMaster can do to a host is off by default, which
+            means an operator looking at an empty page has two explanations and
+            no way to choose between them.
+          $ref: "#/components/schemas/Features"
         checkedAt: { type: string, format: date-time }
         uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+
+    Features:
+      type: object
+      description: |
+        Which capabilities a deployment turned on.
+
+        **Booleans, never values.** No path, no address, no interval, no
+        credential. Each field says whether a capability EXISTS in this
+        process — when one is off the interface is never wired, so the ability
+        is absent rather than merely unused, and no request can turn it back on.
+      required:
+        [
+          inventory,
+          events,
+          snapshots,
+          drift,
+          policy,
+          planner,
+          imageIntel,
+          acquisition,
+          execution,
+          rollback,
+          automation,
+          notifications,
+          notificationsAllowPrivate,
+        ]
+      properties:
+        inventory: { type: boolean }
+        events: { type: boolean }
+        snapshots: { type: boolean }
+        drift: { type: boolean }
+        policy: { type: boolean }
+        planner: { type: boolean }
+        imageIntel:
+          type: boolean
+          description: >-
+            Outbound: anonymous HTTPS to registries derived from image references.
+        acquisition:
+          type: boolean
+          description: Downloads an approved, digest-pinned image. Touches no container.
+        execution:
+          type: boolean
+          description: STOPS A RUNNING CONTAINER and replaces it.
+        rollback:
+          type: boolean
+          description: Stops the replacement and starts the original.
+        automation:
+          type: boolean
+          description: Changes containers on a timer, with nobody watching.
+        notifications:
+          type: boolean
+          description: HarborMaster's second outbound egress.
+        notificationsAllowPrivate:
+          type: boolean
+          description: |
+            The one relaxation of the notification address guard. Link-local,
+            multicast, and the cloud metadata endpoint are refused whatever this
+            says.
 
     VersionInfo:
       type: object
@@ -10084,6 +10836,7 @@ components:
           description: Whether ANY enabled policy's maintenance window admits work now.
         nextWindowOpensAt: { type: string, format: date-time }
         nextWindowPolicyId: { type: string }
+        self: { $ref: "#/components/schemas/SelfIdentity" }
 
     Requester:
       type: object
@@ -10211,3 +10964,320 @@ components:
           type: object
           additionalProperties: { type: integer }
         lastEventAt: { type: string, format: date-time }
+
+    NotificationChannel:
+      type: string
+      description: |
+        Where a destination sends. A closed set: this build knows how to format
+        for exactly these, and there is no plugin, template, or script mechanism
+        by which a sixth could be added at runtime.
+      enum: [webhook, slack, discord, teams, email]
+
+    NotificationEvent:
+      type: string
+      description: |
+        What happened. A closed vocabulary written by HarborMaster; no
+        third-party text ever becomes one.
+      enum:
+        - update.discovered
+        - update.approvalRequired
+        - acquisition.succeeded
+        - acquisition.failed
+        - execution.succeeded
+        - execution.failed
+        - rollback.started
+        - rollback.succeeded
+        - rollback.failed
+        - automation.paused
+        - automation.error
+        - drift.detected
+        - policy.violation
+        - registry.unavailable
+        - backup.failed
+        - integrity.failed
+        - test
+
+    NotificationSeverity:
+      type: string
+      description: |
+        How much a notification matters. A rule delivers a notification at or
+        above its threshold.
+
+        Deliberately distinct from the Docker event severity and from a policy
+        severity: the three answer different questions and sharing a type
+        between any two would mean an edit to one changing another.
+      enum: [info, warning, critical]
+
+    DeliveryResult:
+      type: string
+      description: |
+        What happened to one delivery.
+
+        `suppressed` is a rule's cooldown deciding not to send — recorded rather
+        than silent, so an operator asking "why was I not told" can see that
+        HarborMaster decided and which rule decided. `dropped` is a notification
+        HarborMaster LOST because the queue was full; it is the one outcome that
+        means something went wrong inside HarborMaster rather than outside it.
+      enum: [pending, retrying, succeeded, failed, suppressed, dropped]
+
+    NotificationDestination:
+      type: object
+      description: |
+        Somewhere notifications are sent — the part that is safe to render, log,
+        and serve.
+
+        **The webhook URL and the SMTP password are not fields here and are not
+        fields on any response schema in this document.** They live in a
+        separate type the read paths cannot reach.
+      required: [destinationId, name, channel, enabled, endpoint, archived, createdAt, updatedAt]
+      properties:
+        destinationId: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+        name: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 500 }
+        channel: { $ref: "#/components/schemas/NotificationChannel" }
+        enabled: { type: boolean }
+        endpoint:
+          type: string
+          description: |
+            The SAFE rendering of where this goes: a scheme and host for a
+            webhook, an address for email. Never the full URL, because a webhook
+            URL's path is the credential for Slack, Discord, and Teams alike.
+          example: https://hooks.slack.com
+        titlePrefix:
+          type: string
+          maxLength: 60
+          description: |
+            The one piece of operator text that reaches a delivered message.
+            Bounded, sanitised, and inserted as TEXT — never as markup, and
+            never interpolated into anything a receiver would evaluate.
+        emailTo:
+          type: array
+          items: { type: string, format: email }
+        emailFrom: { type: string, format: email }
+        lastResult: { $ref: "#/components/schemas/DeliveryResult" }
+        lastAttemptAt: { type: string, format: date-time }
+        lastError:
+          type: string
+          description: HarborMaster's own sentence, never the transport's text.
+        consecutiveFailures: { type: integer, minimum: 0 }
+        archived: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    NotificationDestinationRequest:
+      type: object
+      description: |
+        The create and edit body. Every field is optional on an edit; omitting
+        one leaves it alone.
+
+        There is deliberately no `endpoint` field: it is DERIVED from the URL
+        rather than supplied alongside it. Two fields would be two things that
+        can disagree, and the one an administrator reads would be the one that
+        is not used.
+      properties:
+        name: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 500 }
+        channel:
+          allOf: [{ $ref: "#/components/schemas/NotificationChannel" }]
+          description: |
+            Required on create. **Refused on an edit**: a destination whose
+            stored credential is the wrong shape for what it now is would be a
+            state every validation ran before it could exist.
+        enabled: { type: boolean, default: true }
+        titlePrefix: { type: string, maxLength: 60 }
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: |
+            The webhook endpoint, including whatever token its path carries.
+            **Accepted here and returned by nothing.**
+
+            HTTPS only, a hostname rather than an IP literal, no userinfo. The
+            resolved address is checked again at dial time. Omitting it on an
+            edit keeps the stored credential; supplying one replaces it.
+        emailTo:
+          type: array
+          items: { type: string, format: email }
+        emailFrom: { type: string, format: email }
+
+    NotificationDestinationResult:
+      type: object
+      required: [destination]
+      properties:
+        destination: { $ref: "#/components/schemas/NotificationDestination" }
+        warnings:
+          type: array
+          description: |
+            Settings that are legal but worth seeing. They do not refuse the
+            destination.
+          items: { type: string }
+
+    NotificationRule:
+      type: object
+      description: |
+        What routes notifications to which destinations.
+      required: [ruleId, name, enabled, minimumSeverity, destinations, cooldownSeconds, archived, createdAt, updatedAt]
+      properties:
+        ruleId: { type: string, pattern: "^nrul_[0-9a-f]{20}$" }
+        name: { type: string, maxLength: 120 }
+        enabled: { type: boolean }
+        events:
+          type: array
+          description: |
+            **An empty list means EVERY event** — the useful default for a first
+            rule, and the opposite of an update policy's selector.
+          items: { $ref: "#/components/schemas/NotificationEvent" }
+        minimumSeverity: { $ref: "#/components/schemas/NotificationSeverity" }
+        destinations:
+          type: array
+          items: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+        cooldownSeconds:
+          type: integer
+          minimum: 0
+          description: |
+            Suppresses a repeat of the same underlying thing within the window.
+            Zero disables suppression.
+        archived: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    NotificationRuleRequest:
+      type: object
+      description: The create and edit body. Every field is optional on an edit.
+      properties:
+        name: { type: string, maxLength: 120 }
+        enabled: { type: boolean, default: true }
+        events:
+          type: array
+          maxItems: 32
+          items: { $ref: "#/components/schemas/NotificationEvent" }
+        minimumSeverity: { $ref: "#/components/schemas/NotificationSeverity" }
+        destinations:
+          type: array
+          maxItems: 20
+          items: { type: string, pattern: "^ndst_[0-9a-f]{20}$" }
+        cooldownSeconds: { type: integer, minimum: 0 }
+
+    NotificationRuleResult:
+      type: object
+      required: [rule]
+      properties:
+        rule: { $ref: "#/components/schemas/NotificationRule" }
+        warnings:
+          type: array
+          items: { type: string }
+
+    NotificationDelivery:
+      type: object
+      description: |
+        The record of one notification going to one destination.
+
+        The whole sanitised payload is stored, so "what did HarborMaster
+        actually send" is answerable. The destination URL, the SMTP password,
+        and the response body are not: the first two are credentials, and the
+        third is third-party text that would carry into a page an operator
+        reads.
+      required: [deliveryId, destinationId, destinationName, channel, event, severity, title, result, attempts, queuedAt]
+      properties:
+        deliveryId: { type: string, pattern: "^ndlv_[0-9a-f]{20}$" }
+        destinationId: { type: string }
+        destinationName: { type: string }
+        channel: { $ref: "#/components/schemas/NotificationChannel" }
+        ruleId: { type: string }
+        ruleName: { type: string }
+        event: { $ref: "#/components/schemas/NotificationEvent" }
+        severity: { $ref: "#/components/schemas/NotificationSeverity" }
+        title: { type: string }
+        body: { type: string }
+        containerName: { type: string }
+        result: { $ref: "#/components/schemas/DeliveryResult" }
+        attempts: { type: integer, minimum: 0 }
+        statusCode:
+          type: integer
+          description: |
+            The HTTP status a webhook returned, when there was one. Zero for
+            email and for a failure that never reached a response.
+        error:
+          type: string
+          description: |
+            HarborMaster's own sentence about the failure, from a fixed
+            vocabulary. **Never the transport's error text**: that carries
+            hostnames, addresses, and occasionally the URL itself.
+        dedupKey: { type: string }
+        queuedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        nextAttemptAt: { type: string, format: date-time }
+        durationMs: { type: integer }
+
+    NotificationStatus:
+      type: object
+      description: |
+        The subsystem's state, its counts, and the closed vocabularies a rule
+        editor is built from.
+      required: [enabled, destinations, rules, failing, channels, events, severities]
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            Whether DELIVERY is on. Configuration and history stay readable
+            either way, so an administrator can set up and review before
+            switching sending on.
+        destinations: { type: integer, minimum: 0 }
+        rules: { type: integer, minimum: 0 }
+        failing:
+          type: integer
+          minimum: 0
+          description: Destinations whose last attempt did not succeed.
+        delivered: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        pending: { type: integer, minimum: 0 }
+        suppressed: { type: integer, minimum: 0 }
+        dropped: { type: integer, minimum: 0 }
+        lastDeliveryAt: { type: string, format: date-time }
+        channels:
+          type: array
+          items: { $ref: "#/components/schemas/NotificationChannel" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/NotificationEvent" }
+        severities:
+          type: array
+          items: { $ref: "#/components/schemas/NotificationSeverity" }
+
+    SelfIdentity:
+      type: object
+      description: |
+        The container HarborMaster believes it is running in, and which it
+        therefore refuses to update.
+
+        **HarborMaster cannot update itself, and this is not configurable.**
+        There is no environment variable, policy field, or request parameter
+        that permits it, and an architecture test fails the build on one. Update
+        HarborMaster from outside it: `docker compose pull && docker compose up -d`.
+
+        Manual PLANNING of the HarborMaster container remains visible — an
+        operator should be able to see that a newer image exists — but
+        acquisition and recreation refuse at four independent layers: the
+        automation decision, the approval path, the acquisition preflight, and
+        the execution preflight.
+
+        Identity is established from independent signals, any one of which
+        suffices and none of which is required: a configured container id,
+        `/proc/self/cgroup` or `/proc/self/mountinfo`, the hostname matching a
+        container id prefix, or the `io.harbormaster.self` label. An EMPTY field
+        matches nothing, so a partial identification never excludes the wrong
+        container, and a wholly empty identity — HarborMaster running outside a
+        container — excludes nothing at all.
+      properties:
+        containerId: { type: string }
+        containerName: { type: string }
+        imageRef: { type: string }
+        imageId: { type: string }
+        source:
+          type: string
+          description: Which signal established the identity.
+          enum: [configured, runtime, hostname, label, none]
+        detail:
+          type: string
+          description: HarborMaster's own sentence about how it decided.

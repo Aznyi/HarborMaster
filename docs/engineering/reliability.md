@@ -424,9 +424,19 @@ condition reports the remedy it actually implies.
 | **Busy** | Absorbed by `HARBORMASTER_DB_BUSY_TIMEOUT`; a failure means another writer is stuck | Stop the other writer, or raise the timeout |
 | **Permission** | Cannot open the database | Fix ownership of the data directory |
 | **Docker unavailable** | Health reports **degraded**, not unhealthy. The API keeps serving the stored inventory; the event engine reconnects with bounded backoff | None, usually — it recovers by itself |
+| **A notification destination is broken** | Its card on the Notifications page says so, and the page header counts how many are failing. Nothing else degrades | Fix or replace the destination. A revoked webhook URL cannot be repaired; create a new destination |
+| **Notifications are being dropped** | Delivery records with result `dropped`, and a warning in the log naming a running total | Something raised notifications faster than they could be delivered. Raise `NOTIFICATIONS_QUEUE_SIZE` or `NOTIFICATIONS_WORKERS`, or narrow the rules |
+| **HarborMaster is on an old image and never appears in a plan** | Not a failure. The Automation page names the container it excludes | Update from outside: `docker compose pull && docker compose up -d`. See [Upgrading](upgrading.md) |
 
 Docker being unreachable is **degraded, never unhealthy**. Escalating it would
 put HarborMaster into a restart loop every time the daemon restarts.
+
+**A notification failure never escalates either**, and never affects the thing
+it was reporting on. A rollback whose duration depended on somebody else's
+webhook server would be a worse rollback, so delivery is asynchronous, a full
+queue drops rather than blocks, and a delivery that cannot be recorded is not
+attempted. The cost of that trade is that notifications can be LOST — which is
+why every drop is recorded and counted rather than silently absorbed.
 
 ---
 

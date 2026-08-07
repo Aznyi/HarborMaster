@@ -111,6 +111,16 @@ type AcquisitionOptions struct {
 	// correct behaviour for a deployment that has not opted in.
 	Acquirer docker.ImageAcquirer
 
+	// Self reports which container HarborMaster is running in, so the preflight
+	// can refuse a plan that names it. Nil means the zero identity, which
+	// matches nothing -- and the execution service refuses independently.
+	Self SelfReporter
+
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	// Audit records what a finished download did to the host, attributed to the
 	// account that asked for it. Nil records nothing, which is correct for a
 	// test but not for a deployment.
@@ -127,8 +137,11 @@ type AcquisitionService struct {
 	evidence AcquisitionEvidence
 	runtime  docker.Runtime
 	acquirer docker.ImageAcquirer
+	// self reports HarborMaster's own container. Read on every preflight.
+	notifier Notifier
+	self     SelfReporter
 	// audit records the OUTCOME of a download in the security log. Nil in a
-	// test that is not about attribution; auditOutcome is nil-safe.
+	// test that is not about attribution; reportOutcome is nil-safe.
 	audit *AuditRecorder
 
 	cfg    config.Acquisition
@@ -187,6 +200,8 @@ func NewAcquisitionService(opts AcquisitionOptions) *AcquisitionService {
 		evidence:    opts.Evidence,
 		runtime:     opts.Runtime,
 		acquirer:    opts.Acquirer,
+		notifier:    opts.Notify,
+		self:        opts.Self,
 		audit:       opts.Audit,
 		cfg:         cfg,
 		logger:      logger,
@@ -222,7 +237,7 @@ type AcquisitionRequest struct {
 
 	// RequestedBy is the account asking. Stored on the record so the OUTCOME
 	// can be attributed minutes later by a worker that has no request and no
-	// session; see auditOutcome.
+	// session; see reportOutcome.
 	RequestedBy domain.Requester
 }
 
@@ -413,6 +428,29 @@ func (s *AcquisitionService) preflight(
 		return decision, err
 	}
 	decision.Plan = plan
+
+	// HARBORMASTER ITSELF.
+	//
+	// Checked here, at the top of the preflight, and independently of the
+	// automation engine's own check. The engine is not the only caller: an
+	// operator can POST /acquisitions with any plan id, and this is the layer
+	// that has to hold when the one above is bypassed or wrong.
+	//
+	// Refused at the DOWNLOAD, though a download changes no container, because
+	// the download is the first half of an operation whose second half cannot
+	// complete. A succeeded acquisition that can never be spent reads as a
+	// working feature right up to the moment it is not.
+	if s.self != nil {
+		identity := s.self.Identity()
+		if self, _ := identity.SelfMatch(domain.SelfTarget{
+			ContainerID:   plan.ContainerID,
+			ContainerName: plan.ContainerName,
+			ImageRef:      plan.CurrentImage,
+		}); self {
+			decision.Refusal = domain.AcquisitionRefusalSelfUpdate
+			return decision, nil
+		}
+	}
 
 	// A superseded plan means the operator approved an assessment that has
 	// since been replaced. The newer one may say something different, and
@@ -695,9 +733,9 @@ func (s *AcquisitionService) execute(ctx context.Context, acquisition domain.Acq
 		s.mu.Unlock()
 
 		// The OUTCOME reaches the security audit log from exactly one place --
-		// see ExecutionService.auditOutcome for why a deferred read-back beats
+		// see ExecutionService.reportOutcome for why a deferred read-back beats
 		// an audit call on each of the terminal paths.
-		s.auditOutcome(ctx, acquisition)
+		s.reportOutcome(ctx, acquisition)
 	}()
 
 	// ---- claim -----------------------------------------------------------
@@ -1178,7 +1216,7 @@ func (e *planEvidence) ContainerPresent(ctx context.Context, containerID string)
 
 // ------------------------------------------------------- audit attribution --
 
-// auditOutcome records what a finished download did to the host.
+// reportOutcome records what a finished download did to the host.
 //
 // The image store is a smaller blast radius than a running container, but the
 // event still belongs in the security log: an image on the host is content
@@ -1186,9 +1224,12 @@ func (e *planEvidence) ContainerPresent(ctx context.Context, containerID string)
 // administrator asks after finding one.
 //
 // Bounded, detached, and unable to fail the acquisition -- the same reasoning
-// as ExecutionService.auditOutcome, which documents it at length.
-func (s *AcquisitionService) auditOutcome(ctx context.Context, requested domain.Acquisition) {
-	if s.audit == nil {
+// as ExecutionService.reportOutcome, which documents it at length.
+func (s *AcquisitionService) reportOutcome(ctx context.Context, requested domain.Acquisition) {
+	// Both consumers or neither: the read-back is the expensive part, and a
+	// deployment with an audit recorder and no notifier -- or the reverse -- is
+	// perfectly normal.
+	if s.audit == nil && s.notifier == nil {
 		return
 	}
 
@@ -1218,6 +1259,21 @@ func (s *AcquisitionService) auditOutcome(ctx context.Context, requested domain.
 	s.audit.RecordAction(writeCtx, requesterActor(final.RequestedBy),
 		action, outcome, domain.AuditTargetAcquisition,
 		final.AcquisitionID, final.ContainerName, acquisitionOutcomeReason(final))
+
+	// The notification leaves from the same read-back, for the same reason: one
+	// place that observes the settled record beats a call on each of the five
+	// terminal paths, where the sixth would eventually be forgotten.
+	//
+	// Cancelled and expired raise nothing. An operator who cancelled a download
+	// does not need to be told they cancelled it.
+	switch final.State {
+	case domain.AcquisitionSucceeded:
+		NotifyAcquisitionSucceeded(s.notifier, final.ContainerName,
+			final.Target.Reference, final.AcquisitionID)
+	case domain.AcquisitionFailed:
+		NotifyAcquisitionFailed(s.notifier, final.ContainerName,
+			final.Target.Reference, final.AcquisitionID, acquisitionOutcomeReason(final))
+	}
 }
 
 // acquisitionOutcomeReason renders the conclusion in HarborMaster's own words.

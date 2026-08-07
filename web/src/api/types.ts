@@ -28,9 +28,46 @@ export interface HealthReport {
   status: OverallStatus;
   database: HealthComponent;
   docker: HealthComponent;
+  events?: HealthComponent;
+  /** Which capabilities this deployment has. Authenticated callers only. */
+  features?: Features;
   /** ISO-8601 timestamp, UTC. */
   checkedAt: string;
   uptimeSeconds: number;
+}
+
+/**
+ * Which capabilities a deployment turned on.
+ *
+ * # Booleans, never values
+ *
+ * No path, no address, no interval, no credential. Each field says whether a
+ * capability EXISTS in this process, which is what lets an operator looking at
+ * an empty page tell "switched off" from "not working" — two explanations that
+ * are otherwise indistinguishable, and that lead somewhere very different.
+ */
+export interface Features {
+  inventory: boolean;
+  events: boolean;
+  snapshots: boolean;
+  drift: boolean;
+  policy: boolean;
+  planner: boolean;
+  imageIntel: boolean;
+
+  /** Downloads an approved, digest-pinned image. Touches no container. */
+  acquisition: boolean;
+  /** STOPS A RUNNING CONTAINER and replaces it. */
+  execution: boolean;
+  /** Stops the replacement and starts the original. */
+  rollback: boolean;
+  /** Changes containers with nobody watching. */
+  automation: boolean;
+
+  /** HarborMaster's second outbound egress. */
+  notifications: boolean;
+  /** The one relaxation of the notification address guard. */
+  notificationsAllowPrivate: boolean;
 }
 
 export interface VersionInfo {

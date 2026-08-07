@@ -119,9 +119,10 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	client, err := docker.New(docker.Options{
-		Host:    defaultDockerHost(),
-		Timeout: 30 * time.Second,
-		Masker:  domain.NewDefaultMasker(),
+		Host:       defaultDockerHost(),
+		APIVersion: pinnedAPIVersion(),
+		Timeout:    30 * time.Second,
+		Masker:     domain.NewDefaultMasker(),
 	})
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
@@ -214,6 +215,25 @@ func defaultDockerHost() string {
 		return "unix:///var/run/docker.sock"
 	}
 	return cfg.Docker.Host
+}
+
+// pinnedAPIVersion is the Engine API version the suite runs against.
+//
+// # Why this is read from configuration rather than left empty
+//
+// The compatibility matrix in CI runs this suite once per supported API
+// version by setting HARBORMASTER_DOCKER_API_VERSION. A suite that ignored it
+// would run five identical jobs and report a matrix it had not tested — worse
+// than no matrix, because the badge would be green.
+//
+// Empty locally, which is the negotiated configuration every real deployment
+// uses.
+func pinnedAPIVersion() string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.Docker.APIVersion
 }
 
 func (h *harness) waitConnected(t *testing.T) {

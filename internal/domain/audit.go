@@ -156,6 +156,26 @@ const (
 
 	// AuditAutomationApproved is a person releasing a decision the engine made
 	// but was not permitted to act on.
+	// Notification administration.
+	//
+	// A destination carries a CREDENTIAL and points HarborMaster's second
+	// outbound egress somewhere. Creating, editing, and archiving one are all
+	// audited, and a test send is audited too: it is a real outbound request
+	// somebody caused, and "who made this host talk to that server" is exactly
+	// the question the audit log exists to answer.
+	//
+	// No audit record carries the URL. The destination NAME and its
+	// identifier are what a reader needs, and the name is one an administrator
+	// chose rather than a token.
+	AuditNotificationDestinationCreated  AuditAction = "notificationDestination.created"
+	AuditNotificationDestinationUpdated  AuditAction = "notificationDestination.updated"
+	AuditNotificationDestinationArchived AuditAction = "notificationDestination.archived"
+	AuditNotificationDestinationTested   AuditAction = "notificationDestination.tested"
+
+	AuditNotificationRuleCreated  AuditAction = "notificationRule.created"
+	AuditNotificationRuleUpdated  AuditAction = "notificationRule.updated"
+	AuditNotificationRuleArchived AuditAction = "notificationRule.archived"
+
 	AuditAutomationApproved AuditAction = "automation.approved"
 	AuditAutomationRejected AuditAction = "automation.rejected"
 
@@ -193,6 +213,11 @@ var AuditActions = []AuditAction{
 	AuditAutomationRunStarted, AuditAutomationRunCompleted, AuditAutomationRunFailed,
 	AuditAutomationApproved, AuditAutomationRejected,
 	AuditAutomationPaused, AuditAutomationResumed,
+
+	AuditNotificationDestinationCreated, AuditNotificationDestinationUpdated,
+	AuditNotificationDestinationArchived, AuditNotificationDestinationTested,
+	AuditNotificationRuleCreated, AuditNotificationRuleUpdated,
+	AuditNotificationRuleArchived,
 }
 
 // ValidAuditAction reports whether name is a known action.
@@ -290,8 +315,14 @@ const (
 	// a mutation rule under one word.
 	AuditTargetUpdatePolicy AuditTargetType = "updatePolicy"
 	AuditTargetAutomation   AuditTargetType = "automation"
-	AuditTargetInventory    AuditTargetType = "inventory"
-	AuditTargetSystem       AuditTargetType = "system"
+	// AuditTargetNotificationDestination is somewhere notifications are sent,
+	// and AuditTargetNotificationRule is what routes them there. Separate,
+	// because archiving a destination and archiving a rule have different
+	// consequences and a reader must not have to guess which happened.
+	AuditTargetNotificationDestination AuditTargetType = "notificationDestination"
+	AuditTargetNotificationRule        AuditTargetType = "notificationRule"
+	AuditTargetInventory               AuditTargetType = "inventory"
+	AuditTargetSystem                  AuditTargetType = "system"
 )
 
 // AuditTargetTypes lists every target type.
@@ -301,6 +332,7 @@ var AuditTargetTypes = []AuditTargetType{
 	AuditTargetViolation, AuditTargetPlan, AuditTargetAcquisition,
 	AuditTargetExecution, AuditTargetRollback,
 	AuditTargetUpdatePolicy, AuditTargetAutomation,
+	AuditTargetNotificationDestination, AuditTargetNotificationRule,
 	AuditTargetInventory, AuditTargetSystem,
 }
 

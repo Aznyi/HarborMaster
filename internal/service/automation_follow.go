@@ -87,7 +87,17 @@ func (s *AutomationService) advance(ctx context.Context, decision domain.Automat
 		// A decision with no acquisition never acted. Nothing to follow.
 		return
 	case decision.RollbackID != "":
-		// The last step in the pipeline. Terminal for the follower.
+		// The last step in the pipeline. Terminal for the follower -- and
+		// SETTLED here rather than only returned from, so the row leaves the
+		// outstanding set.
+		//
+		// The production path settles this in handleFailedExecution, which is
+		// why this is not the primary route. It exists for the rows that path
+		// never touched: decisions written before the settled marker existed,
+		// and any future caller that attaches a rollback without going through
+		// the failure handler. Without it those rows are re-read on every tick
+		// forever, which is precisely the leak the marker was added to close.
+		s.settle(ctx, decision)
 		return
 	case decision.ExecutionID == "":
 		s.advanceAcquisition(ctx, decision)
@@ -438,6 +448,13 @@ func (s *AutomationService) recordFailureAndMaybePause(
 
 	s.recordAudit(ctx, domain.AuditAutomationPaused, domain.AuditSucceeded,
 		decision.ContainerName, Actor{}, reason.Explain())
+
+	// A pause is the event an operator most needs to be told about and least
+	// likely to notice: automation stops acting and nothing else happens. The
+	// reason is the closed vocabulary's own sentence, never the failure detail,
+	// which is built from a Docker error.
+	NotifyAutomationPaused(s.notifier, decision.ContainerName,
+		reason.Explain(), count.Windowed)
 }
 
 // policyFor reads one governing policy, or reports that it is gone.

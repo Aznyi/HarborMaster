@@ -30,6 +30,7 @@ const READS: Permission[] = [
   "execution:read",
   "rollback:read",
   "automation:read",
+  "notification:read",
 ];
 
 const OPERATOR_WRITES: Permission[] = [
@@ -53,6 +54,7 @@ const OPERATOR_WRITES: Permission[] = [
 
 const ADMIN_ONLY: Permission[] = [
   "automation:manage",
+  "notification:manage",
   "policy:manage",
   "user:manage",
   "audit:read",

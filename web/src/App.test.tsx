@@ -14,6 +14,23 @@ const healthyReport: HealthReport = {
   status: "healthy",
   database: { status: "up", latencyMs: 1 },
   docker: { status: "up", latencyMs: 4, version: "1.51" },
+  // The default posture: everything that only reads is on, and every capability
+  // that can change a host is off.
+  features: {
+    inventory: true,
+    events: true,
+    snapshots: true,
+    drift: true,
+    policy: true,
+    planner: true,
+    imageIntel: true,
+    acquisition: false,
+    execution: false,
+    rollback: false,
+    automation: false,
+    notifications: false,
+    notificationsAllowPrivate: false,
+  },
   checkedAt: "2026-08-03T09:20:11.482Z",
   uptimeSeconds: 120,
 };
@@ -199,15 +216,27 @@ describe("App shell", () => {
     await settle();
   });
 
-  it("lists configuration variable names without their values", async () => {
+  // The settings page says what the process CAN DO, and never what it is
+  // configured with.
+  //
+  // The distinction matters: almost everything HarborMaster can do to a host is
+  // off by default, so an operator looking at an empty page cannot otherwise
+  // tell "switched off" from "not working". The values that produced those
+  // states stay out, because the same mechanism carries credentials.
+  it("states which capabilities exist without showing any configured value", async () => {
     stubApi(healthyReport);
     renderApp("/settings");
 
     await waitFor(() =>
-      expect(screen.getByText("HARBORMASTER_DOCKER_HOST")).toBeInTheDocument(),
+      expect(screen.getByText("Recreate containers")).toBeInTheDocument(),
     );
-    // The API never returns config values, so none can appear here.
+    expect(screen.getByText("Unattended updates")).toBeInTheDocument();
+    expect(screen.getAllByText(/Notifications/).length).toBeGreaterThan(0);
+
+    // No configured value appears: not a socket path, not a database path, not
+    // an address.
     expect(screen.queryByText(/unix:\/\//)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/var\/lib\/harbormaster/)).not.toBeInTheDocument();
   });
 
   it("exposes a mobile navigation toggle", async () => {

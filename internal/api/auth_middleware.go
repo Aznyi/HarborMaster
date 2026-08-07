@@ -476,34 +476,43 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, issued
 // Both, unconditionally. A deployment that gained or lost TLS can have left a
 // token under the other name, and a token left in a browser is one that can be
 // presented later.
-func (s *Server) clearSessionCookie(w http.ResponseWriter, _ *http.Request) {
-	s.expireCookie(w, SessionCookieName, false)
+//
+// # Why each deletion gets the Secure attribute it gets
+//
+// A cookie's identity is its NAME, DOMAIN, and PATH. The Secure attribute is a
+// property of the cookie being written, not part of what it matches, so a
+// Secure deletion still removes a non-Secure cookie of the same name. That is
+// what lets both of these follow the safer rule rather than the one that
+// happens to match what is already in the browser.
+//
+//   - `__Host-` REQUIRES Secure by definition, so its deletion is always
+//     Secure. On a plain-HTTP origin the browser rejects it, which costs
+//     nothing: a `__Host-` cookie could never have been set there either.
+//   - The plain name's deletion follows the CONNECTION. Over HTTPS that makes
+//     the deletion itself Secure, so it cannot be replayed over a downgraded
+//     request. Over plain HTTP it must not be, because a browser rejects a
+//     Secure cookie set from an insecure origin — the deletion would be
+//     silently dropped and the dead token would stay in the browser, which is
+//     the opposite of what signing out is for.
+//
+// The second case is the only one that ever writes a cookie without Secure, and
+// it writes an EMPTY value with a negative Max-Age. There is nothing in it to
+// protect in transit; its whole purpose is to delete the one that did carry a
+// token.
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	s.expireCookie(w, SecureSessionCookieName, true)
+	s.expireCookie(w, SessionCookieName, s.requestIsSecure(r))
 }
 
 // expireCookie writes a cookie that a browser deletes immediately.
 //
-// The `secure` argument matches the NAME being cleared, not the request: a
-// `__Host-` cookie can only be replaced by another Secure cookie, so clearing
-// it needs Secure set whatever the current connection looks like.
+// The `secure` argument is the caller's decision; see clearSessionCookie for
+// how each of the two names arrives at one.
 func (s *Server) expireCookie(w http.ResponseWriter, name string, secure bool) {
 	sameSite := http.SameSiteStrictMode
 	if s.authCfg.CookieSameSiteLax {
 		sameSite = http.SameSiteLaxMode
 	}
-	// CodeQL reports go/cookie-secure-not-set here, and the finding is
-	// reviewed and accepted rather than suppressed in source -- see
-	// docs/security/release-process.md.
-	//
-	// This cookie carries an EMPTY value and a negative Max-Age. There is
-	// nothing in it to protect in transit; its whole purpose is to make the
-	// browser delete the one that DID carry a token.
-	//
-	// It cannot be written with Secure unconditionally. A browser ignores a
-	// Secure cookie that arrives over plain HTTP, so on a loopback deployment
-	// without TLS the deletion would be silently dropped and the dead token
-	// would stay in the browser -- which is the opposite of what signing out
-	// is for.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",

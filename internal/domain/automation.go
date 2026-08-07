@@ -103,6 +103,13 @@ const (
 	// given rather than reinterpreting it.
 	ReasonRefused AutomationReason = "refusedByService"
 	ReasonError   AutomationReason = "error"
+
+	// ReasonSelfUpdate is the container HarborMaster is running in.
+	//
+	// Its own category rather than a refusal, because the remedy is different
+	// from every other reason here: no policy, window, or approval makes it
+	// succeed. HarborMaster is updated from outside itself.
+	ReasonSelfUpdate AutomationReason = "selfUpdate"
 )
 
 // Explain renders a reason in operator-facing words.
@@ -152,6 +159,8 @@ func (r AutomationReason) Explain() string {
 		return "a downstream service refused the request"
 	case ReasonError:
 		return "the decision could not be completed"
+	case ReasonSelfUpdate:
+		return "this is the container HarborMaster is running in, and it cannot update itself"
 	default:
 		return string(r)
 	}
@@ -374,6 +383,16 @@ type AutomationStatus struct {
 	WindowOpen         bool       `json:"windowOpen"`
 	NextWindowOpensAt  *time.Time `json:"nextWindowOpensAt,omitempty"`
 	NextWindowPolicyID string     `json:"nextWindowPolicyId,omitempty"`
+
+	// Self is the container HarborMaster believes it is running in, and which
+	// it therefore refuses to update.
+	//
+	// Reported so the exclusion is VISIBLE rather than mysterious. An operator
+	// whose HarborMaster container is on an old image and never appears in a
+	// plan should be able to read why, and an operator running outside a
+	// container should be able to see that HarborMaster knows that too -- the
+	// zero value is an honest "no identity", which matches nothing.
+	Self SelfIdentity `json:"self"`
 }
 
 // AutomationRunSummary is the history aggregate.

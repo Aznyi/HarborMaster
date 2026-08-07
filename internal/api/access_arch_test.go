@@ -142,6 +142,13 @@ var auditedElsewhere = map[string]string{
 	APIPrefix + "/automation/approve":   "AutomationService.Approve records the release, and the refusal when the plan moved on",
 	APIPrefix + "/automation/pause":     "AutomationService.PauseContainer records the pause",
 	APIPrefix + "/automation/resume":    "AutomationService.Resume records who cleared it",
+
+	APIPrefix + "/notifications/destinations": "NotificationAdminService.CreateDestination records the channel, never the URL",
+	APIPrefix + "/notifications/destinations/{id}": "NotificationAdminService.UpdateDestination and ArchiveDestination record the edit, " +
+		"and say explicitly when a credential was replaced",
+	APIPrefix + "/notifications/destinations/{id}/test": "NotificationAdminService.TestDestination records the outbound request somebody caused",
+	APIPrefix + "/notifications/rules":                  "NotificationAdminService.CreateRule records the rule",
+	APIPrefix + "/notifications/rules/{id}":             "NotificationAdminService.UpdateRule and ArchiveRule record the change",
 }
 
 // TestEveryWriteRouteIsAudited fails if a state-changing route neither calls

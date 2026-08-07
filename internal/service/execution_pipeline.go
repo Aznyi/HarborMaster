@@ -139,7 +139,7 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 		// a list that a future path forgets to join. This deferred call reads
 		// the FINAL state back from the store instead, so a path that reaches
 		// a conclusion is audited whether or not its author remembered to.
-		s.auditOutcome(ctx, execution)
+		s.reportOutcome(ctx, execution)
 	}()
 
 	// ---- claim -----------------------------------------------------------
@@ -847,7 +847,7 @@ func classifyMutationFailure(err error, fallback domain.ExecutionFailure) domain
 
 // ------------------------------------------------------- audit attribution --
 
-// auditOutcome records what a finished recreation did to the host.
+// reportOutcome records what a finished recreation did to the host.
 //
 // # Why this is separate from the execution record
 //
@@ -870,8 +870,11 @@ func classifyMutationFailure(err error, fallback domain.ExecutionFailure) domain
 // lands even when the parent is cancelled, and every failure is logged rather
 // than returned: an audit log that could fail an operation is a way to disable
 // HarborMaster by filling a disk.
-func (s *ExecutionService) auditOutcome(ctx context.Context, requested domain.Execution) {
-	if s.audit == nil {
+func (s *ExecutionService) reportOutcome(ctx context.Context, requested domain.Execution) {
+	// Both consumers or neither: the read-back is the expensive part, and a
+	// deployment with an audit recorder and no notifier -- or the reverse -- is
+	// perfectly normal.
+	if s.audit == nil && s.notifier == nil {
 		return
 	}
 
@@ -906,6 +909,21 @@ func (s *ExecutionService) auditOutcome(ctx context.Context, requested domain.Ex
 	s.audit.RecordAction(writeCtx, requesterActor(final.RequestedBy),
 		action, outcome, domain.AuditTargetExecution,
 		final.ExecutionID, final.ContainerName, executionOutcomeReason(final))
+
+	// The notification leaves from the same read-back. Cancelled and expired
+	// raise nothing: an operator who cancelled a recreation does not need to be
+	// told they cancelled it.
+	switch final.State {
+	case domain.ExecutionSucceeded:
+		NotifyExecutionSucceeded(s.notifier, final.ContainerName,
+			final.Target.Reference, final.ExecutionID)
+	case domain.ExecutionFailed:
+		// Whether the host was left changed is the difference between "act now"
+		// and "nothing happened", and it is the same fact the audit reason
+		// leads with.
+		NotifyExecutionFailed(s.notifier, final.ContainerName, final.ExecutionID,
+			executionOutcomeReason(final), final.Checkpoint.HostChanged())
+	}
 }
 
 // executionOutcomeReason renders the conclusion in HarborMaster's own words.

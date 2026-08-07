@@ -79,6 +79,8 @@ services:
       HARBORMASTER_HTTP_ADDR: 0.0.0.0:8080
       HARBORMASTER_DB_PATH: /var/lib/harbormaster/harbormaster.db
       HARBORMASTER_DOCKER_HOST: unix:///var/run/docker.sock
+      # Empty negotiates, which is what you want. See .env.example.
+      HARBORMASTER_DOCKER_API_VERSION: ${HARBORMASTER_DOCKER_API_VERSION:-}
       HARBORMASTER_LOG_LEVEL: ${HARBORMASTER_LOG_LEVEL:-info}
       HARBORMASTER_LOG_FORMAT: ${HARBORMASTER_LOG_FORMAT:-json}
       HARBORMASTER_SHUTDOWN_TIMEOUT: ${HARBORMASTER_SHUTDOWN_TIMEOUT:-30s}
@@ -179,6 +181,82 @@ services:
       HARBORMASTER_AUTOMATION_REQUIRE_APPROVAL_FOR_MAJOR: ${HARBORMASTER_AUTOMATION_REQUIRE_APPROVAL_FOR_MAJOR:-true}
       HARBORMASTER_AUTOMATION_RETENTION_AGE: ${HARBORMASTER_AUTOMATION_RETENTION_AGE:-2160h}
       HARBORMASTER_AUTOMATION_PRUNE_INTERVAL: ${HARBORMASTER_AUTOMATION_PRUNE_INTERVAL:-6h}
+
+      # ---- notifications -----------------------------------------------
+      #
+      # HARBORMASTER'S SECOND OUTBOUND EGRESS, and the only one that goes
+      # somewhere an administrator typed rather than somewhere derived from an
+      # image reference. Off by default.
+      #
+      # With it on, an administrator can create destinations that make this
+      # container issue HTTPS POSTs. The guard still applies: HTTPS only,
+      # certificates verified, no redirects, no proxy, a hostname rather than
+      # an IP literal, and the RESOLVED ADDRESS re-checked at dial time so DNS
+      # rebinding does not work.
+      HARBORMASTER_NOTIFICATIONS_ENABLED: ${HARBORMASTER_NOTIFICATIONS_ENABLED:-false}
+
+      # Permits a destination that resolves to a loopback, private, or
+      # unique-local address -- a Gotify, ntfy, or Home Assistant on your own
+      # LAN. OFF BY DEFAULT: with it on, an administrator can point this
+      # container at anything it can route to.
+      #
+      # Even on, link-local, multicast, and the cloud metadata endpoint
+      # (169.254.169.254) are refused unconditionally.
+      HARBORMASTER_NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS: ${HARBORMASTER_NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS:-false}
+
+      HARBORMASTER_NOTIFICATIONS_QUEUE_SIZE: ${HARBORMASTER_NOTIFICATIONS_QUEUE_SIZE:-256}
+      HARBORMASTER_NOTIFICATIONS_WORKERS: ${HARBORMASTER_NOTIFICATIONS_WORKERS:-4}
+      HARBORMASTER_NOTIFICATIONS_MAX_PER_DESTINATION: ${HARBORMASTER_NOTIFICATIONS_MAX_PER_DESTINATION:-2}
+      HARBORMASTER_NOTIFICATIONS_DELIVERY_TIMEOUT: ${HARBORMASTER_NOTIFICATIONS_DELIVERY_TIMEOUT:-15s}
+      HARBORMASTER_NOTIFICATIONS_MAX_ATTEMPTS: ${HARBORMASTER_NOTIFICATIONS_MAX_ATTEMPTS:-4}
+      HARBORMASTER_NOTIFICATIONS_RETRY_BACKOFF: ${HARBORMASTER_NOTIFICATIONS_RETRY_BACKOFF:-30s}
+      HARBORMASTER_NOTIFICATIONS_RETRY_INTERVAL: ${HARBORMASTER_NOTIFICATIONS_RETRY_INTERVAL:-30s}
+      HARBORMASTER_NOTIFICATIONS_RETENTION_AGE: ${HARBORMASTER_NOTIFICATIONS_RETENTION_AGE:-720h}
+      HARBORMASTER_NOTIFICATIONS_PRUNE_INTERVAL: ${HARBORMASTER_NOTIFICATIONS_PRUNE_INTERVAL:-6h}
+
+      # ---- the SMTP relay, for email destinations ----------------------
+      #
+      # Supplied here rather than per destination, so a mail password never
+      # reaches HarborMaster's database. Leave SMTP_HOST empty and email
+      # destinations are refused at creation rather than failing at the first
+      # alert.
+      #
+      # PREFER THE FILE for the password: a Docker secret is a file, and an
+      # environment variable is readable by anything that can read this
+      # container's /proc. Add a `secrets:` block and point
+      # HARBORMASTER_SMTP_PASSWORD_FILE at /run/secrets/<name>.
+      HARBORMASTER_SMTP_HOST: ${HARBORMASTER_SMTP_HOST:-}
+      HARBORMASTER_SMTP_PORT: ${HARBORMASTER_SMTP_PORT:-587}
+      HARBORMASTER_SMTP_STARTTLS: ${HARBORMASTER_SMTP_STARTTLS:-true}
+      HARBORMASTER_SMTP_USERNAME: ${HARBORMASTER_SMTP_USERNAME:-}
+      HARBORMASTER_SMTP_PASSWORD_FILE: ${HARBORMASTER_SMTP_PASSWORD_FILE:-}
+
+      # ---- self-update protection --------------------------------------
+      #
+      # HarborMaster refuses to update the container it is running in, and
+      # THAT IS NOT CONFIGURABLE. There is no setting here or anywhere that
+      # turns the refusal off; an architecture test fails the build on one.
+      #
+      # This tells HarborMaster which container that is, for the rare
+      # deployment where it cannot work it out -- a host PID namespace, a
+      # custom hostname, and no label all at once. Normally leave it empty: the
+      # label below is enough, and /proc usually answers on its own.
+      #
+      # A WRONG value makes HarborMaster decline to update some other
+      # container, which is a smaller harm than the reverse.
+      HARBORMASTER_SELF_CONTAINER_ID: ${HARBORMASTER_SELF_CONTAINER_ID:-}
+
+    # The label HarborMaster looks for when identifying its own container.
+    #
+    # One of four independent signals, and the only one an operator controls
+    # from the deployment. It matters on Docker Desktop and under a host PID
+    # namespace, where /proc does not name the container.
+    #
+    # A container that carries this label and is NOT HarborMaster would be
+    # excluded from updates for no reason -- an annoyance, not a hazard, and
+    # the reason the label is namespaced.
+    labels:
+      io.harbormaster.self: "true"
 
     volumes:
       # See the warning above: `:ro` does not make the Docker API read-only.

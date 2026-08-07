@@ -276,3 +276,85 @@ Docker daemon.
   (`NewJSONHandler`, `NewTextHandler`) escape or quote attribute values, so a
   request path cannot forge a log record; the taint flow is real but the
   injection is not achievable. Recorded here rather than dismissed.
+
+---
+
+## GO-2026-5932 — golang.org/x/crypto/openpgp is unmaintained
+
+| | |
+|---|---|
+| Package | `golang.org/x/crypto` (Go module) |
+| Installed | v0.54.0 — **the latest release** |
+| Affected package | `golang.org/x/crypto/openpgp` |
+| Severity | UNKNOWN (GitHub renders it as **Note**) |
+| Fixed version | **None, and there will not be one** |
+| Reported by | Trivy, twice: once against `go.mod`, once against the binary |
+| Status | **Accepted.** The package is not in the build. Ignored in `.trivyignore.yaml` with an expiry, and the non-use is enforced by two tests. |
+
+### Why there is no version to upgrade to
+
+The advisory is not "a release of this package broke something". It is *"this
+package is unmaintained, unsafe by design, and has known security issues"* —
+a statement about the package's existence. `openpgp` was frozen years ago and
+the Go team's guidance is to use a maintained OpenPGP implementation instead.
+
+There is therefore no `Fixed Version`, and `v0.54.0` is already the newest
+release of the module. **No dependency change can clear this alert.**
+
+### Why it does not apply to HarborMaster
+
+HarborMaster requires `golang.org/x/crypto` for password hashing. The build
+contains exactly two packages from it:
+
+```
+$ go list -deps ./... | grep '^golang.org/x/crypto/'
+golang.org/x/crypto/blake2b
+golang.org/x/crypto/argon2
+```
+
+Zero packages under `openpgp`. `govulncheck`, which resolves **symbols** rather
+than modules, reaches the same conclusion:
+
+```
+$ govulncheck ./...
+No vulnerabilities found.
+...0 vulnerabilities in packages you import and 1 vulnerability in modules you
+require, but your code doesn't appear to call these
+```
+
+That one uncalled module vulnerability is this advisory.
+
+### Why Trivy reports it anyway
+
+Because it cannot see what the build linked. A `go.mod` scan reads a manifest,
+and a Go binary scan reads the embedded build info — **both list MODULES**. The
+module is required, so the advisory applies to it, and nothing in either input
+distinguishes `argon2` from `openpgp`.
+
+This is not a Trivy defect. It is the granularity the data has, and it is why
+`govulncheck` exists alongside it.
+
+### What enforces the reasoning
+
+An ignore justified by "we do not use that package" is worth exactly as much as
+the check that we still do not. Two tests in `internal/arch`:
+
+| Test | What it fails on |
+|---|---|
+| `TestNothingBannedIsAnywhereInTheBuild` | `golang.org/x/crypto/openpgp` entering the package set, first-party or transitive |
+| `TestTheCryptoModuleIsUsedOnlyForWhatTheTriageSays` | a **third** package from this module being used, which would make the analysis above stale |
+
+Both resolve the real package set with `go list -deps ./...` rather than
+parsing imports, so a dependency that pulled `openpgp` in would be caught too.
+
+The `.trivyignore.yaml` entry carries `expired_at: 2027-02-01`. When it lapses
+the finding returns and this analysis gets redone — which is the point of an
+expiry, and the reason the ignore is not simply a dismissal in the GitHub UI
+where nobody would ever see it again.
+
+### If this ever needs to change
+
+If HarborMaster comes to need OpenPGP — verifying a signed artefact, say — do
+**not** reach for this package. Remove the ignore, remove the test entry, and
+pick a maintained implementation. The advisory would then be describing code
+that actually runs.

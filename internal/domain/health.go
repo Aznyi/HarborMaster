@@ -60,4 +60,59 @@ type HealthReport struct {
 	Events    *Component `json:"events,omitempty"`
 	CheckedAt time.Time  `json:"checkedAt"`
 	UptimeSec int64      `json:"uptimeSeconds"`
+
+	// Features is which capabilities this deployment has, and is served only
+	// to an authenticated caller.
+	//
+	// Reported so "is that feature off, or broken" is answerable from the
+	// interface. Every one of these is off by default and turning one on is a
+	// deliberate act, which means an operator looking at an empty page has two
+	// explanations and no way to choose between them.
+	Features *Features `json:"features,omitempty"`
+}
+
+// Features is which capabilities a deployment turned on.
+//
+// # What this is not
+//
+// It is not configuration. No VALUE appears here — no path, no address, no
+// interval, and certainly no credential. Each field is a boolean saying whether
+// a capability exists in this process, which is exactly what an operator needs
+// to distinguish "switched off" from "not working" and is the least that
+// answers it.
+//
+// # Why the three mutations are grouped and named for what they DO
+//
+// Because "acquisition" means nothing to somebody reading a settings page at
+// two in the morning. What matters is that one downloads, one stops and
+// replaces a running container, and one puts a container back.
+type Features struct {
+	// The read-only engines.
+	Inventory  bool `json:"inventory"`
+	Events     bool `json:"events"`
+	Snapshots  bool `json:"snapshots"`
+	Drift      bool `json:"drift"`
+	Policy     bool `json:"policy"`
+	Planner    bool `json:"planner"`
+	ImageIntel bool `json:"imageIntel"`
+
+	// The Docker mutations, off by default and each a separate capability.
+	//
+	// Acquisition downloads an approved, digest-pinned image and touches no
+	// container. Execution STOPS A RUNNING CONTAINER and replaces it. Rollback
+	// stops the replacement and starts the original.
+	Acquisition bool `json:"acquisition"`
+	Execution   bool `json:"execution"`
+	Rollback    bool `json:"rollback"`
+
+	// Automation changes containers with nobody watching. It holds no Docker
+	// capability of its own; it submits the same requests an operator would.
+	Automation bool `json:"automation"`
+
+	// Notifications is HarborMaster's second outbound egress.
+	Notifications bool `json:"notifications"`
+	// NotificationsAllowPrivate reports the one relaxation of the address
+	// guard. Surfaced because it is the setting an operator most needs to be
+	// reminded they turned on.
+	NotificationsAllowPrivate bool `json:"notificationsAllowPrivate"`
 }

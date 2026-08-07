@@ -96,9 +96,9 @@ func (s *RollbackService) execute(ctx context.Context, rollback domain.Rollback)
 		s.mu.Unlock()
 
 		// The OUTCOME reaches the security audit log from exactly one place.
-		// See ExecutionService.auditOutcome for why a deferred read-back beats
+		// See ExecutionService.reportOutcome for why a deferred read-back beats
 		// an audit call on each terminal path.
-		s.auditOutcome(ctx, rollback)
+		s.reportOutcome(ctx, rollback)
 	}()
 
 	// ---- claim -------------------------------------------------------------

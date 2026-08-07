@@ -353,17 +353,52 @@ anything specific to this feature.
 
 | Surface | Direction | Notes |
 | --- | --- | --- |
-| Registry manifest and tag-listing endpoints | **Outbound HTTPS** | Phase 6. Anonymous GETs only. **The first and only outbound egress in the product.** Destinations derive solely from image references the inventory holds |
+| Registry manifest and tag-listing endpoints | **Outbound HTTPS** | Phase 6. Anonymous GETs only. Destinations derive solely from image references the inventory holds. On by default |
+| Notification destinations | **Outbound HTTPS and SMTP** | Phase 12. Destinations an ADMINISTRATOR configured. Off by default |
 
-This is the boundary Phase 6 added, and it deserves stating plainly: HarborMaster
-now initiates connections to third parties it does not control, and parses their
-responses. The registry is treated as hostile input throughout — bounded before
-reading, decoded into a fixed shape, and never echoed into a log, an error, or a
-column.
+There are **two** outbound egresses, and the difference between them is the
+whole security story.
 
-Turning `IMAGE_INTEL_ENABLED` off removes this surface entirely: no outbound
-request is made at all, which is the configuration an air-gapped or
-egress-restricted deployment wants.
+**Image intelligence** derives its destination from an image reference the
+inventory already holds. No caller parameter becomes a network destination, and
+`POST /images/refresh` takes no target of any kind. The registry is treated as
+hostile input throughout — bounded before reading, decoded into a fixed shape,
+and never echoed into a log, an error, or a column.
+
+**Notifications** send to a URL a human typed, which is a strictly larger risk
+and is why the subsystem is off unless a deployment asks. Three controls carry
+it:
+
+1. **Authorization.** Creating or editing a destination needs
+   `notification:manage`, an administrator permission. An operator able to
+   create one could exfiltrate every container name and update event this host
+   produces to a server they control.
+2. **A two-stage address guard.** The URL is validated when it is stored —
+   HTTPS only, a hostname rather than an IP literal, no userinfo, bounded
+   length — and the RESOLVED ADDRESS is checked again at dial time through the
+   dialer's control hook. The second check is what makes DNS rebinding
+   ineffective, and it is the one that decides. Redirects are refused rather
+   than followed, no proxy is consulted, and the response body is bounded and
+   discarded. Non-public addresses are refused unless
+   `NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS` is set, and link-local,
+   multicast, CGNAT, benchmarking ranges, and `169.254.169.254` are refused
+   even then.
+3. **Nothing sensitive can be in the payload.** A notification's type has
+   nowhere to put an environment value, a registry credential, a session token,
+   or a raw Docker error. Every sentence is written in one file, and two
+   architecture tests hold that: one fails the build if any other file
+   constructs a notification, the other if that file interpolates a format verb
+   or an error's text.
+
+The destination credential — a webhook URL's path, an SMTP password — is a
+separate TYPE in a separate table, reachable through exactly one repository
+method and returned by no endpoint. An architecture test fails the build if the
+type appears anywhere it could travel outward.
+
+Turning `IMAGE_INTEL_ENABLED` and `NOTIFICATIONS_ENABLED` off removes both
+surfaces entirely: no outbound request is made at all, which is the
+configuration an air-gapped or egress-restricted deployment wants. Both are
+independent, and image intelligence is the one that is on by default.
 
 ### Not network-reachable
 

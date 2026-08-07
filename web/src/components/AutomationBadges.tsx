@@ -4,6 +4,7 @@ import type {
   AutomationRunState,
   AutomationVerdict,
   PauseReason,
+  SelfIdentity,
   UpdateStrategy,
 } from "../api/automationTypes";
 import {
@@ -176,6 +177,44 @@ export function AutomationWarningNotice({ enabled }: { enabled: boolean }) {
       The update engine is on. A policy in <strong>Automatic</strong> mode will
       stop and replace matching containers without asking, inside its
       maintenance window. Every other mode changes nothing.
+    </p>
+  );
+}
+
+/**
+ * Says which container HarborMaster will not update: its own.
+ *
+ * # Why this is on the page at all
+ *
+ * Because the alternative is a silent absence. An operator whose HarborMaster
+ * container is running an old image, and who never sees it in a plan or a
+ * decision, has no way to tell "HarborMaster refuses to update itself" from
+ * "HarborMaster has not noticed". One of those is a designed safety property
+ * and the other is a bug, and they look identical from an empty list.
+ *
+ * When HarborMaster is running OUTSIDE a container there is no identity, and
+ * this renders nothing — the exclusion excludes nothing, so there is nothing to
+ * explain.
+ */
+export function SelfUpdateNotice({ self }: { self?: SelfIdentity }) {
+  const name = self?.containerName ?? "";
+  const id = self?.containerId ?? "";
+  if (!self || (!name && !id)) return null;
+
+  const label = name !== "" ? name : `container ${id.slice(0, 12)}`;
+
+  return (
+    <p
+      role="status"
+      className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm text-content-muted"
+    >
+      <span className="font-medium text-content">
+        HarborMaster will not update itself.
+      </span>{" "}
+      This deployment is running as <code className="font-mono">{label}</code>,
+      which is excluded from every automatic update and refused by the
+      acquisition and recreation preflights. Update it from outside with{" "}
+      <code className="font-mono">docker compose pull &amp;&amp; docker compose up -d</code>.
     </p>
   );
 }

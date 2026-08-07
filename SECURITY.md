@@ -14,6 +14,13 @@ HarborMaster is pre-1.0. Only the latest release receives security fixes.
 | `main` (unreleased) | Yes, best effort |
 | Anything older | No |
 
+**HarborMaster is in beta.** The security properties below are tested and
+enforced, and the ones that matter most are enforced by architecture tests
+rather than by review. What beta means here is that the software has not yet
+been run by many people on many hosts — not that the guarantees are
+provisional. A report that contradicts one of them is a vulnerability report,
+and will be treated as one.
+
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security problem.**
@@ -145,6 +152,33 @@ These are the guarantees a report can meaningfully contradict:
     actor.
 12. **A forwarding header is never believed** unless a trusted-proxy range is
     configured and the peer is inside it.
+13. **HarborMaster cannot update itself, and no setting permits it.** The
+    refusal is enforced at four independent layers — the automation decision,
+    the approval path, the acquisition preflight, and the execution preflight.
+    `TestEverySelfUpdateRefusalSiteIsPresent` pins all four,
+    `TestTheSelfUpdateRefusalCannotBeConfiguredAway` fails the build on a
+    configuration flag that would disable one, and
+    `TestTheSelfIdentityIsWiredIntoEveryServiceThatRefuses` fails it if the
+    composition root stops supplying the identity those layers consult.
+14. **A notification cannot carry a secret.** There is nowhere in the type to
+    put an environment value, a registry credential, a session token, or a raw
+    Docker error. Every notification's wording lives in one file;
+    `TestEveryNotificationIsWrittenInOnePlace` fails the build if another file
+    composes one, and `TestNoNotificationCarriesAnErrorsText` fails it if that
+    file interpolates a format verb or an error's text.
+15. **A notification destination's credential never leaves the database.** A
+    webhook URL and an SMTP password live in a separate type in a separate
+    table, reachable through exactly one repository method and returned by no
+    endpoint. `TestACredentialIsOnlyEverConstructedOutsideTheTrustedPackages`
+    fails the build if the type appears anywhere it could travel outward, and
+    archiving a destination destroys its stored credential.
+16. **A notification destination cannot become an SSRF primitive.** The URL is
+    validated when stored — HTTPS only, a hostname rather than an IP literal,
+    no userinfo — and the RESOLVED ADDRESS is re-checked at dial time, which is
+    what defeats DNS rebinding. Redirects are refused, no proxy is consulted,
+    the response body is bounded and discarded, and link-local, multicast,
+    CGNAT, benchmarking ranges, and `169.254.169.254` are refused whatever the
+    private-destination setting says.
 
 ## Hardening checklist for operators
 

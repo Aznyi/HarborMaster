@@ -35,6 +35,7 @@ export type Permission =
   | "execution:read"
   | "rollback:read"
   | "automation:read"
+  | "notification:read"
   | "inventory:refresh"
   | "snapshot:create"
   | "drift:annotate"
@@ -52,6 +53,7 @@ export type Permission =
   | "automation:approve"
   | "automation:pause"
   | "automation:manage"
+  | "notification:manage"
   | "policy:manage"
   | "user:manage"
   | "audit:read";

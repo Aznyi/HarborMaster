@@ -318,7 +318,7 @@ func (s *RollbackService) runRetention(ctx context.Context) {
 
 // ------------------------------------------------------- audit attribution --
 
-// auditOutcome records what a finished rollback did to the host.
+// reportOutcome records what a finished rollback did to the host.
 //
 // The same design as the recreation's, and for the same reason: the rollback
 // record is an operational history an operator reads to understand one
@@ -328,8 +328,11 @@ func (s *RollbackService) runRetention(ctx context.Context) {
 // It reads the final state BACK from the store rather than trusting the caller
 // to report what it did, is written on a detached bounded context so it lands
 // even when the parent is cancelled, and can never fail the rollback.
-func (s *RollbackService) auditOutcome(ctx context.Context, requested domain.Rollback) {
-	if s.audit == nil {
+func (s *RollbackService) reportOutcome(ctx context.Context, requested domain.Rollback) {
+	// Both consumers or neither: the read-back is the expensive part, and a
+	// deployment with an audit recorder and no notifier -- or the reverse -- is
+	// perfectly normal.
+	if s.audit == nil && s.notifier == nil {
 		return
 	}
 
@@ -362,6 +365,17 @@ func (s *RollbackService) auditOutcome(ctx context.Context, requested domain.Rol
 	s.audit.RecordAction(writeCtx, requesterActor(final.RequestedBy),
 		action, outcome, domain.AuditTargetRollback,
 		final.RollbackID, final.ContainerName, rollbackOutcomeReason(final))
+
+	// The notification leaves from the same read-back. A failed rollback is the
+	// one event in HarborMaster that always needs a person, and it is raised at
+	// critical whatever an operator's severity threshold says about the rest.
+	switch final.State {
+	case domain.RollbackSucceeded:
+		NotifyRollbackSucceeded(s.notifier, final.ContainerName, final.RollbackID)
+	case domain.RollbackFailed:
+		NotifyRollbackFailed(s.notifier, final.ContainerName, final.RollbackID,
+			rollbackOutcomeReason(final))
+	}
 }
 
 // rollbackOutcomeReason renders the conclusion in HarborMaster's own words.

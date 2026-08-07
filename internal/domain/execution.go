@@ -432,6 +432,16 @@ type ExecutionRefusal string
 const (
 	ExecutionRefusalNone ExecutionRefusal = ""
 
+	// ExecutionRefusalSelfUpdate means the acquisition names HarborMaster's own
+	// container.
+	//
+	// The one refusal in this list that no configuration can relax. Stopping
+	// the container the process is running in ends the process between the stop
+	// and the checkpoint: nothing verifies the replacement, nothing records
+	// what happened, and no rollback is possible because the thing that would
+	// perform it is gone.
+	ExecutionRefusalSelfUpdate ExecutionRefusal = "selfUpdate"
+
 	// ExecutionRefusalDisabled means container recreation is switched off.
 	ExecutionRefusalDisabled ExecutionRefusal = "disabled"
 
@@ -534,7 +544,7 @@ var ExecutionRefusals = []ExecutionRefusal{
 	ExecutionRefusalDigestMismatch, ExecutionRefusalPlatformMismatch,
 	ExecutionRefusalConflict, ExecutionRefusalLimit,
 	ExecutionRefusalDockerUnavailable, ExecutionRefusalSecretUnavailable,
-	ExecutionRefusalNameUnavailable,
+	ExecutionRefusalNameUnavailable, ExecutionRefusalSelfUpdate,
 }
 
 // ValidExecutionRefusal reports whether name is a known refusal.
@@ -556,6 +566,8 @@ func ValidExecutionRefusal(name string) bool {
 // response, or caller input.
 func (r ExecutionRefusal) Explain() string {
 	switch r {
+	case ExecutionRefusalSelfUpdate:
+		return "this names the container HarborMaster is running in; stopping it would kill the process partway through, with no checkpoint and no rollback"
 	case ExecutionRefusalDisabled:
 		return "container recreation is switched off in this deployment"
 	case ExecutionRefusalAcquisitionMissing:

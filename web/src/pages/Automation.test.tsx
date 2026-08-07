@@ -528,3 +528,51 @@ it("renders a policy name as text rather than markup", async () => {
   await screen.findByText("<img src=x onerror=alert(1)>");
   expect(container.querySelector("img")).toBeNull();
 });
+
+// HarborMaster refuses to update itself, and the page says so.
+//
+// The alternative is a silent absence: an operator whose HarborMaster container
+// never appears in a plan cannot tell "refused on purpose" from "not noticed".
+it("says which container HarborMaster will not update", async () => {
+  stub({
+    status: sampleStatus({
+      self: {
+        containerId: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        containerName: "harbormaster",
+        source: "runtime",
+      },
+    }),
+  });
+
+  render(
+    <TestSessionProvider session={testSession({ user: testUser("administrator") })}>
+      <MemoryRouter initialEntries={["/automation"]}>
+        <Automation />
+      </MemoryRouter>
+    </TestSessionProvider>,
+  );
+
+  expect(
+    await screen.findByText(/HarborMaster will not update itself/i),
+  ).toBeInTheDocument();
+  expect(screen.getByText("harbormaster")).toBeInTheDocument();
+  expect(
+    screen.getByText(/docker compose pull && docker compose up -d/),
+  ).toBeInTheDocument();
+});
+
+// Running outside a container excludes nothing, so there is nothing to explain.
+it("says nothing about self-update when there is no identity", async () => {
+  stub({ status: sampleStatus() });
+
+  render(
+    <TestSessionProvider session={testSession({ user: testUser("administrator") })}>
+      <MemoryRouter initialEntries={["/automation"]}>
+        <Automation />
+      </MemoryRouter>
+    </TestSessionProvider>,
+  );
+
+  await screen.findAllByText(/update engine/i);
+  expect(screen.queryByText(/will not update itself/i)).toBeNull();
+});

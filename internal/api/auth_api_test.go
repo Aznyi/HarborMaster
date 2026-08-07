@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -610,6 +611,101 @@ func TestLogoutClearsTheCookie(t *testing.T) {
 	}
 	if !strings.Contains(cookie, "Max-Age=0") && !strings.Contains(cookie, "Expires=") {
 		t.Errorf("logout did not expire the cookie: %q", cookie)
+	}
+}
+
+// Signing out over HTTPS deletes the plain-name cookie with Secure set.
+//
+// # Why the deletion's Secure attribute matters at all
+//
+// A cookie's identity is its name, domain, and path; the Secure attribute is a
+// property of the cookie being WRITTEN, not part of what it matches. So a
+// Secure deletion still removes a non-Secure cookie of the same name — which
+// means there is no reason to send the deletion insecurely when the connection
+// is secure, and one reason not to.
+//
+// This is also what removes the last constant-false Secure attribute in the
+// codebase. `go/cookie-secure-not-set` reported the old hardcoded one.
+func TestSigningOutOverTLSDeletesThePlainCookieSecurely(t *testing.T) {
+	srv, _, _ := authServer(domain.RoleAdministrator)
+
+	req := authed(request(http.MethodPost, APIPrefix+"/auth/logout", "{}"))
+	// What a TLS-terminating server sets, and what makes requestIsSecure true.
+	req.TLS = &tls.ConnectionState{}
+
+	rec := send(srv, req)
+	if rec.Code != http.StatusNoContent && rec.Code != http.StatusOK {
+		t.Fatalf("logout = %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name != SessionCookieName && cookie.Name != SecureSessionCookieName {
+			continue
+		}
+		if !cookie.Secure {
+			t.Errorf("signing out over TLS wrote %s without Secure; the deletion "+
+				"can then be replayed over a downgraded request, and nothing is "+
+				"gained by omitting it", cookie.Name)
+		}
+		if cookie.Value != "" {
+			t.Errorf("the deletion for %s carries a value: %q", cookie.Name, cookie.Value)
+		}
+		if cookie.MaxAge >= 0 {
+			t.Errorf("the deletion for %s does not expire: MaxAge=%d",
+				cookie.Name, cookie.MaxAge)
+		}
+	}
+}
+
+// Signing out over PLAIN HTTP still deletes the plain-name cookie.
+//
+// The one case that writes a cookie without Secure, and the reason the
+// attribute cannot simply be hardcoded true: a browser rejects a Secure cookie
+// set from an insecure origin, so the deletion would be silently dropped and
+// the dead token would stay in the browser.
+func TestSigningOutOverPlainHTTPStillDeletesThePlainCookie(t *testing.T) {
+	srv, _, _ := authServer(domain.RoleAdministrator)
+
+	req := authed(request(http.MethodPost, APIPrefix+"/auth/logout", "{}"))
+	// httptest.NewRequest's default peer is 192.0.2.1, which is NOT loopback --
+	// and `requestIsSecure` treats any non-loopback peer as secure, because a
+	// peer that is not on this machine is one whose traffic left it. Set the
+	// peer that the plain-HTTP deployment actually has.
+	req.RemoteAddr = "127.0.0.1:54321"
+
+	rec := send(srv, req)
+	if rec.Code != http.StatusNoContent && rec.Code != http.StatusOK {
+		t.Fatalf("logout = %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var deleted bool
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name != SessionCookieName {
+			continue
+		}
+		deleted = true
+		if cookie.Secure {
+			t.Error("signing out over plain HTTP wrote the plain cookie with " +
+				"Secure; a browser rejects that from an insecure origin, so the " +
+				"session token would stay in the browser")
+		}
+		if cookie.Value != "" || cookie.MaxAge >= 0 {
+			t.Errorf("the plain cookie was not deleted: value=%q maxAge=%d",
+				cookie.Value, cookie.MaxAge)
+		}
+	}
+	if !deleted {
+		t.Fatal("signing out over plain HTTP did not delete the plain cookie at all")
+	}
+
+	// And the __Host- name is still cleared, with Secure, because it can only
+	// ever be replaced by a Secure cookie. The browser rejects it here, which
+	// costs nothing: a __Host- cookie could never have been set on this origin.
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == SecureSessionCookieName && !cookie.Secure {
+			t.Error("the __Host- deletion was written without Secure, which no " +
+				"browser will accept for that prefix")
+		}
 	}
 }
 

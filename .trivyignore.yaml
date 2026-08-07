@@ -1,0 +1,50 @@
+# Trivy findings that were assessed and not remediated, and why.
+#
+# ---------------------------------------------------------------------------
+# The rules for this file
+# ---------------------------------------------------------------------------
+# An entry here tells a scanner to stop asking about something. That is a
+# dangerous thing to write down, so three rules apply to every one:
+#
+#   1. A `statement` that says why, in enough detail that the next person does
+#      not have to redo the analysis. "False positive" is not a statement.
+#   2. An `expired_at`. An ignore with no expiry outlives the argument for it.
+#      When it lapses the finding comes back, which is the point.
+#   3. A TEST that enforces whatever the statement claims. An ignore justified
+#      by "we do not use that package" is worth exactly as much as the check
+#      that we still do not.
+#
+# The long-form analysis lives in docs/security-triage.md. This file is the
+# machine-readable half of the same decision.
+
+vulnerabilities:
+  - id: GO-2026-5932
+    # golang.org/x/crypto/openpgp is unmaintained, unsafe by design, and has
+    # known security issues.
+    #
+    # There is no fixed version and there will not be one: the advisory is
+    # that the package exists, not that a release broke it. Upgrading cannot
+    # clear this, and v0.54.0 is already the latest release of the module.
+    #
+    # HarborMaster does not use the package. `go list -deps ./...` resolves
+    # exactly two packages from this module -- golang.org/x/crypto/argon2 for
+    # password verifiers and golang.org/x/crypto/blake2b -- and zero under
+    # openpgp. govulncheck, which resolves symbols rather than modules, agrees:
+    # no called vulnerability.
+    #
+    # Trivy reports it anyway because a go.mod scan and a Go binary scan both
+    # work at MODULE granularity: the module is required, so the advisory
+    # applies, and no manifest can say which packages a build linked.
+    #
+    # ENFORCED BY:
+    #   internal/arch.TestNothingBannedIsAnywhereInTheBuild
+    #     fails the build if golang.org/x/crypto/openpgp enters the package set.
+    #   internal/arch.TestTheCryptoModuleIsUsedOnlyForWhatTheTriageSays
+    #     fails the build if a third package from this module is used, so the
+    #     reasoning above cannot go stale without somebody noticing.
+    statement: >-
+      golang.org/x/crypto/openpgp is not in the build. This module is required
+      only for argon2 and blake2b; the advisory has no fixed version because
+      the package is deprecated rather than broken. Two architecture tests fail
+      the build if either fact stops being true. See docs/security-triage.md.
+    expired_at: 2027-02-01

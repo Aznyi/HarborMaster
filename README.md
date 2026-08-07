@@ -48,6 +48,7 @@ by the time HarborMaster can change a container it can already undo it.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Supported environments](#supported-environments)
 - [Deploying on Linux](#deploying-on-linux)
 - [Accounts and access](#accounts-and-access)
 - [Container image](#container-image)
@@ -61,6 +62,8 @@ by the time HarborMaster can change a container it can already undo it.
 - [Manual container recreation](#manual-container-recreation)
 - [Manual rollback](#manual-rollback)
 - [Automatic updates](#automatic-updates)
+- [Notifications](#notifications)
+- [Updating HarborMaster](#updating-harbormaster)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -115,6 +118,56 @@ production.
 make run      # terminal 1: backend on 127.0.0.1:8080
 make web-dev  # terminal 2: Vite on 127.0.0.1:5173
 ```
+
+## Supported environments
+
+### Docker
+
+| Environment | Support | Notes |
+| --- | --- | --- |
+| Docker Engine 25.x – 29.x, native Linux | **Supported** | The primary target. |
+| Docker Desktop, current stable (macOS, Windows/WSL2) | **Supported** | The socket group differs; see [Deploying on Linux](#deploying-on-linux). |
+| Rootless Docker | **Supported** | Use `id -g` for the socket group. |
+| Docker Engine below 25 | Not supported | Untested. The API version HarborMaster negotiates may not exist. |
+| Podman, containerd, CRI-O | Not supported | No compatibility work has been done. Podman's Docker-compatible socket may work; nothing verifies it. |
+| Kubernetes | **Not supported, and not planned** | HarborMaster manages containers on one host through one socket. It has no concept of a scheduler that would undo everything it did. |
+| Docker Swarm | Not supported | A service's containers are managed by the swarm; recreating one out from under it is a fight HarborMaster would lose. |
+| Remote or TCP Docker sockets | Not supported for beta | `HARBORMASTER_DOCKER_HOST` accepts one, but nothing tests TLS client authentication against a remote daemon. |
+
+HarborMaster negotiates the API version with the daemon at startup and logs what
+it settled on. It uses a small, long-stable subset of the API: list and inspect
+containers, images, networks and volumes; the event stream; image pull; and
+container create, start, stop, rename, and remove.
+
+### Host architecture
+
+| Platform | Support |
+| --- | --- |
+| `linux/amd64` | **Supported**, and published |
+| `linux/arm64` | **Supported**, and published |
+| `linux/arm/v7` | Not published. It builds; nothing tests it. |
+| macOS and Windows hosts | Supported **through Docker Desktop**, which runs the container on Linux |
+
+The published image is a multi-architecture manifest, so `docker pull` selects
+the right one.
+
+### What is not supported, and will not be for this beta
+
+The scope exists so the guarantees mean something.
+
+- **Multiple hosts.** One HarborMaster, one Docker socket. There is no
+  concept of a fleet, and no code that could address a second daemon.
+- **Restore.** HarborMaster records a container's configuration and can tell
+  you whether it *could* be restored. It does not restore one. Rollback is a
+  different thing: it returns to a container HarborMaster itself created
+  moments earlier and preserved.
+- **Orchestration.** No scheduling, no placement, no scaling, no dependency
+  ordering across containers.
+- **Self-update.** See [Updating HarborMaster](#updating-harbormaster).
+- **Editing container configuration.** HarborMaster recreates a container from
+  *its own recorded configuration* onto a new image. There is no endpoint that
+  changes a port, a mount, an environment variable, or a command, and no field
+  in any request type that could carry one.
 
 ## Deploying on Linux
 
@@ -1775,6 +1828,208 @@ recorded as `interrupted`: it submits work to services that checkpoint their
 own, so an interrupted pass is a bookkeeping gap and never a host in an unknown
 state.
 
+## Notifications
+
+Telling somebody that something happened: a container was updated, a rollback
+failed, automation paused, a registry cannot be reached.
+
+**Off by default.** This is HarborMaster's second outbound egress, and unlike
+image intelligence it goes somewhere an administrator typed rather than
+somewhere derived from an image you already run.
+
+```sh
+HARBORMASTER_NOTIFICATIONS_ENABLED=true
+```
+
+Destinations and rules are database rows, managed from the Notifications page
+or the API. They are not environment variables on purpose: **a webhook URL is a
+credential**, and a credential in an environment variable is a credential in
+every `docker inspect` and every process listing on the host.
+
+### A notification never delays the thing it is about
+
+A rollback whose duration depended on somebody else's webhook server would be a
+worse rollback. So delivery is asynchronous end to end:
+
+- Raising one puts it on a bounded queue and returns. It cannot block, cannot
+  fail, and returns no error — there is deliberately nothing for a caller in
+  the middle of a container recreation to ignore.
+- A **full queue drops** and records the drop as `dropped` in the history. That
+  is the honest failure mode: blocking would stall the pipeline, and an
+  unbounded queue would turn a destination outage into unbounded memory growth.
+- A failed delivery retries on an exponential schedule to a 30-minute cap, then
+  becomes a **dead letter** that stays in the history. A failure that is not
+  retryable — a revoked webhook URL, a 404 — reaches the dead letter on the
+  first attempt, because repeating a 403 forever helps nobody.
+
+### What can be in a notification
+
+HarborMaster's own sentences about its own events. Container names, image
+references, identifiers it generated, counts, and phrases from a closed
+vocabulary.
+
+**There is nowhere in the type to put anything else.** No environment value, no
+registry credential, no session data, no raw Docker error — a Docker error
+carries paths and mounts, and a registry error carries the URL, which for a
+private registry carries the host and sometimes the credential that failed.
+
+Every notification's wording lives in one file, and two architecture tests hold
+that: one fails the build if any other file constructs a notification, and one
+fails it if that file interpolates a format verb or an error's text.
+
+### Channels
+
+| Channel | What you supply |
+| --- | --- |
+| Slack | An incoming webhook URL from a Slack app |
+| Discord | A channel webhook URL from Discord's channel settings |
+| Microsoft Teams | An incoming webhook URL from a connector |
+| Generic webhook | Any HTTPS URL; the body is HarborMaster's own JSON event shape |
+| Email | Recipients, plus an SMTP relay configured in the environment |
+
+### The address guard
+
+A destination URL is checked twice, and the second check is the one that
+matters.
+
+1. **When it is stored**: HTTPS only, a hostname rather than an IP literal, no
+   userinfo, bounded length.
+2. **At dial time**, on the RESOLVED ADDRESS, through the dialer's control
+   hook. This is what makes DNS rebinding ineffective: a name that resolved to
+   a public address when it was saved and to `127.0.0.1` when it is used is
+   refused at the moment of connection.
+
+Redirects are refused rather than followed, no proxy is consulted, TLS 1.2 is
+the floor with certificates verified, and the response body is bounded and
+discarded.
+
+By default a destination that resolves to a loopback, private, or unique-local
+address is refused. A great many self-hosted deployments notify a Gotify, an
+ntfy, or a Home Assistant on their own LAN, so there is one relaxation:
+
+```sh
+HARBORMASTER_NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS=true
+```
+
+With it on, an administrator who can create a destination can make HarborMaster
+issue an HTTPS POST to anything the container can route to. Link-local,
+multicast, CGNAT, benchmarking ranges, and the cloud metadata endpoint
+(`169.254.169.254`) stay refused whatever it says.
+
+### Email
+
+The relay comes from the environment, so a mail password never reaches
+HarborMaster's database:
+
+```sh
+HARBORMASTER_SMTP_HOST=smtp.example.com
+HARBORMASTER_SMTP_PORT=587
+HARBORMASTER_SMTP_USERNAME=harbormaster@example.com
+HARBORMASTER_SMTP_PASSWORD_FILE=/run/secrets/smtp_password
+```
+
+**Prefer the file.** A Docker secret is a file; a password in an environment
+variable is readable by anything that can run `docker inspect`. Setting both
+the file and the value is refused at startup.
+
+There is no unencrypted path: port 465 uses implicit TLS, every other port uses
+STARTTLS, and a relay that does not offer it is refused. Addresses are validated
+when the destination is created and subjects are RFC 2047 encoded, so header
+injection is not representable rather than filtered.
+
+### Rules
+
+A rule selects events, sets a minimum severity, names destinations, and
+optionally suppresses repeats.
+
+- **An empty event list means EVERY event** — the opposite of an update
+  policy's selector, where empty means nothing. The cost of being wrong here is
+  an extra message rather than an unintended container change.
+- The severity threshold is what decides whether the channel stays useful.
+  "Warnings and worse" is the default; "Everything" includes a message for
+  every routine pull, which is how a channel gets muted in a week.
+- A **cooldown** suppresses a repeat of the same underlying thing inside a
+  window, and records that it did. Zero sends every occurrence, which for a
+  container failing every fifteen minutes is ninety-six messages a day about
+  one problem.
+
+A notification that matches two rules routing to the same destination is
+delivered **once**.
+
+### Permissions
+
+| Action | Permission | Held by |
+| --- | --- | --- |
+| Read destinations, rules, and history | `notification:read` | Every role |
+| Create, edit, withdraw, test | `notification:manage` | Administrator |
+
+Reading is a viewer permission because "was anybody told about this" is a
+question an operator needs to answer, and a delivery record carries no
+credential by construction. Writing is an administrator permission because a
+destination carries a credential AND points this host's outbound egress
+somewhere new.
+
+The **test send is audited like a mutation**, because that is what it is: the
+one action here that produces outbound network traffic, and "who made this host
+talk to that server" is exactly what an audit log is for.
+
+### What is never shown
+
+The webhook URL and the SMTP password. A destination's public record carries
+`endpoint` — a scheme and a host, `https://hooks.slack.com` — which identifies
+the destination without telling a shoulder-surfer how to post to it. The
+credential is a separate type in a separate table reachable through exactly one
+repository method, and an architecture test fails the build if it appears
+anywhere it could travel outward.
+
+Archiving a destination **destroys** its stored credential. Re-entering it later
+is the correct amount of friction.
+
+## Updating HarborMaster
+
+**HarborMaster refuses to update the container it is running in, and that is
+not configurable.**
+
+Not because the result would be wrong, but because the operation cannot
+complete. The process performing the recreation is inside the container being
+recreated: it is killed between stopping the old container and verifying the
+new one, so nothing checks the replacement, nothing records what happened, and
+no rollback is possible because the thing that would perform it is gone.
+
+Update it from outside:
+
+```sh
+docker compose -f deployments/compose.yaml pull
+docker compose -f deployments/compose.yaml up -d
+```
+
+The database is a named volume, so history, accounts, policies, and audit
+records survive. Migrations run at startup and are checksum-validated.
+
+### How HarborMaster knows which container is itself
+
+Four independent signals, any one of which suffices and none of which is
+required:
+
+1. `HARBORMASTER_SELF_CONTAINER_ID`, when an operator set it.
+2. `/proc/self/cgroup` or `/proc/self/mountinfo`.
+3. The hostname, which Docker sets to the container id prefix by default.
+4. The `io.harbormaster.self` label, which `deployments/compose.yaml` sets.
+
+An **empty field matches nothing**, so a partial identification never excludes
+the wrong container, and a wholly empty identity — HarborMaster running outside
+a container — excludes nothing at all.
+
+Which is why the refusal does not rest on detection. It is enforced at four
+independent layers: the automation decision, the approval path, the acquisition
+preflight, and the execution preflight. Two architecture tests pin those sites
+and fail the build on a configuration flag that would turn any of them off.
+
+Manual PLANNING of the HarborMaster container stays visible — you should be able
+to see that a newer image exists — and the Automation page states which
+container is excluded, so an operator can tell "refused on purpose" from "not
+noticed".
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -2462,7 +2717,8 @@ than a public issue.
   Reporting only; nothing is enforced or remediated.
 - **Image intelligence**: anonymous HTTPS lookups against registry manifest and
   tag-listing endpoints to discover whether a newer image is published.
-  HarborMaster's only outbound egress, behind layered SSRF defences.
+  One of HarborMaster's two outbound egresses, and the only one on by default,
+  behind layered SSRF defences.
 - **Change planning**: deterministic risk assessment of each proposed image
   change, combining every source above. Analysis only; nothing executes a plan.
 - **Safe image acquisition**: downloading an approved, digest-pinned image into
@@ -2487,10 +2743,18 @@ than a public issue.
   to the same three services, each of which re-runs its full preflight. A failed
   update is rolled back and the container is paused until somebody looks. Every
   pass records why each container was, or was not, updated.
+- **Operator notifications**: five channels (Slack, Discord, Microsoft Teams, a
+  generic JSON webhook, and email), seventeen events, severity thresholds,
+  per-rule cooldowns, bounded retries with a dead letter, and a delivery
+  history. HarborMaster's second outbound egress, off by default, behind the
+  same layered SSRF defences as the first. A notification never delays the
+  thing it is about, and cannot carry a secret.
+- **Self-update protection**: HarborMaster refuses to update the container it
+  is running in, at four independent layers, and no setting turns it off.
 - **Web interface**: Dashboard, Containers with detail, Images, Updates,
   Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions,
-  Recreations, Rollbacks, Automation, Update policies, Paused containers, and a
-  live Events page
+  Recreations, Rollbacks, Automation, Update policies, Paused containers,
+  Notifications, and a live Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -2522,7 +2786,6 @@ than a public issue.
 - Image deletion and pruning. Acquisition adds to the local store, recreation
   removes only the container it replaced, rollback removes nothing at all, and
   none of them can remove an image or a volume.
-- Notifications
 - A second authentication factor, single sign-on, LDAP, OIDC, public
   registration, and password reset by email. Accounts are local, and recovery is
   another administrator or the console.
@@ -2530,6 +2793,11 @@ than a public issue.
   recorded; who looked at what is not.
 - Multi-host management — the schema is keyed by host, but exactly one host row
   exists
+- **Self-update.** Enforced rather than pending: see
+  [Updating HarborMaster](#updating-harbormaster).
+- **Scheduled backups.** `harbormaster backup` is a command, run when you run
+  it. Nothing takes one on a timer, which is why `backup.failed` is a
+  notification event that nothing currently raises.
 - Distributed event processing. Everything is in-process bounded queues and
   SQLite; there is no message broker, and no WebSocket endpoint.
 

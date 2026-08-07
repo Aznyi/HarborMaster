@@ -82,9 +82,10 @@ func acquisitionClient(t *testing.T) *docker.Client {
 	requireDocker(t)
 
 	client, err := docker.New(docker.Options{
-		Host:    defaultDockerHost(),
-		Timeout: 30 * time.Second,
-		Masker:  domain.NewDefaultMasker(),
+		Host:       defaultDockerHost(),
+		APIVersion: pinnedAPIVersion(),
+		Timeout:    30 * time.Second,
+		Masker:     domain.NewDefaultMasker(),
 	})
 	if err != nil {
 		t.Fatalf("docker client: %v", err)

@@ -698,28 +698,101 @@ var egressPackages = []string{"net/http", "crypto/tls"}
 
 // egressAllowed are the directories permitted to import them.
 //
-// internal/registry is the guarded client. internal/api and internal/healthcheck
-// serve and probe HTTP respectively -- both INBOUND or loopback, neither a path
-// to an arbitrary destination. cmd/harbormaster wires the server together.
+// TWO of these are outbound egress, and the second was added deliberately in
+// Phase 12:
+//
+//   - internal/registry reads registry metadata. Its destinations come from
+//     image references HarborMaster computed; no caller supplies a host.
+//   - internal/notify delivers notifications. Its destinations are URLs an
+//     ADMINISTRATOR TYPED, which is a strictly larger risk, and its transport
+//     carries the same defences plus a refusal of the cloud metadata endpoint
+//     that holds even under the private-address opt-in.
+//
+// internal/api and internal/healthcheck serve and probe HTTP respectively --
+// both INBOUND or loopback, neither a path to an arbitrary destination.
+// cmd/harbormaster wires the server together.
+//
+// A third entry here is a third place that can reach the internet. Adding one
+// means editing this list, which is the point.
 var egressAllowed = map[string]bool{
 	"internal/registry":    true,
+	"internal/notify":      true,
 	"internal/api":         true,
 	"internal/healthcheck": true,
 	"cmd/harbormaster":     true,
 }
 
-// TestOutboundNetworkAccessIsConfinedToTheRegistryClient fails if a package
+// egressGuarded are the two packages that actually dial arbitrary hosts, and
+// the defences each must carry.
+//
+// Checked by source rather than by behaviour, because the failure this guards
+// is a refactor that quietly drops one: a transport with no Control function
+// still compiles, still works against a public host, and is no longer a
+// defence.
+var egressGuarded = map[string][]string{
+	"internal/registry/transport.go": {
+		"Control:",       // the dial-time address guard
+		"Proxy:",         // explicitly nil
+		"CheckRedirect:", // redirects refused
+		"MinVersion",     // a TLS floor
+	},
+	"internal/notify/transport.go": {
+		"Control:",
+		"Proxy:",
+		"CheckRedirect:",
+	},
+}
+
+// TestEveryEgressTransportKeepsItsGuards fails if one of the two outbound
+// transports loses a defence.
+func TestEveryEgressTransportKeepsItsGuards(t *testing.T) {
+	root := moduleRoot(t)
+
+	for rel, required := range egressGuarded {
+		source, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Errorf("read %s: %v\n\tthis file builds one of HarborMaster's two "+
+				"outbound transports; if it moved, move this test with it", rel, err)
+			continue
+		}
+		text := string(source)
+		for _, marker := range required {
+			if !strings.Contains(text, marker) {
+				t.Errorf("%s no longer sets %s\n"+
+					"\tthis transport reaches arbitrary hosts; without every guard it is "+
+					"a server-side request forgery primitive", rel, marker)
+			}
+		}
+		// InsecureSkipVerify is never acceptable in either.
+		//
+		// Matched as an ASSIGNMENT rather than as a word. Both files mention it
+		// in a comment saying it is deliberately absent, and a check that
+		// flagged those would be a check somebody deletes.
+		for _, assignment := range []string{
+			"InsecureSkipVerify:",
+			"InsecureSkipVerify =",
+		} {
+			if strings.Contains(text, assignment) {
+				t.Errorf("%s sets InsecureSkipVerify\n"+
+					"\tboth outbound transports verify certificates, and there is no "+
+					"configuration that relaxes it", rel)
+			}
+		}
+	}
+}
+
+// TestOutboundNetworkAccessIsConfinedToTheGuardedClients fails if a package
 // outside the allowed set gains the ability to open a connection.
 //
-// Phase 6 gave HarborMaster its first outbound egress, and the entire SSRF
-// defence rests on that egress going through one guarded transport: a dialler
-// that refuses non-public addresses, a redirect policy that refuses everything,
-// no proxy, and HTTPS only.
+// Phase 6 gave HarborMaster its first outbound egress and Phase 12 its second,
+// and the entire SSRF defence rests on both going through a guarded transport:
+// a dialler that refuses non-public addresses, a redirect policy that refuses
+// everything, no proxy, and HTTPS only.
 //
-// A second HTTP client built somewhere else would have none of that, and would
+// A third HTTP client built somewhere else would have none of that, and would
 // be an easy thing to add without noticing what it bypassed. This test is what
 // makes that visible in review.
-func TestOutboundNetworkAccessIsConfinedToTheRegistryClient(t *testing.T) {
+func TestOutboundNetworkAccessIsConfinedToTheGuardedClients(t *testing.T) {
 	for _, imp := range allImports(t) {
 		dir := filepath.ToSlash(filepath.Dir(imp.rel))
 		if egressAllowed[dir] {

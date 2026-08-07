@@ -15,6 +15,7 @@ import {
   AutomationRunStateBadge,
   AutomationVerdictBadge,
   AutomationWarningNotice,
+  SelfUpdateNotice,
 } from "../components/AutomationBadges";
 import { PageIntro } from "../components/PageIntro";
 import {
@@ -72,6 +73,8 @@ export function Automation() {
       />
 
       <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />
+
+      <SelfUpdateNotice self={engine?.self} />
 
       <StatusPanel state={status} />
 

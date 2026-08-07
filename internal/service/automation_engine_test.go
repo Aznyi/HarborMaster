@@ -615,11 +615,20 @@ func newAutomationHarness(t *testing.T, policies ...domain.UpdatePolicy) *automa
 		now:      decideAt,
 	}
 
-	harness.engine = service.NewAutomationService(service.AutomationOptions{
-		Store:    harness.store,
-		Policies: harness.policies,
-		Evidence: harness.evidence,
-		Pipeline: harness.pipeline,
+	harness.engine = service.NewAutomationService(harness.options())
+	return harness
+}
+
+// options builds the engine's wiring for this harness.
+//
+// Factored out so a test can rebuild the engine with one thing changed --
+// notably the self identity -- without restating everything else.
+func (h *automationHarness) options() service.AutomationOptions {
+	return service.AutomationOptions{
+		Store:    h.store,
+		Policies: h.policies,
+		Evidence: h.evidence,
+		Pipeline: h.pipeline,
 		Config: config.Automation{
 			Enabled:       true,
 			Interval:      15 * time.Minute,
@@ -627,9 +636,16 @@ func newAutomationHarness(t *testing.T, policies ...domain.UpdatePolicy) *automa
 			MaxConcurrent: 4,
 			MaxPerRun:     10,
 		},
-		Now: func() time.Time { return harness.now },
-	})
-	return harness
+		Now: func() time.Time { return h.now },
+	}
+}
+
+// optionsWithSelf is options plus a fixed idea of which container is
+// HarborMaster.
+func (h *automationHarness) optionsWithSelf(identity domain.SelfIdentity) service.AutomationOptions {
+	opts := h.options()
+	opts.Self = selfReporter{identity: identity}
+	return opts
 }
 
 // ------------------------------------------------------------- the pass --
@@ -963,6 +979,40 @@ func TestAFinishedUpdateStopsBeingFollowed(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("a finished update must leave the outstanding set, got %+v", pending)
+	}
+}
+
+func TestADecisionThatAlreadyReachedARollbackIsSettled(t *testing.T) {
+	// The defect this pins, found in Phase 12 and dating from Phase 11: the
+	// follower treated "has a rollback id" as terminal and returned without
+	// SETTLING the row, while the store's outstanding query asked about the
+	// settled marker. The two definitions of "finished" disagreed, so such a
+	// decision was re-read on every tick forever.
+	//
+	// It reaches this state for rows written before the marker existed, and for
+	// any caller that attaches a rollback outside the failure handler.
+	harness := newAutomationHarness(t)
+
+	if _, _, err := harness.engine.RunNow(context.Background(), false, domain.Requester{}); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	// Attach a rollback directly, as a pre-marker row would carry.
+	harness.store.mu.Lock()
+	for i := range harness.store.decisions {
+		harness.store.decisions[i].ExecutionID = "exec_" + padAutoID(1)
+		harness.store.decisions[i].RollbackID = "rbk_" + padAutoID(1)
+	}
+	harness.store.mu.Unlock()
+
+	service.FollowForTest(harness.engine, context.Background())
+
+	pending, err := harness.store.PendingDecisions(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("PendingDecisions: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("a decision that already reached a rollback must leave the "+
+			"outstanding set, got %d", len(pending))
 	}
 }
 

@@ -496,6 +496,13 @@ func TestPendingDecisionsIsTheFollowersWholeQuestion(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordDecisions: %v", err)
 	}
+	// "Finished" means SETTLED, not "has a rollback id". The two came apart in
+	// Phase 11: a successful update never gets a rollback id at all, so the
+	// terminal marker had to be its own fact -- and a decision that reached a
+	// rollback is settled by the follower alongside it.
+	if err := db.Automation.SettleDecision(ctx, run.RunID, "api", time.Now().UTC()); err != nil {
+		t.Fatalf("SettleDecision: %v", err)
+	}
 
 	pending, err := db.Automation.PendingDecisions(ctx, 100)
 	if err != nil {

@@ -82,6 +82,29 @@ func (s *ExecutionService) preflight(
 	}
 	decision.Acquisition = acquisition
 
+	// HARBORMASTER ITSELF.
+	//
+	// The last of three independent refusals, and the one that matters most:
+	// this is the layer that actually stops a container. The automation engine
+	// refuses first, the acquisition preflight refuses second, and this refuses
+	// whatever the other two did -- because an operator can POST /executions
+	// with any acquisition id, and because a bug in either of the layers above
+	// must not be the only thing standing here.
+	//
+	// The identity is compared against the ACQUISITION's own record of what it
+	// was for, not against anything the caller supplied.
+	if s.self != nil {
+		identity := s.self.Identity()
+		if self, _ := identity.SelfMatch(domain.SelfTarget{
+			ContainerID:   acquisition.ContainerID,
+			ContainerName: acquisition.ContainerName,
+			ImageRef:      acquisition.Target.Reference,
+		}); self {
+			decision.Refusal = domain.ExecutionRefusalSelfUpdate
+			return decision, nil
+		}
+	}
+
 	if acquisition.State != domain.AcquisitionSucceeded {
 		decision.Refusal = domain.ExecutionRefusalAcquisitionNotSucceeded
 		return decision, nil

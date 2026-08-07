@@ -1,25 +1,35 @@
 import type { ResourceState } from "../hooks/useApiResource";
-import type { HealthReport } from "../api/types";
+import type { Features, HealthReport } from "../api/types";
 import { useVersion } from "../hooks/useHealth";
 import { PageIntro } from "../components/PageIntro";
 import { LoadingState } from "../components/States";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
 /**
- * Settings is read-only.
+ * Settings is read-only, and says which capabilities this deployment has.
  *
- * Configuration is supplied through environment variables and the API
- * deliberately does not echo their values back, so this page reports observed
- * state and points at the variable names instead.
+ * # Why the feature list is the important part of this page
+ *
+ * Almost everything HarborMaster can do to a host is OFF by default. That is
+ * the right default and it produces one recurring confusion: an operator looks
+ * at an empty Acquisitions page, or a Notifications page with no history, and
+ * cannot tell "switched off" from "not working". Those lead somewhere very
+ * different — one is a compose file to edit, the other is a bug to report.
+ *
+ * So this page states, plainly, what exists in this process. The values that
+ * produced those states are never shown: configuration arrives through
+ * environment variables and the API deliberately does not echo them back,
+ * because the same mechanism carries credentials.
  */
 export function Settings({ health }: { health: ResourceState<HealthReport> }) {
   const build = useVersion();
+  const features = health.data?.features;
 
   return (
     <div className="flex flex-col gap-6">
       <PageIntro
         title="Settings"
-        description="HarborMaster is configured entirely through environment variables. Values are never displayed here or written to the log, because the same mechanism will eventually carry credentials."
+        description="HarborMaster is configured entirely through environment variables. Values are never displayed here or written to the log, because the same mechanism carries credentials. What this page shows is what the running process can actually do."
       />
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
@@ -45,8 +55,18 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
               <span className="text-content-muted">unknown</span>
             )}
           </Row>
+          {health.data?.events ? (
+            <Row label="Docker event stream">
+              <StatusBadge
+                tone={componentTone(health.data.events.status)}
+                label={health.data.events.status}
+              />
+            </Row>
+          ) : null}
         </dl>
       </section>
+
+      <FeatureSections features={features} />
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
         <h3 className="font-semibold">Build</h3>
@@ -71,38 +91,177 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
       </section>
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Configuration reference</h3>
+        <h3 className="font-semibold">Where to change any of this</h3>
         <p className="mt-2 text-sm text-content-muted">
-          Set these in the environment or in <code>.env</code>. See{" "}
-          <code>.env.example</code> for defaults and full descriptions.
+          Every setting lives in the environment. The supported deployment
+          forwards them through{" "}
+          <code className="font-mono text-xs">deployments/compose.yaml</code>;{" "}
+          <code className="font-mono text-xs">.env.example</code> documents all
+          of them, including what happens when each is wrong. Restart the
+          container for a change to take effect.
         </p>
-        <ul className="mt-4 flex flex-col gap-1 font-mono text-xs text-content-muted">
-          {CONFIG_VARIABLES.map((name) => (
-            <li key={name}>{name}</li>
-          ))}
+        <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-content-muted">
+          <li>
+            <strong className="text-content">Backups and recovery.</strong>{" "}
+            HarborMaster does not back itself up on a schedule.{" "}
+            <code className="font-mono text-xs">harbormaster backup</code>{" "}
+            writes a consistent copy; see{" "}
+            <code className="font-mono text-xs">
+              docs/engineering/reliability.md
+            </code>
+            .
+          </li>
+          <li>
+            <strong className="text-content">TLS.</strong> HarborMaster does not
+            terminate it. Keep the port on loopback, or put a reverse proxy in
+            front and set{" "}
+            <code className="font-mono text-xs">
+              HARBORMASTER_TRUSTED_PROXIES
+            </code>{" "}
+            and{" "}
+            <code className="font-mono text-xs">
+              HARBORMASTER_COOKIE_SECURE
+            </code>
+            .
+          </li>
+          <li>
+            <strong className="text-content">Updating HarborMaster.</strong> It
+            refuses to update itself, and that is not configurable. Run{" "}
+            <code className="font-mono text-xs">
+              docker compose pull &amp;&amp; docker compose up -d
+            </code>{" "}
+            from outside the container.
+          </li>
         </ul>
       </section>
     </div>
   );
 }
 
+/** The capabilities this process has, grouped by what they can do to a host. */
+function FeatureSections({ features }: { features?: Features }) {
+  if (!features) {
+    return (
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <h3 className="font-semibold">Features</h3>
+        <p className="mt-2 text-sm text-content-muted">
+          This deployment did not report which features are enabled.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <h3 className="font-semibold">Observation</h3>
+        <p className="mt-2 text-sm text-content-muted">
+          These read the host and HarborMaster&rsquo;s own records. None of them
+          can change a container.
+        </p>
+        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+          <Feature label="Inventory" on={features.inventory} />
+          <Feature label="Docker events" on={features.events} />
+          <Feature label="Configuration snapshots" on={features.snapshots} />
+          <Feature label="Drift detection" on={features.drift} />
+          <Feature label="Compliance policy" on={features.policy} />
+          <Feature label="Change plans" on={features.planner} />
+          <Feature
+            label="Image intelligence"
+            on={features.imageIntel}
+            note="Outbound: anonymous HTTPS to the registries your images come from."
+          />
+        </dl>
+      </section>
+
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <h3 className="font-semibold">What this deployment may do to the host</h3>
+        <p className="mt-2 text-sm text-content-muted">
+          Each is a separate capability, off unless it was asked for. When one is
+          off the interface is never wired, so the ability is{" "}
+          <strong className="text-content">absent</strong> rather than merely
+          unused — no request can turn it back on.
+        </p>
+        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+          <Feature
+            label="Download images"
+            on={features.acquisition}
+            note="Pulls an approved, digest-pinned image. Touches no container."
+          />
+          <Feature
+            label="Recreate containers"
+            on={features.execution}
+            note="STOPS A RUNNING CONTAINER and replaces it with one built from its own recorded configuration."
+            dangerous
+          />
+          <Feature
+            label="Roll back"
+            on={features.rollback}
+            note="Stops the replacement and starts the original. There is a gap between the two."
+            dangerous
+          />
+          <Feature
+            label="Unattended updates"
+            on={features.automation}
+            note="Changes containers on a timer, with nobody watching. What it may touch is entirely the business of update policies."
+            dangerous
+          />
+        </dl>
+      </section>
+
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <h3 className="font-semibold">Notifications</h3>
+        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+          <Feature
+            label="Delivery"
+            on={features.notifications}
+            note="HarborMaster's second outbound egress. Destinations and rules stay editable when this is off; nothing is sent."
+          />
+          <Feature
+            label="Private destinations allowed"
+            on={features.notificationsAllowPrivate}
+            note="Permits a destination on a loopback, private, or unique-local address. Link-local, multicast, and the cloud metadata endpoint are refused whatever this says."
+            dangerous={features.notificationsAllowPrivate}
+          />
+        </dl>
+      </section>
+    </>
+  );
+}
+
 /**
- * Variable names only. Their values are never fetched or rendered.
+ * One capability, and what it means.
+ *
+ * `dangerous` marks the ones that change a host, and it only warns when the
+ * capability is ON: an alarming colour beside "off" would make the alarming one
+ * ordinary.
  */
-const CONFIG_VARIABLES = [
-  "HARBORMASTER_HTTP_ADDR",
-  "HARBORMASTER_MAX_REQUEST_BYTES",
-  "HARBORMASTER_READ_HEADER_TIMEOUT",
-  "HARBORMASTER_READ_TIMEOUT",
-  "HARBORMASTER_WRITE_TIMEOUT",
-  "HARBORMASTER_IDLE_TIMEOUT",
-  "HARBORMASTER_SHUTDOWN_TIMEOUT",
-  "HARBORMASTER_DOCKER_HOST",
-  "HARBORMASTER_DOCKER_TIMEOUT",
-  "HARBORMASTER_DB_PATH",
-  "HARBORMASTER_LOG_LEVEL",
-  "HARBORMASTER_LOG_FORMAT",
-] as const;
+function Feature({
+  label,
+  on,
+  note,
+  dangerous = false,
+}: {
+  label: string;
+  on: boolean;
+  note?: string;
+  dangerous?: boolean;
+}) {
+  return (
+    <div>
+      <dt className="flex items-center gap-2">
+        <StatusBadge
+          tone={on ? (dangerous ? "warn" : "ok") : "neutral"}
+          label={on ? "on" : "off"}
+        />
+        <span className="font-medium">{label}</span>
+      </dt>
+      {note ? (
+        <dd className="mt-1 text-xs text-content-muted">{note}</dd>
+      ) : null}
+    </div>
+  );
+}
 
 function Row({
   label,

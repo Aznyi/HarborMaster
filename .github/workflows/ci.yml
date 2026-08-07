@@ -64,11 +64,33 @@ jobs:
         run: go vet -tags integration ./...
 
   integration:
-    name: Live Docker integration
+    name: Live Docker integration (API ${{ matrix.api-version || 'negotiated' }})
     runs-on: ubuntu-latest
     # The runner's own Docker daemon is enough; no privileged Docker-in-Docker
     # is needed, and asking for one would make this job harder to run anywhere
     # else.
+    #
+    # THE COMPATIBILITY MATRIX.
+    #
+    # The runner has one daemon, so the axis that can actually be varied is the
+    # API VERSION the client pins -- which is the axis that matters. A call this
+    # build makes that Engine 25 does not have is invisible against a modern
+    # daemon and fatal on somebody's LTS host.
+    #
+    # `negotiated` is the empty pin: the configuration every real deployment
+    # runs, and the one that must never be broken by adding a version to the
+    # list. It is first so a failure there is the first thing read.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api-version: ""      # negotiated, as every deployment runs
+          - api-version: "1.44"  # Docker Engine 25
+          - api-version: "1.45"  # Docker Engine 26
+          - api-version: "1.47"  # Docker Engine 27
+          - api-version: "1.48"  # Docker Engine 28
+    env:
+      HARBORMASTER_DOCKER_API_VERSION: ${{ matrix.api-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -83,6 +105,11 @@ jobs:
       # Every resource these tests create is prefixed harbormaster-it-, and the
       # suite sweeps strays at the end. The timeout is generous because pulling
       # the test image on a cold runner dominates the run.
+      - name: Report the daemon and the pinned API version
+        run: |
+          docker version --format 'server {{.Server.Version}} api {{.Server.APIVersion}} min {{.Server.MinAPIVersion}}'
+          echo "HarborMaster will pin: ${HARBORMASTER_DOCKER_API_VERSION:-<negotiated>}"
+
       - name: Integration tests against the runner's Docker daemon
         run: go test -tags integration -v -timeout 15m ./internal/integration/...
 

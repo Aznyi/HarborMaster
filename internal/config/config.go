@@ -471,6 +471,52 @@ const (
 	// DefaultRollbackMaxEvents bounds one rollback's audit trail.
 	DefaultRollbackMaxEvents = 200
 
+	// DefaultNotificationsEnabled keeps notifications OFF unless a deployment
+	// asks. HarborMaster's second outbound egress is not something anybody
+	// gets by upgrading.
+	DefaultNotificationsEnabled = false
+	// DefaultNotificationQueueSize bounds what may be waiting. Generous for any
+	// real estate: a pass over two hundred containers raises a handful.
+	DefaultNotificationQueueSize = 256
+	// DefaultNotificationWorkers is how many deliveries run at once.
+	DefaultNotificationWorkers = 4
+	// DefaultNotificationMaxPerDestination bounds one endpoint's share of them.
+	DefaultNotificationMaxPerDestination = 2
+	// DefaultNotificationDeliveryTimeout bounds one attempt.
+	DefaultNotificationDeliveryTimeout = 15 * time.Second
+	// DefaultNotificationMaxAttempts is how many times a retryable failure is
+	// tried before the dead letter.
+	DefaultNotificationMaxAttempts = 4
+	// DefaultNotificationRetryBackoff is the delay before the second attempt.
+	DefaultNotificationRetryBackoff = 30 * time.Second
+	// DefaultNotificationRetryInterval is how often the retry sweep runs.
+	DefaultNotificationRetryInterval = 30 * time.Second
+	// DefaultNotificationRetentionAge is how long delivery history is kept.
+	DefaultNotificationRetentionAge = 30 * 24 * time.Hour
+	// DefaultNotificationPruneInterval is how often retention runs.
+	DefaultNotificationPruneInterval = 6 * time.Hour
+	// DefaultNotificationAllowPrivate refuses non-public destinations.
+	DefaultNotificationAllowPrivate = false
+	// DefaultSMTPPort is the submission port. 587 with STARTTLS is what a
+	// modern relay offers; 465 is implicit TLS and is detected from the port.
+	DefaultSMTPPort = 587
+	// DefaultSMTPStartTLS upgrades the connection on a plaintext port. There is
+	// no way to configure an unencrypted SMTP session.
+	DefaultSMTPStartTLS = true
+
+	// MinNotificationDeliveryTimeout bounds one attempt from below. Under this
+	// a healthy destination on a slow link would fail every time.
+	MinNotificationDeliveryTimeout = time.Second
+	// MinNotificationRetryInterval stops the sweep becoming a busy loop.
+	MinNotificationRetryInterval = 5 * time.Second
+	// MaxNotificationQueueSize bounds what an operator may configure, so the
+	// queue cannot become a way to hold megabytes of pending messages.
+	MaxNotificationQueueSize = 4096
+	// MaxNotificationWorkers bounds delivery concurrency.
+	MaxNotificationWorkers = 32
+	// MaxNotificationAttempts bounds the retry count.
+	MaxNotificationAttempts = 10
+
 	// DefaultAutomationEnabled keeps the update engine OFF unless a deployment
 	// asks for it. The only subsystem that changes the host unattended is not
 	// something anybody gets by upgrading.
@@ -693,6 +739,17 @@ type Docker struct {
 	Host string
 	// Timeout bounds a single Engine API call.
 	Timeout time.Duration
+	// APIVersion pins the Engine API version instead of negotiating one.
+	//
+	// EMPTY IS THE NORMAL CASE. Negotiation asks the daemon what it speaks and
+	// settles on the highest both understand, which is what almost every
+	// deployment wants.
+	//
+	// Pin one only to work around a daemon whose negotiation misbehaves, or to
+	// reproduce a compatibility report. A pinned version the daemon does not
+	// speak makes every call fail, which is the loud failure rather than a
+	// subtle one.
+	APIVersion string
 }
 
 // Store holds persistence settings.
@@ -1218,6 +1275,121 @@ type Automation struct {
 	RequireApprovalForMajor bool
 }
 
+// SelfIdentity holds the operator's answer to "which container is this".
+//
+// # Why an operator would ever set this
+//
+// HarborMaster works out which container it is running in from independent
+// signals -- /proc, the hostname, its own label -- and any one of them
+// suffices. But a deployment can defeat all of them at once: a host PID
+// namespace, a custom hostname, and no label. Rather than guess wrong, or
+// exclude nothing, an operator can just say.
+//
+// # What it CANNOT do
+//
+// It cannot turn the refusal off. There is no value of this setting, including
+// an empty one, that permits HarborMaster to update itself; the empty value
+// means "work it out from the probes", and a wrong value means HarborMaster
+// declines to update a container that is not itself -- which is a smaller harm
+// than the reverse and is why the setting is trusted at all.
+type SelfIdentity struct {
+	// ContainerID is the full 64-character id of HarborMaster's own container.
+	//
+	// Trusted above every probe: somebody who knows beats a guess. A malformed
+	// value matches nothing rather than matching everything.
+	ContainerID string
+}
+
+// Notifications holds settings for operator notifications.
+//
+// # This is HarborMaster's second outbound egress
+//
+// The first, image intelligence, sends anonymous GETs to hosts derived from
+// image references. This one sends data to a URL an administrator typed, which
+// is a strictly larger risk and is why the settings below are shaped the way
+// they are: bounded queue, bounded retries, bounded concurrency, and one
+// explicit, off-by-default relaxation of the address guard.
+//
+// # What is configured here, and what is not
+//
+// Nothing here decides WHAT is sent or WHERE. That is entirely the destinations'
+// and rules' business, and both are administrator-authenticated database rows
+// rather than environment variables. These settings bound the ENGINE.
+type Notifications struct {
+	// Enabled turns delivery on. When false nothing is sent, the endpoints
+	// report the feature disabled, and destinations and rules already stored
+	// remain readable and editable -- an operator can configure and review
+	// before switching it on, which is the order those should happen in.
+	Enabled bool
+
+	// QueueSize bounds how many notifications may be waiting.
+	//
+	// A full queue DROPS rather than blocking. That is the deliberate trade: a
+	// notification must never affect the thing it is about, so a slow webhook
+	// cannot be allowed to stall a rollback. Every drop is recorded and logged.
+	QueueSize int
+
+	// Workers is how many deliveries may be in flight at once, across all
+	// destinations.
+	Workers int
+
+	// MaxPerDestination bounds concurrent deliveries to ONE destination, so a
+	// slow endpoint cannot occupy every worker and starve the others.
+	MaxPerDestination int
+
+	// DeliveryTimeout bounds one attempt end to end.
+	DeliveryTimeout time.Duration
+
+	// MaxAttempts is how many times one delivery is tried before it becomes a
+	// dead letter. A failure that is not retryable -- a revoked webhook URL,
+	// a 404 -- goes to the dead letter on the first attempt regardless.
+	MaxAttempts int
+
+	// RetryBackoff is the delay before the second attempt, doubling from there
+	// to a cap. RetryInterval is how often the retry sweep runs.
+	RetryBackoff  time.Duration
+	RetryInterval time.Duration
+
+	// RetentionAge is how long delivery history is kept, and PruneInterval how
+	// often retention runs. Zero retention keeps everything, which is valid and
+	// unbounded.
+	RetentionAge  time.Duration
+	PruneInterval time.Duration
+
+	// AllowPrivateDestinations permits a destination that resolves to a
+	// loopback, private, or unique-local address.
+	//
+	// OFF BY DEFAULT, and the one relaxation of the SSRF guard. It exists
+	// because a meaningful number of self-hosted operators notify a Gotify, an
+	// ntfy, or a Home Assistant on their own LAN, and refusing that outright
+	// would make the feature useless to them.
+	//
+	// With it on, an administrator who can create a destination can make
+	// HarborMaster issue an HTTPS POST to anything the container can route to.
+	// Everything else still applies: HTTPS only, certificates verified, no
+	// redirects, no proxy, bounded response -- and link-local, multicast, and
+	// the cloud metadata endpoint are refused whatever this says.
+	AllowPrivateDestinations bool
+
+	// SMTPHost and SMTPPort are the relay every email destination uses.
+	SMTPHost string
+	SMTPPort int
+	// SMTPStartTLS upgrades a plaintext connection. Port 465 uses implicit TLS
+	// instead. There is no unencrypted path.
+	SMTPStartTLS bool
+	// SMTPUsername and SMTPPassword authenticate to the relay.
+	//
+	// Supplied from the environment rather than stored per destination, so a
+	// relay password can stay out of the database entirely. Redacted from
+	// Config.String like every other credential.
+	SMTPUsername string
+	// SMTPPasswordFile and SMTPPassword supply the relay password. The file is
+	// preferred and is listed first because it is how Docker secrets arrive.
+	// Neither is logged, returned by an endpoint, or written to the database.
+	SMTPPasswordFile string
+	SMTPPassword     string
+}
+
 // Rollback holds settings for manual rollback.
 //
 // # Off by default, and refused without recreation
@@ -1546,7 +1718,15 @@ type Config struct {
 	Execution   Execution
 	Rollback    Rollback
 	Automation  Automation
-	Auth        Auth
+
+	// Notifications is HarborMaster's second outbound egress. Off by default.
+	Notifications Notifications
+
+	// Self is which container HarborMaster is running in, when an operator
+	// stated it rather than leaving it to be worked out.
+	Self SelfIdentity
+
+	Auth Auth
 }
 
 var (
@@ -1594,7 +1774,8 @@ func load(lookup lookupFunc) (Config, error) {
 			Addr: stringVar(lookup, "HTTP_ADDR", DefaultHTTPAddr),
 		},
 		Docker: Docker{
-			Host: stringVar(lookup, "DOCKER_HOST", defaultDockerHost()),
+			Host:       stringVar(lookup, "DOCKER_HOST", defaultDockerHost()),
+			APIVersion: strings.TrimSpace(stringVar(lookup, "DOCKER_API_VERSION", "")),
 		},
 		Store: Store{
 			Path:           stringVar(lookup, "DB_PATH", DefaultDBPath),
@@ -2013,6 +2194,81 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	// ---- self identity -------------------------------------------------------
+	//
+	// Normalised to lower case here because a container id is hex and an
+	// operator pasting one from `docker inspect` may capitalise it. Nothing
+	// else is done to it: validation belongs to the domain, and an id that
+	// does not match the shape matches no container, which is the safe failure.
+	cfg.Self.ContainerID = strings.ToLower(
+		strings.TrimSpace(stringVar(lookup, "SELF_CONTAINER_ID", "")))
+
+	// ---- notifications -----------------------------------------------------
+
+	for _, target := range []struct {
+		name     string
+		fallback bool
+		into     *bool
+	}{
+		{"NOTIFICATIONS_ENABLED", DefaultNotificationsEnabled, &cfg.Notifications.Enabled},
+		{"NOTIFICATIONS_ALLOW_PRIVATE_DESTINATIONS", DefaultNotificationAllowPrivate,
+			&cfg.Notifications.AllowPrivateDestinations},
+		{"SMTP_STARTTLS", DefaultSMTPStartTLS, &cfg.Notifications.SMTPStartTLS},
+	} {
+		value, convErr := boolVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback time.Duration
+		into     *time.Duration
+	}{
+		{"NOTIFICATIONS_DELIVERY_TIMEOUT", DefaultNotificationDeliveryTimeout,
+			&cfg.Notifications.DeliveryTimeout},
+		{"NOTIFICATIONS_RETRY_BACKOFF", DefaultNotificationRetryBackoff,
+			&cfg.Notifications.RetryBackoff},
+		{"NOTIFICATIONS_RETRY_INTERVAL", DefaultNotificationRetryInterval,
+			&cfg.Notifications.RetryInterval},
+		{"NOTIFICATIONS_RETENTION_AGE", DefaultNotificationRetentionAge,
+			&cfg.Notifications.RetentionAge},
+		{"NOTIFICATIONS_PRUNE_INTERVAL", DefaultNotificationPruneInterval,
+			&cfg.Notifications.PruneInterval},
+	} {
+		value, convErr := durationVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"NOTIFICATIONS_QUEUE_SIZE", DefaultNotificationQueueSize, &cfg.Notifications.QueueSize},
+		{"NOTIFICATIONS_WORKERS", DefaultNotificationWorkers, &cfg.Notifications.Workers},
+		{"NOTIFICATIONS_MAX_PER_DESTINATION", DefaultNotificationMaxPerDestination,
+			&cfg.Notifications.MaxPerDestination},
+		{"NOTIFICATIONS_MAX_ATTEMPTS", DefaultNotificationMaxAttempts,
+			&cfg.Notifications.MaxAttempts},
+		{"SMTP_PORT", DefaultSMTPPort, &cfg.Notifications.SMTPPort},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	cfg.Notifications.SMTPHost = strings.TrimSpace(stringVar(lookup, "SMTP_HOST", ""))
+	cfg.Notifications.SMTPUsername = strings.TrimSpace(stringVar(lookup, "SMTP_USERNAME", ""))
+	// The relay password. A FILE is listed first for the same reason the
+	// installation key lists one first: a Docker secret is a file, and a
+	// password in an environment variable is readable by anything that can read
+	// the process environment. Neither is ever logged; see Config.String.
+	cfg.Notifications.SMTPPasswordFile = strings.TrimSpace(
+		stringVar(lookup, "SMTP_PASSWORD_FILE", ""))
+	cfg.Notifications.SMTPPassword = stringVar(lookup, "SMTP_PASSWORD", "")
+
 	// ---- authentication ----------------------------------------------------
 	//
 	// No AUTH_ENABLED. Authentication is always on: see the Auth type.
@@ -2150,6 +2406,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Acquisition.validate()...)
 	errs = append(errs, c.Execution.validate()...)
 	errs = append(errs, c.Automation.validate()...)
+	errs = append(errs, c.Notifications.validate()...)
 	errs = append(errs, c.Auth.validate()...)
 
 	// Recreation without acquisition is not a configuration, it is a
@@ -2204,6 +2461,86 @@ func (c Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validate checks the notification settings.
+//
+// Validated even when notifications are disabled, for the same reason every
+// other section is: a configuration error that only surfaces the day someone
+// flips the feature on is a worse failure than one caught at startup.
+//
+// Nothing here validates a destination. A destination is an administrator's
+// database row, validated by the domain when it is written, and re-validated
+// against the address guard at dial time. What this validates is the engine.
+func (n Notifications) validate() []error {
+	var errs []error
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"NOTIFICATIONS_QUEUE_SIZE", n.QueueSize, 1, MaxNotificationQueueSize},
+		{"NOTIFICATIONS_WORKERS", n.Workers, 1, MaxNotificationWorkers},
+		{"NOTIFICATIONS_MAX_PER_DESTINATION", n.MaxPerDestination, 1, MaxNotificationWorkers},
+		{"NOTIFICATIONS_MAX_ATTEMPTS", n.MaxAttempts, 1, MaxNotificationAttempts},
+		{"SMTP_PORT", n.SMTPPort, 1, 65535},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	// Per-destination concurrency above the worker count is not an error the
+	// engine would notice -- the worker pool bounds it anyway -- but it is an
+	// operator saying two things that cannot both be true, and a setting that
+	// silently does nothing is worse than one that refuses.
+	if n.MaxPerDestination > n.Workers {
+		errs = append(errs, fmt.Errorf(
+			"%sNOTIFICATIONS_MAX_PER_DESTINATION (%d) must not exceed %sNOTIFICATIONS_WORKERS (%d): "+
+				"one destination cannot be allowed more deliveries in flight than exist",
+			envPrefix, n.MaxPerDestination, envPrefix, n.Workers))
+	}
+
+	if n.DeliveryTimeout < MinNotificationDeliveryTimeout {
+		errs = append(errs, fmt.Errorf("%sNOTIFICATIONS_DELIVERY_TIMEOUT must be at least %s",
+			envPrefix, MinNotificationDeliveryTimeout))
+	}
+	if n.RetryInterval < MinNotificationRetryInterval {
+		errs = append(errs, fmt.Errorf("%sNOTIFICATIONS_RETRY_INTERVAL must be at least %s",
+			envPrefix, MinNotificationRetryInterval))
+	}
+	if n.RetryBackoff <= 0 {
+		errs = append(errs, fmt.Errorf("%sNOTIFICATIONS_RETRY_BACKOFF must be positive", envPrefix))
+	}
+	// Zero keeps delivery history forever, which is valid but unbounded.
+	if n.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sNOTIFICATIONS_RETENTION_AGE must not be negative", envPrefix))
+	}
+	if n.PruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sNOTIFICATIONS_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+
+	// A relay password with no username is a credential that would be sent to
+	// nobody; a username with no host is a relay that does not exist. Both are
+	// signs of a half-finished configuration, and a half-finished mail
+	// configuration fails at the first alert rather than at startup.
+	if n.SMTPPasswordFile != "" && n.SMTPPassword != "" {
+		errs = append(errs, fmt.Errorf(
+			"%sSMTP_PASSWORD_FILE and %sSMTP_PASSWORD must not both be set",
+			envPrefix, envPrefix))
+	}
+	if (n.SMTPUsername != "") != (n.SMTPPasswordFile != "" || n.SMTPPassword != "") {
+		errs = append(errs, fmt.Errorf(
+			"%sSMTP_USERNAME and a relay password must be set together", envPrefix))
+	}
+	if n.SMTPHost == "" && (n.SMTPUsername != "" || n.SMTPPort != DefaultSMTPPort) {
+		errs = append(errs, fmt.Errorf(
+			"%sSMTP_HOST must be set when any other SMTP setting is", envPrefix))
+	}
+
+	return errs
 }
 
 // validate checks the automation settings.
@@ -2970,7 +3307,7 @@ func (c Config) ReconcileInterval() (interval time.Duration, ownedByEventEngine 
 //
 // Do not add value interpolation here.
 func (c Config) String() string {
-	return "config{redacted: server, docker, store, log, healthcheck, inventory, events, snapshots}"
+	return "config{redacted: server, docker, store, log, healthcheck, inventory, events, snapshots, notifications}"
 }
 
 // Masker builds the environment masker from the configured patterns.

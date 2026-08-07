@@ -104,6 +104,11 @@ type PolicyOptions struct {
 	Inventory   PolicyInventory
 
 	Config config.Policy
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	Logger *slog.Logger
 	Now    func() time.Time
 }
@@ -119,9 +124,10 @@ type PolicyService struct {
 	// queue coalesces per-container evaluation requests. See policy_worker.go.
 	queue *evaluationQueue
 
-	cfg    config.Policy
-	logger *slog.Logger
-	now    func() time.Time
+	cfg      config.Policy
+	notifier Notifier
+	logger   *slog.Logger
+	now      func() time.Time
 
 	// sweeping guards the full pass so two cannot overlap. A second pass while
 	// one runs would re-read the same containers and contend for the single
@@ -171,6 +177,7 @@ func NewPolicyService(opts PolicyOptions) *PolicyService {
 		inventory:   opts.Inventory,
 		queue:       newEvaluationQueue(cfg.EvaluationDebounce, cfg.MaxPendingEvaluations, now),
 		cfg:         cfg,
+		notifier:    opts.Notify,
 		logger:      logger,
 		now:         now,
 	}
@@ -331,7 +338,33 @@ func (s *PolicyService) persist(
 			slog.Int("resolved", result.Resolved),
 			slog.Bool("complete", evaluation.Complete))
 	}
+
+	// Only NEW violations, and one message for all of them. `Inserted` is what
+	// the reconciliation decided had not been seen before, so a sweep every few
+	// minutes over a container that has been failing since Tuesday says nothing.
+	if result.Inserted > 0 {
+		worst, example := worstViolation(violations)
+		NotifyPolicyViolation(s.notifier, evaluation.ContainerName,
+			result.Inserted, string(worst), example)
+	}
 	return evaluation, nil
+}
+
+// worstViolation is the highest severity in a set, and a rule that carries it.
+//
+// The rule TYPE, from the closed vocabulary, never the observed or expected
+// value: those are read from the container, and an environment rule's observed
+// value is an environment value.
+func worstViolation(violations []domain.PolicyViolation) (domain.PolicySeverity, string) {
+	worst := domain.PolicySeverityLow
+	example := ""
+	for _, violation := range violations {
+		if example == "" || violation.Severity.Rank() > worst.Rank() {
+			worst = violation.Severity
+			example = string(violation.RuleType)
+		}
+	}
+	return worst, example
 }
 
 // policyWriteGrace and policyWriteMax bound the persistence write at shutdown.

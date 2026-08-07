@@ -68,6 +68,11 @@ type PlannerOptions struct {
 	Store PlanStore
 
 	Config config.Planner
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	Logger *slog.Logger
 	Now    func() time.Time
 }
@@ -76,9 +81,10 @@ type PlannerOptions struct {
 type PlannerService struct {
 	store PlanStore
 
-	cfg    config.Planner
-	logger *slog.Logger
-	now    func() time.Time
+	cfg      config.Planner
+	notifier Notifier
+	logger   *slog.Logger
+	now      func() time.Time
 
 	// wake carries a one-slot signal for an out-of-band generation request.
 	// Capacity 1 with a non-blocking send: a second request while one is unread
@@ -128,11 +134,12 @@ func NewPlannerService(opts PlannerOptions) *PlannerService {
 	}
 
 	return &PlannerService{
-		store:  opts.Store,
-		cfg:    cfg,
-		logger: logger,
-		now:    now,
-		wake:   make(chan struct{}, 1),
+		store:    opts.Store,
+		cfg:      cfg,
+		notifier: opts.Notify,
+		logger:   logger,
+		now:      now,
+		wake:     make(chan struct{}, 1),
 	}
 }
 
@@ -282,6 +289,18 @@ func (s *PlannerService) planBatch(
 		switch state {
 		case planNew:
 			result.plans = append(result.plans, plan)
+			// Raised here rather than from automation, so a deployment that
+			// wants to be TOLD about updates without letting anything act on
+			// them gets told. Automation is off by default; discovery is not.
+			//
+			// planNew is the whole suppression: a plan whose fingerprint matches
+			// the stored one is planUnchanged and never reaches this branch, so
+			// a planner running every hour says a thing once rather than
+			// twenty-four times.
+			if plan.ProposedImage != "" && plan.ProposedImage != plan.CurrentImage {
+				NotifyUpdateDiscovered(s.notifier, plan.ContainerName,
+					plan.CurrentImage, plan.ProposedImage, plan.UpdateType)
+			}
 		case planUnchanged:
 			result.unchanged++
 		case planSkipped:

@@ -120,6 +120,8 @@ jobs:
       - name: Scan repository
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Assessed-and-accepted findings, each with a reason and an expiry.
+          trivyignores: .trivyignore.yaml
           scan-type: fs
           scanners: vuln,misconfig,secret
           format: sarif
@@ -144,6 +146,8 @@ jobs:
       - name: Fail on High or Critical
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Assessed-and-accepted findings, each with a reason and an expiry.
+          trivyignores: .trivyignore.yaml
           scan-type: fs
           scanners: vuln,secret
           format: table
@@ -168,6 +172,8 @@ jobs:
       - name: Scan image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Assessed-and-accepted findings, each with a reason and an expiry.
+          trivyignores: .trivyignore.yaml
           image-ref: harbormaster:scan
           format: sarif
           output: trivy-image.sarif
@@ -187,6 +193,8 @@ jobs:
       - name: Fail on fixable High or Critical
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Assessed-and-accepted findings, each with a reason and an expiry.
+          trivyignores: .trivyignore.yaml
           image-ref: harbormaster:scan
           format: table
           severity: CRITICAL,HIGH

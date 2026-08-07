@@ -45,6 +45,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Paused", path: "/automation/paused", permission: "automation:read" },
   { label: "Compliance", path: "/compliance", permission: "policy:read" },
   { label: "Policies", path: "/policies", permission: "policy:read" },
+  { label: "Notifications", path: "/notifications", permission: "notification:read" },
   { label: "Events", path: "/events", permission: "event:read" },
   { label: "Accounts", path: "/users", permission: "user:manage" },
   { label: "Security audit", path: "/audit", permission: "audit:read" },

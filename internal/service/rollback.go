@@ -132,6 +132,11 @@ type RollbackOptions struct {
 	// account that asked for it.
 	Audit *AuditRecorder
 
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	Config config.Rollback
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -145,6 +150,7 @@ type RollbackService struct {
 	rollbacker docker.ContainerRollbacker
 	hasher     *Hasher
 	audit      *AuditRecorder
+	notifier   Notifier
 
 	cfg    config.Rollback
 	logger *slog.Logger
@@ -208,6 +214,7 @@ func NewRollbackService(opts RollbackOptions) *RollbackService {
 		rollbacker: opts.Rollbacker,
 		hasher:     opts.Hasher,
 		audit:      opts.Audit,
+		notifier:   opts.Notify,
 		cfg:        cfg,
 		logger:     logger,
 		now:        now,
@@ -326,6 +333,13 @@ func (s *RollbackService) Request(
 		slog.String("rollbackId", created.RollbackID),
 		slog.String("executionId", created.ExecutionID),
 		slog.String("containerName", created.ContainerName))
+
+	// Raised at REQUEST rather than at completion, unlike every other
+	// notification in the pipeline. A rollback takes as long as a container
+	// takes to stop and start, and an operator who is about to be paged wants to
+	// know it has begun rather than reading about it afterwards.
+	NotifyRollbackStarted(s.notifier, created.ContainerName, created.RollbackID,
+		!created.RequestedBy.Known())
 
 	s.signal()
 	return created, nil

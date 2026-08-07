@@ -281,6 +281,17 @@ const (
 	// AcquisitionRefusalContainerMissing means the container the plan describes
 	// is no longer present.
 	AcquisitionRefusalContainerMissing AcquisitionRefusal = "containerMissing"
+
+	// AcquisitionRefusalSelfUpdate means the plan names the container
+	// HarborMaster is running in.
+	//
+	// Refused at the ACQUISITION rather than only at the recreation, even
+	// though a download changes no container. Downloading the image is the
+	// first half of an operation whose second half cannot complete, and
+	// allowing it would leave an operator with a succeeded acquisition that can
+	// never be spent -- which reads as a working feature right up to the moment
+	// it is not.
+	AcquisitionRefusalSelfUpdate AcquisitionRefusal = "selfUpdate"
 )
 
 // AcquisitionRefusals lists every refusal.
@@ -293,6 +304,7 @@ var AcquisitionRefusals = []AcquisitionRefusal{
 	AcquisitionRefusalDuplicate, AcquisitionRefusalDockerUnavailable,
 	AcquisitionRefusalLimit, AcquisitionRefusalTargetRefused,
 	AcquisitionRefusalDisabled, AcquisitionRefusalContainerMissing,
+	AcquisitionRefusalSelfUpdate,
 }
 
 // ValidAcquisitionRefusal reports whether name is a known refusal.
@@ -315,6 +327,8 @@ func ValidAcquisitionRefusal(name string) bool {
 // an API response, and a browser.
 func (r AcquisitionRefusal) Explain() string {
 	switch r {
+	case AcquisitionRefusalSelfUpdate:
+		return "this plan names the container HarborMaster is running in; HarborMaster is updated from outside itself"
 	case AcquisitionRefusalPlanMissing:
 		return "the change plan no longer exists, so there is nothing that approved this image"
 	case AcquisitionRefusalPlanSuperseded:

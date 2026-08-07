@@ -86,6 +86,11 @@ type ImageIntelOptions struct {
 	Registry RegistryClient
 
 	Config config.ImageIntel
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	Logger *slog.Logger
 	Now    func() time.Time
 }
@@ -95,9 +100,10 @@ type ImageIntelService struct {
 	store    ImageIntelStore
 	registry RegistryClient
 
-	cfg    config.ImageIntel
-	logger *slog.Logger
-	now    func() time.Time
+	cfg      config.ImageIntel
+	notifier Notifier
+	logger   *slog.Logger
+	now      func() time.Time
 
 	// wake carries a one-slot signal for an out-of-band collection request.
 	// Capacity 1 with a non-blocking send: a second request while one is unread
@@ -166,6 +172,7 @@ func NewImageIntelService(opts ImageIntelOptions) *ImageIntelService {
 		store:    opts.Store,
 		registry: opts.Registry,
 		cfg:      cfg,
+		notifier: opts.Notify,
 		logger:   logger,
 		now:      now,
 		wake:     make(chan struct{}, 1),
@@ -699,7 +706,25 @@ func (s *ImageIntelService) recordHost(
 		s.logger.Debug("could not record registry host failure",
 			slog.String("host", host), slog.String("error", writeErr.Error()))
 	}
+
+	// Notified only once a host has failed REPEATEDLY. A single failed check is
+	// an ordinary thing on the public internet, and a message for each one
+	// would be noise that trains an operator to ignore the channel.
+	//
+	// The HOST only. Never the URL, never the error: a private registry's error
+	// text has been known to carry the credential that failed.
+	if failures == registryUnavailableAfterFailures {
+		NotifyRegistryUnavailable(s.notifier, host, failures)
+	}
 }
+
+// registryUnavailableAfterFailures is how many consecutive failures make a
+// registry worth telling somebody about.
+//
+// Raised EXACTLY at the threshold rather than at or above it, so a registry
+// that stays down produces one message rather than one per check until it
+// recovers. The cooldown is a second line of defence, not the only one.
+const registryUnavailableAfterFailures = 3
 
 // hostSuccess clears a host's backoff.
 func (s *ImageIntelService) hostSuccess(ctx context.Context, host string, kind domain.RegistryKind) {

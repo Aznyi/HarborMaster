@@ -36,6 +36,7 @@ type HealthService struct {
 	db        DatabasePinger
 	docker    docker.Pinger
 	events    EventEngineReporter
+	features  domain.Features
 	logger    *slog.Logger
 	startedAt time.Time
 	// now is injectable so tests can assert on uptime deterministically.
@@ -48,7 +49,14 @@ type HealthOptions struct {
 	Docker docker.Pinger
 	// Events is optional. A nil reporter omits the event component entirely,
 	// which is what an API-only or pre-Phase-2.5 deployment looks like.
-	Events    EventEngineReporter
+	Events EventEngineReporter
+	// Features is which capabilities this deployment turned on.
+	//
+	// A VALUE rather than a probe: it is decided at startup from configuration
+	// and cannot change while the process runs. Computed once in the
+	// composition root, where every enabled flag is already in scope, rather
+	// than by handing this service the whole configuration.
+	Features  domain.Features
 	Logger    *slog.Logger
 	StartedAt time.Time
 	Now       func() time.Time
@@ -72,6 +80,7 @@ func NewHealthService(opts HealthOptions) *HealthService {
 		db:        opts.DB,
 		docker:    opts.Docker,
 		events:    opts.Events,
+		features:  opts.Features,
 		logger:    logger,
 		startedAt: startedAt,
 		now:       now,
@@ -93,10 +102,14 @@ func NewHealthService(opts HealthOptions) *HealthService {
 // daemon restart would put HarborMaster into a restart loop.
 func (s *HealthService) Check(ctx context.Context) domain.HealthReport {
 	now := s.now().UTC()
+	// Copied so the pointer on the report cannot alias the service's own value
+	// and be mutated by a caller.
+	features := s.features
 	report := domain.HealthReport{
 		Database:  s.checkDatabase(ctx),
 		Docker:    s.checkDocker(ctx),
 		Events:    s.checkEvents(),
+		Features:  &features,
 		CheckedAt: now,
 		UptimeSec: int64(now.Sub(s.startedAt).Seconds()),
 	}

@@ -29,7 +29,10 @@ func (s *AutomationService) Status(ctx context.Context) (domain.AutomationStatus
 		return domain.AutomationStatus{}, ErrAutomationDisabled
 	}
 
-	status := domain.AutomationStatus{Enabled: s.Enabled()}
+	// The container HarborMaster is running in, reported so the self-update
+	// exclusion is visible on the automation page rather than being a silent
+	// absence from every plan.
+	status := domain.AutomationStatus{Enabled: s.Enabled(), Self: s.selfIdentity()}
 
 	s.mu.Lock()
 	status.Running = s.running
@@ -212,6 +215,7 @@ func (s *AutomationService) Upcoming(ctx context.Context) ([]domain.AutomationDe
 	}
 
 	now := s.now().UTC()
+	self := s.selfIdentity()
 	decisions := make([]domain.AutomationDecision, 0, len(targets))
 	for index, target := range targets {
 		if ctx.Err() != nil {
@@ -223,6 +227,7 @@ func (s *AutomationService) Upcoming(ctx context.Context) ([]domain.AutomationDe
 			Policies:                policies,
 			Now:                     now,
 			RequireApprovalForMajor: s.cfg.RequireApprovalForMajor,
+			Self:                    self,
 		}
 		if pause, paused := pausedBy[target.Selection.Name]; paused {
 			input.Pause, input.IsPaused = pause, true
@@ -323,6 +328,24 @@ func (s *AutomationService) Approve(
 			"the container's change plan moved on after the decision was made")
 		return domain.AutomationDecision{}, fmt.Errorf(
 			"%w: a newer change plan supersedes the one it named", ErrDecisionNotApprovable)
+	}
+
+	// HarborMaster itself. Re-checked here, not inherited from the decision.
+	//
+	// A decision recorded before detection caught up would otherwise become the
+	// way in: the pass refused nothing because it knew nothing, and an operator
+	// then releases it by hand. The acquisition preflight refuses too, but the
+	// engine holds the identity and has no business forwarding a request it can
+	// already see is wrong.
+	if self, why := s.selfIdentity().SelfMatch(domain.SelfTarget{
+		ContainerID:   decision.ContainerID,
+		ContainerName: decision.ContainerName,
+		ImageRef:      decision.CurrentImage,
+	}); self {
+		s.recordAudit(ctx, domain.AuditAutomationRejected, domain.AuditDenied,
+			decision.ContainerName, actor, why)
+		return domain.AutomationDecision{}, fmt.Errorf(
+			"%w: %s", ErrDecisionNotApprovable, why)
 	}
 
 	// Paused containers are not approvable. A pause is HarborMaster refusing to

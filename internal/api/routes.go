@@ -378,6 +378,66 @@ func (s *Server) routeTable() []route {
 		{http.MethodPost, p + "/automation/resume", requires(domain.PermAutomationPause).policyBudget(), s.handleAutomationResume, ""},
 		{"", p + "/automation/resume", requires(domain.PermAutomationPause), nil, "POST"},
 
+		// ---- notifications ---------------------------------------------------
+		//
+		// # Two permissions, and the split is the point
+		//
+		// READING is `notification:read`, which every role holds. The delivery
+		// history is how an operator answers "was anybody told about this",
+		// and a delivery record carries no credential by construction.
+		//
+		// WRITING is `notification:manage`, which only an ADMINISTRATOR holds,
+		// for two reasons that each suffice on their own:
+		//
+		//   - A destination CARRIES A CREDENTIAL. A Slack, Discord, or Teams
+		//     webhook URL is a bearer token in the shape of a path.
+		//   - Creating one points HarborMaster's SECOND OUTBOUND EGRESS
+		//     somewhere new. An operator able to create a destination could
+		//     send every container name and update event this host produces to
+		//     a server they control.
+		//
+		// The writes share the POLICY rate budget rather than the shared one:
+		// they cost one small transaction on HarborMaster's own tables.
+		//
+		// The test send is the exception. It is rate-limited on the same budget
+		// but it is the one route here that produces OUTBOUND NETWORK TRAFFIC,
+		// so it is audited like a mutation -- because that is what it is.
+
+		{http.MethodGet, p + "/notifications", requires(domain.PermNotificationRead), s.handleNotificationStatus, ""},
+		{"", p + "/notifications", requires(domain.PermNotificationRead), nil, "GET, HEAD"},
+
+		{http.MethodGet, p + "/notifications/destinations", requires(domain.PermNotificationRead), s.handleNotificationDestinations, ""},
+		{http.MethodPost, p + "/notifications/destinations", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationDestinationCreate, ""},
+		{"", p + "/notifications/destinations", requires(domain.PermNotificationRead), nil, "GET, HEAD, POST"},
+
+		// Three segments, so this never overlaps the two-segment detail route.
+		{http.MethodPost, p + "/notifications/destinations/{id}/test", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationDestinationTest, ""},
+		{"", p + "/notifications/destinations/{id}/test", requires(domain.PermNotificationManage), nil, "POST"},
+
+		{http.MethodGet, p + "/notifications/destinations/{id}", requires(domain.PermNotificationRead), s.handleNotificationDestinationDetail, ""},
+		{http.MethodPatch, p + "/notifications/destinations/{id}", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationDestinationUpdate, ""},
+		// DELETE archives. Delivery records reference the row, and the history
+		// of what was sent must outlive the destination being withdrawn. The
+		// stored CREDENTIAL does not survive: an archived destination cannot
+		// send, so keeping its URL would be keeping a credential for no reason.
+		{http.MethodDelete, p + "/notifications/destinations/{id}", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationDestinationDelete, ""},
+		{"", p + "/notifications/destinations/{id}", requires(domain.PermNotificationRead), nil, "GET, HEAD, PATCH, DELETE"},
+
+		{http.MethodGet, p + "/notifications/rules", requires(domain.PermNotificationRead), s.handleNotificationRules, ""},
+		{http.MethodPost, p + "/notifications/rules", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationRuleCreate, ""},
+		{"", p + "/notifications/rules", requires(domain.PermNotificationRead), nil, "GET, HEAD, POST"},
+
+		{http.MethodGet, p + "/notifications/rules/{id}", requires(domain.PermNotificationRead), s.handleNotificationRuleDetail, ""},
+		{http.MethodPatch, p + "/notifications/rules/{id}", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationRuleUpdate, ""},
+		{http.MethodDelete, p + "/notifications/rules/{id}", requires(domain.PermNotificationManage).policyBudget(), s.handleNotificationRuleDelete, ""},
+		{"", p + "/notifications/rules/{id}", requires(domain.PermNotificationRead), nil, "GET, HEAD, PATCH, DELETE"},
+
+		{http.MethodGet, p + "/notifications/deliveries", requires(domain.PermNotificationRead), s.handleNotificationDeliveries, ""},
+		{"", p + "/notifications/deliveries", requires(domain.PermNotificationRead), nil, "GET, HEAD"},
+
+		{http.MethodGet, p + "/notifications/deliveries/{id}", requires(domain.PermNotificationRead), s.handleNotificationDeliveryDetail, ""},
+		{"", p + "/notifications/deliveries/{id}", requires(domain.PermNotificationRead), nil, "GET, HEAD"},
+
 		// ---- user administration -------------------------------------------
 
 		{http.MethodGet, p + "/users", requires(domain.PermUserManage), s.handleUsers, ""},

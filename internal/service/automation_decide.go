@@ -29,6 +29,7 @@ import (
 // Cheapest and most absolute first, so a container that must never be touched
 // is refused before anything expensive or fallible runs:
 //
+//	 0. self            -- HarborMaster's own container, which it cannot update
 //	 1. paused          -- HarborMaster already decided not to
 //	 2. label opt-out   -- the container's owner already decided not to
 //	 3. policy selection-- nothing governs it
@@ -40,9 +41,13 @@ import (
 //	 9. window          -- not now
 //	10. mode            -- observe, dry run, or approval
 //
-// Only a container that passes all ten is eligible, and eligibility is still
+// Only a container that passes all eleven is eligible, and eligibility is still
 // not action: the run-level limits are applied afterwards, in order, and the
 // services each re-run their own preflight against the live host.
+//
+// Check 0 is applied a SECOND time by the acquisition and execution services.
+// The engine is not the only caller of those, and a self-update is the one
+// refusal that must hold even if this function is never reached.
 
 // AutomationInput is everything one container's decision is made from.
 //
@@ -84,6 +89,12 @@ type AutomationInput struct {
 	// RequireApprovalForMajor is the deployment-wide refusal to apply a major
 	// version update unattended, applied on top of the policy's strategy.
 	RequireApprovalForMajor bool
+
+	// Self is what HarborMaster knows about its own container. The zero value
+	// matches nothing, so a build that has not wired detection is no less safe
+	// than one where every probe failed -- and both are still covered by the
+	// second refusal in the execution service.
+	Self domain.SelfIdentity
 }
 
 // AutomationOutcome is one container's decision, with the effective policy that
@@ -114,6 +125,25 @@ func DecideAutomation(input AutomationInput) AutomationOutcome {
 		CurrentImage:  input.Target.Image,
 		Verdict:       domain.VerdictSkip,
 		DecidedAt:     input.Now,
+	}
+
+	// 0. HarborMaster itself.
+	//
+	// FIRST, before the pause, before the labels, before the policy lookup.
+	// Nothing an operator configures may reorder this: a self-update is not a
+	// change that needs approving, it is an operation that cannot complete --
+	// the process stops its own container and dies before it can verify,
+	// checkpoint, or roll back.
+	if self, why := input.Self.SelfMatch(domain.SelfTarget{
+		ContainerID:   input.ContainerID,
+		ContainerName: input.Target.Name,
+		ImageRef:      input.Target.Image,
+		Labels:        input.Target.Labels,
+	}); self {
+		decision.Reason = domain.ReasonSelfUpdate
+		decision.Detail = why + "; update HarborMaster from outside it, with " +
+			"`docker compose pull && docker compose up -d`"
+		return AutomationOutcome{Decision: decision}
 	}
 
 	// 1. HarborMaster already decided not to touch this container.

@@ -38,6 +38,7 @@ import { SignIn } from "./pages/SignIn";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
 import { Snapshots } from "./pages/Snapshots";
+import { Notifications } from "./pages/Notifications";
 import { UpdatePolicies } from "./pages/UpdatePolicies";
 import { Users } from "./pages/Users";
 
@@ -202,6 +203,15 @@ function AuthenticatedApp() {
         <Route
           path="/update-policies"
           element={<Guard permission="automation:read"><UpdatePolicies /></Guard>}
+        />
+
+        <Route
+          path="/notifications"
+          element={
+            <Guard permission="notification:read">
+              <Notifications />
+            </Guard>
+          }
         />
 
         <Route path="/events" element={<Guard permission="event:read"><Events /></Guard>} />

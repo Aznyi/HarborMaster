@@ -97,6 +97,23 @@ type Options struct {
 	// patterns; a nil masker would mask nothing, which must never be the
 	// accidental outcome of forgetting to set this.
 	Masker *domain.Masker
+
+	// APIVersion pins the Engine API version instead of negotiating one.
+	//
+	// EMPTY IS THE NORMAL CASE, and negotiation is what almost every
+	// deployment should use: the client asks the daemon what it speaks and
+	// settles on the highest both understand.
+	//
+	// Two reasons to pin. An operator on a daemon whose negotiation
+	// misbehaves can force a version they know works, and the compatibility
+	// matrix in CI runs the integration suite against each supported version
+	// in turn -- which is the only way to notice a call this build makes that
+	// Engine 25 does not have.
+	//
+	// A pinned version DISABLES negotiation. Pinning one the daemon does not
+	// speak makes every call fail, which is loud and immediate rather than
+	// subtle.
+	APIVersion string
 }
 
 // New builds a Client for the configured endpoint.
@@ -120,10 +137,18 @@ func New(opts Options) (*Client, error) {
 	// WithAPIVersionNegotiation is likewise gone: negotiation is the default in
 	// this SDK version and the option is now a no-op. HarborMaster still talks
 	// to older daemons; it simply no longer asks for behaviour it already gets.
-	api, err := client.New(
+	// The pinned version, when one was configured. Applied to all three
+	// clients: two of them talking a different version from the third would be
+	// a difference nobody would think to look for.
+	pinned := []client.Opt{}
+	if opts.APIVersion != "" {
+		pinned = append(pinned, client.WithAPIVersion(opts.APIVersion))
+	}
+
+	api, err := client.New(append([]client.Opt{
 		client.WithHost(opts.Host),
 		client.WithTimeout(opts.Timeout),
-	)
+	}, pinned...)...)
 	if err != nil {
 		// The endpoint is configuration, so it is kept out of the message.
 		return nil, errors.New("create docker client: invalid engine endpoint")
@@ -131,18 +156,18 @@ func New(opts Options) (*Client, error) {
 
 	// See Client.streamAPI: the event stream needs a client with no request
 	// timeout. Its lifetime is bounded by the caller's context instead.
-	streamAPI, err := client.New(
+	streamAPI, err := client.New(append([]client.Opt{
 		client.WithHost(opts.Host),
-	)
+	}, pinned...)...)
 	if err != nil {
 		_ = api.Close()
 		return nil, errors.New("create docker client: invalid engine endpoint")
 	}
 
 	// See Client.mutateAPI.
-	mutateAPI, err := client.New(
+	mutateAPI, err := client.New(append([]client.Opt{
 		client.WithHost(opts.Host),
-	)
+	}, pinned...)...)
 	if err != nil {
 		_ = api.Close()
 		_ = streamAPI.Close()

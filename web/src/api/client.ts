@@ -7,6 +7,21 @@
  */
 
 import type {
+  DeliveryQuery,
+  NotificationConfigQuery,
+  NotificationDelivery,
+  NotificationDeliveryListResponse,
+  NotificationDestination,
+  NotificationDestinationListResponse,
+  NotificationDestinationRequest,
+  NotificationDestinationResult,
+  NotificationRuleListResponse,
+  NotificationRuleRequest,
+  NotificationRuleResult,
+  NotificationStatus,
+  TestNotificationResponse,
+} from "./notificationTypes";
+import type {
   ApiErrorCode,
   ApiErrorResponse,
   HealthReport,
@@ -1884,4 +1899,229 @@ export function resumeAutomation(
   return request<void>("/automation/resume", options, "POST", {
     containerName,
   });
+}
+
+// ------------------------------------------------------------ notifications --
+
+/**
+ * The notification endpoints.
+ *
+ * # The webhook URL travels one way
+ *
+ * `createNotificationDestination` and `updateNotificationDestination` SEND a
+ * URL. Nothing returns one. Every read below resolves to a
+ * `NotificationDestination`, whose `endpoint` is a scheme and host — there is
+ * no field on that type for a credential and no endpoint that produces one.
+ *
+ * # There is no target in a test send
+ *
+ * `testNotificationDestination` takes an identifier HarborMaster issued and no
+ * body of its own. A function with nowhere to put a URL cannot be talked into
+ * pointing this host's outbound egress somewhere new.
+ */
+
+function buildNotificationConfigQuery(query: NotificationConfigQuery): string {
+  const params = new URLSearchParams();
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  // Sent only when explicitly set, so the server's own default stands
+  // otherwise and the two cannot disagree about what "default" means.
+  if (query.includeArchived !== undefined) {
+    params.set("includeArchived", String(query.includeArchived));
+  }
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+function buildDeliveryQuery(query: DeliveryQuery): string {
+  const params = new URLSearchParams();
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.destinationId) params.set("destinationId", query.destinationId);
+  if (query.container) params.set("container", query.container);
+  if (query.failed !== undefined) params.set("failed", String(query.failed));
+
+  for (const result of query.result ?? []) params.append("result", result);
+  for (const event of query.event ?? []) params.append("event", event);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/notifications — state, counts, and the closed vocabularies. */
+export function getNotificationStatus(
+  options?: RequestOptions,
+): Promise<NotificationStatus> {
+  return request<NotificationStatus>("/notifications", options);
+}
+
+/** GET /api/v1/notifications/destinations */
+export function listNotificationDestinations(
+  query: NotificationConfigQuery = {},
+  options?: RequestOptions,
+): Promise<NotificationDestinationListResponse> {
+  return request<NotificationDestinationListResponse>(
+    `/notifications/destinations${buildNotificationConfigQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/notifications/destinations/{id} — the public record. */
+export function getNotificationDestination(
+  destinationId: string,
+  options?: RequestOptions,
+): Promise<NotificationDestination> {
+  return request<NotificationDestination>(
+    `/notifications/destinations/${encodeURIComponent(destinationId)}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/notifications/destinations — needs `notification:manage`.
+ *
+ * The body carries a CREDENTIAL. The response does not.
+ */
+export function createNotificationDestination(
+  body: NotificationDestinationRequest,
+  options?: RequestOptions,
+): Promise<NotificationDestinationResult> {
+  return request<NotificationDestinationResult>(
+    "/notifications/destinations",
+    options,
+    "POST",
+    body,
+  );
+}
+
+/**
+ * PATCH /api/v1/notifications/destinations/{id}
+ *
+ * **Omitting `url` keeps the stored credential.** Supplying one replaces it.
+ * `channel` is refused: a destination whose stored credential is the wrong
+ * shape for what it now is would be a state every validation ran before it
+ * could exist.
+ */
+export function updateNotificationDestination(
+  destinationId: string,
+  body: NotificationDestinationRequest,
+  options?: RequestOptions,
+): Promise<NotificationDestinationResult> {
+  return request<NotificationDestinationResult>(
+    `/notifications/destinations/${encodeURIComponent(destinationId)}`,
+    options,
+    "PATCH",
+    body,
+  );
+}
+
+/**
+ * DELETE /api/v1/notifications/destinations/{id}
+ *
+ * Archives rather than destroys: delivery records reference the row. The
+ * stored credential does NOT survive — an archived destination cannot send, so
+ * keeping its URL would be keeping a credential for no reason. Answers 204, or
+ * 409 while a rule still routes here.
+ */
+export function archiveNotificationDestination(
+  destinationId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/notifications/destinations/${encodeURIComponent(destinationId)}`,
+    options,
+    "DELETE",
+  );
+}
+
+/**
+ * POST /api/v1/notifications/destinations/{id}/test
+ *
+ * The destination is named by an identifier HarborMaster issued, and the
+ * message is a fixed sentence — there is nowhere in this request to put a URL,
+ * an address, or text. Queued rather than sent inline, travelling the same path
+ * as a real notification, so its outcome appears in the delivery history.
+ */
+export function testNotificationDestination(
+  destinationId: string,
+  options?: RequestOptions,
+): Promise<TestNotificationResponse> {
+  return request<TestNotificationResponse>(
+    `/notifications/destinations/${encodeURIComponent(destinationId)}/test`,
+    options,
+    "POST",
+    {},
+  );
+}
+
+/** GET /api/v1/notifications/rules */
+export function listNotificationRules(
+  query: NotificationConfigQuery = {},
+  options?: RequestOptions,
+): Promise<NotificationRuleListResponse> {
+  return request<NotificationRuleListResponse>(
+    `/notifications/rules${buildNotificationConfigQuery(query)}`,
+    options,
+  );
+}
+
+/** POST /api/v1/notifications/rules — needs `notification:manage`. */
+export function createNotificationRule(
+  body: NotificationRuleRequest,
+  options?: RequestOptions,
+): Promise<NotificationRuleResult> {
+  return request<NotificationRuleResult>(
+    "/notifications/rules",
+    options,
+    "POST",
+    body,
+  );
+}
+
+/** PATCH /api/v1/notifications/rules/{id} — omitted fields are left alone. */
+export function updateNotificationRule(
+  ruleId: string,
+  body: NotificationRuleRequest,
+  options?: RequestOptions,
+): Promise<NotificationRuleResult> {
+  return request<NotificationRuleResult>(
+    `/notifications/rules/${encodeURIComponent(ruleId)}`,
+    options,
+    "PATCH",
+    body,
+  );
+}
+
+/** DELETE /api/v1/notifications/rules/{id} — archives. Answers 204. */
+export function archiveNotificationRule(
+  ruleId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/notifications/rules/${encodeURIComponent(ruleId)}`,
+    options,
+    "DELETE",
+  );
+}
+
+/** GET /api/v1/notifications/deliveries — needs only `notification:read`. */
+export function listNotificationDeliveries(
+  query: DeliveryQuery = {},
+  options?: RequestOptions,
+): Promise<NotificationDeliveryListResponse> {
+  return request<NotificationDeliveryListResponse>(
+    `/notifications/deliveries${buildDeliveryQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/notifications/deliveries/{id} */
+export function getNotificationDelivery(
+  deliveryId: string,
+  options?: RequestOptions,
+): Promise<NotificationDelivery> {
+  return request<NotificationDelivery>(
+    `/notifications/deliveries/${encodeURIComponent(deliveryId)}`,
+    options,
+  );
 }

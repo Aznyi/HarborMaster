@@ -65,6 +65,14 @@ const (
 	// cannot see what it decided cannot answer the question the role exists to
 	// let them answer.
 	PermAutomationRead Permission = "automation:read"
+	// PermNotificationRead covers notification destinations, rules, and the
+	// delivery history.
+	//
+	// A READ permission every role holds. The delivery history is how an
+	// operator answers "was anybody told about this", and a destination's
+	// public record carries no credential -- the URL and the relay password
+	// live in a separate type this permission cannot reach at all.
+	PermNotificationRead Permission = "notification:read"
 )
 
 // Operator permissions.
@@ -157,6 +165,18 @@ const (
 	PermPolicyManage Permission = "policy:manage"
 	// PermUserManage creates users, assigns roles, disables accounts, and
 	// revokes sessions.
+	// PermNotificationManage creates, edits, and archives notification
+	// destinations and rules, and sends a test notification.
+	//
+	// An ADMINISTRATOR permission because a destination CARRIES A CREDENTIAL --
+	// a Slack, Discord, or Teams webhook URL is a bearer token in the shape of
+	// a path -- and because creating one points HarborMaster's second outbound
+	// egress somewhere new. An operator able to create a destination could
+	// exfiltrate every container name and update event this host produces to a
+	// server they control.
+	PermNotificationManage Permission = "notification:manage"
+	// PermUserManage creates users, assigns roles, disables accounts, and
+	// revokes sessions.
 	PermUserManage Permission = "user:manage"
 	// PermAuditRead reads the security audit history.
 	PermAuditRead Permission = "audit:read"
@@ -190,6 +210,7 @@ var AllPermissions = []Permission{
 	PermRollbackCancel, PermRollbackCreate, PermRollbackRead,
 	PermImageRefresh,
 	PermInventoryRead, PermInventoryRefresh,
+	PermNotificationManage, PermNotificationRead,
 	PermPlanGenerate, PermPlanRead,
 	PermPolicyAnnotate, PermPolicyEvaluate, PermPolicyManage, PermPolicyRead,
 	PermSnapshotCreate, PermSnapshotRead,
@@ -228,6 +249,10 @@ func (p Permission) Describe() string {
 		return "read image acquisition history"
 	case PermExecutionRead:
 		return "read container recreation history"
+	case PermNotificationRead:
+		return "read notification destinations, rules, and delivery history"
+	case PermNotificationManage:
+		return "manage notification destinations, rules, and credentials"
 	case PermRollbackRead:
 		return "read rollback history"
 	case PermAutomationRead:
@@ -374,6 +399,7 @@ var viewerPermissions = []Permission{
 	PermExecutionRead,
 	PermRollbackRead,
 	PermAutomationRead,
+	PermNotificationRead,
 }
 
 // operatorPermissions are what an Operator adds to the Viewer set.
@@ -399,6 +425,7 @@ var operatorPermissions = []Permission{
 // administratorPermissions are what an Administrator adds to the Operator set.
 var administratorPermissions = []Permission{
 	PermAutomationManage,
+	PermNotificationManage,
 	PermPolicyManage,
 	PermUserManage,
 	PermAuditRead,

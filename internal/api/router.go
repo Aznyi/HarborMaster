@@ -81,6 +81,12 @@ type Server struct {
 	// conflating them would let one edit turn a reporting rule into a mutation
 	// rule.
 	updatePolicies UpdatePolicyService
+	// notifications answers the delivery-history endpoints, and
+	// notificationAdmin the configuration ones. Separate for the reason the two
+	// automation fields are: reading what was sent is a permission every role
+	// holds, and configuring where things are sent is an administrator's.
+	notifications     NotificationReader
+	notificationAdmin NotificationAdmin
 
 	// auth resolves sessions and answers the authentication endpoints. A nil
 	// auth serves the public routes and refuses everything else with 503 --
@@ -248,6 +254,15 @@ type Options struct {
 	// able to write and review their rules before switching automation on,
 	// which is the order those two things should be done in.
 	UpdatePolicies UpdatePolicyService
+	// Notifications answers the delivery-history endpoints. Nil disables them.
+	//
+	// Non-nil even on a deployment with sending switched off: the history and
+	// the destination list stay readable so an administrator can configure and
+	// review before turning delivery on.
+	Notifications NotificationReader
+	// NotificationAdmin answers the destination and rule endpoints. Nil
+	// disables them.
+	NotificationAdmin NotificationAdmin
 
 	// Auth resolves sessions and answers the authentication endpoints.
 	//
@@ -317,8 +332,10 @@ func NewServer(opts Options) *Server {
 		executions:   opts.Executions,
 		rollbacks:    opts.Rollbacks,
 
-		automation:     opts.Automation,
-		updatePolicies: opts.UpdatePolicies,
+		automation:        opts.Automation,
+		updatePolicies:    opts.UpdatePolicies,
+		notifications:     opts.Notifications,
+		notificationAdmin: opts.NotificationAdmin,
 
 		auth:    opts.Auth,
 		users:   opts.Users,

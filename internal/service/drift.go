@@ -101,6 +101,11 @@ type DriftOptions struct {
 	SpecBuilder func(domain.ContainerDetail) domain.SnapshotSpec
 
 	Config config.Drift
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	Logger *slog.Logger
 	Now    func() time.Time
 }
@@ -127,9 +132,10 @@ type DriftService struct {
 	// starve the foreground.
 	diffs *DiffEngine
 
-	cfg    config.Drift
-	logger *slog.Logger
-	now    func() time.Time
+	cfg      config.Drift
+	notifier Notifier
+	logger   *slog.Logger
+	now      func() time.Time
 
 	// sweeping guards the full sweep so two cannot overlap. A second sweep
 	// while one runs would re-read the same containers and contend for the
@@ -182,6 +188,7 @@ func NewDriftService(opts DriftOptions) *DriftService {
 		diffs:      NewDiffEngine(diffCfg),
 		queue:      newEvaluationQueue(cfg.EvaluationDebounce, cfg.MaxPendingEvaluations, now),
 		cfg:        cfg,
+		notifier:   opts.Notify,
 		logger:     logger,
 		now:        now,
 	}
@@ -383,7 +390,30 @@ func (s *DriftService) persist(
 			slog.Int("resolved", result.Resolved),
 			slog.Bool("complete", evaluation.Complete))
 	}
+
+	// Only NEW drift. `Inserted` is what the reconciliation decided had not
+	// been seen before, so a sweep every five minutes over a container that
+	// drifted once says so once rather than nurturing a grudge.
+	if result.Inserted > 0 {
+		NotifyDriftDetected(s.notifier, evaluation.ContainerName,
+			result.Inserted, string(maxDriftSeverity(records)))
+	}
 	return evaluation, nil
+}
+
+// maxDriftSeverity is the worst severity in a set of records.
+//
+// What a notification leads with: "four changes, one of them critical" is a
+// different message from "four changes, all cosmetic", and an operator reading
+// a phone at midnight needs the difference in the first line.
+func maxDriftSeverity(records []domain.DriftRecord) domain.DriftSeverity {
+	worst := domain.DriftSeverityLow
+	for _, record := range records {
+		if record.Severity.Rank() > worst.Rank() {
+			worst = record.Severity
+		}
+	}
+	return worst
 }
 
 // driftWriteGrace and driftWriteMax bound the persistence write at shutdown.

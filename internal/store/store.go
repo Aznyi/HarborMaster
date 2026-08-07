@@ -114,6 +114,12 @@ type DB struct {
 	// safety logic reads. Bookkeeping only: nothing on it can change a host.
 	Automation *AutomationRepository
 
+	// Notifications holds notification destinations, routing rules, and the
+	// delivery record. The one repository in the project that stores a
+	// credential in the clear -- a webhook URL has to be usable -- and it is
+	// readable through exactly one method, called only by the sender.
+	Notifications *NotificationRepository
+
 	// Users holds accounts, their password verifiers, and the bootstrap state
 	// that says whether this installation has been claimed.
 	Users *UserRepository
@@ -336,6 +342,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 
 		UpdatePolicies: &UpdatePolicyRepository{db: sqlDB},
 		Automation:     &AutomationRepository{db: sqlDB},
+		Notifications:  &NotificationRepository{db: sqlDB},
 
 		Users:    &UserRepository{db: sqlDB},
 		Sessions: &SessionRepository{db: sqlDB},

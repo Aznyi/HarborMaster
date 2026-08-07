@@ -142,6 +142,16 @@ type ExecutionOptions struct {
 	// makes preservation UNVERIFIABLE, which fails closed rather than passing.
 	Hasher *Hasher
 
+	// Self reports which container HarborMaster is running in. The LAST line of
+	// the self-update defence, and the one that matters most: this is the layer
+	// that actually stops a container.
+	Self SelfReporter
+
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	Notify Notifier
+
 	// Audit records what a finished recreation did to the host, attributed to
 	// the account that asked for it. Nil records nothing, which is correct for
 	// a test but not for a deployment.
@@ -160,8 +170,11 @@ type ExecutionService struct {
 	capturer docker.ConfigCapturer
 	mutator  docker.ContainerMutator
 	hasher   *Hasher
+	// self reports HarborMaster's own container. Read on every preflight.
+	notifier Notifier
+	self     SelfReporter
 	// audit records the OUTCOME of a recreation in the security log. Nil in a
-	// test that is not about attribution; auditOutcome is nil-safe.
+	// test that is not about attribution; reportOutcome is nil-safe.
 	audit *AuditRecorder
 
 	cfg    config.Execution
@@ -235,6 +248,8 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		capturer:   opts.Capturer,
 		mutator:    opts.Mutator,
 		hasher:     opts.Hasher,
+		notifier:   opts.Notify,
+		self:       opts.Self,
 		audit:      opts.Audit,
 		cfg:        cfg,
 		logger:     logger,
@@ -293,7 +308,7 @@ type ExecutionRequest struct {
 
 	// RequestedBy is the account asking. Stored on the record so the OUTCOME
 	// can be attributed minutes later by a worker that has no request and no
-	// session; see auditOutcome.
+	// session; see reportOutcome.
 	RequestedBy domain.Requester
 }
 

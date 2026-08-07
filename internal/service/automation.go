@@ -138,6 +138,25 @@ type AutomationEvidence interface {
 	InFlightTotal(ctx context.Context) (int, error)
 }
 
+// SelfReporter tells the engine which container HarborMaster is running in.
+//
+// One method, and it returns a value rather than accepting one: the engine may
+// ASK what HarborMaster is and may never assert it.
+type SelfReporter interface {
+	Identity() domain.SelfIdentity
+}
+
+// selfIdentity reads the identity, tolerating an unwired reporter.
+//
+// The zero identity matches nothing, so a nil reporter degrades to "the engine
+// does not know" rather than to "the engine excludes everything" or to a panic.
+func (s *AutomationService) selfIdentity() domain.SelfIdentity {
+	if s.self == nil {
+		return domain.SelfIdentity{}
+	}
+	return s.self.Identity()
+}
+
 // AutomationPipeline is the three services a pass and the follower submit to.
 //
 // The whole mutation surface of this subsystem, in one interface, so a reader
@@ -168,9 +187,24 @@ type AutomationOptions struct {
 	Evidence AutomationEvidence
 	Pipeline AutomationPipeline
 
+	// Self reports which container HarborMaster is running in, so a pass can
+	// refuse to update it. Nil means the zero identity, which matches nothing --
+	// and the execution service refuses independently, so a build without this
+	// wired is still protected.
+	Self SelfReporter
+
 	// Audit records policy administration, passes, pauses, and approvals. The
 	// mutations themselves are audited by the services that perform them.
 	Audit *AuditRecorder
+
+	// Notify raises operator notifications. Nil sends none, which is the default:
+	// notifications are off unless a deployment asks for them, and every service
+	// must behave identically without one.
+	//
+	// A Notifier is NOT a capability. It is one method that puts a message on a
+	// queue, and there is nothing on it that can reach Docker -- the engine's
+	// whole ability to affect the host remains AutomationPipeline.
+	Notify Notifier
 
 	Config config.Automation
 	Logger *slog.Logger
@@ -183,7 +217,9 @@ type AutomationService struct {
 	policies AutomationPolicyStore
 	evidence AutomationEvidence
 	pipeline AutomationPipeline
+	self     SelfReporter
 	audit    *AuditRecorder
+	notifier Notifier
 
 	cfg    config.Automation
 	logger *slog.Logger
@@ -239,7 +275,9 @@ func NewAutomationService(opts AutomationOptions) *AutomationService {
 		policies: opts.Policies,
 		evidence: opts.Evidence,
 		pipeline: opts.Pipeline,
+		self:     opts.Self,
 		audit:    opts.Audit,
+		notifier: opts.Notify,
 		cfg:      cfg,
 		logger:   logger,
 		now:      now,
@@ -485,6 +523,14 @@ func (s *AutomationService) pass(
 			s.logger.ErrorContext(ctx, "could not record automation decisions",
 				slog.String("runId", run.RunID), slog.Any("error", err))
 		}
+		s.notifyDecisions(decisions)
+	}
+
+	if passErr != nil {
+		// HarborMaster's own sentence, the same one the run record carries.
+		// Never the underlying error, which can carry a daemon or registry
+		// string.
+		NotifySchedulerError(s.notifier, "pass", counts.Message)
 	}
 
 	if err := s.store.FinishRun(ctx, run.RunID, state, counts, finished); err != nil {
@@ -517,6 +563,56 @@ func (s *AutomationService) pass(
 
 	return run, decisions, passErr
 }
+
+// notifyDecisions raises the notifications a pass's reasoning implies.
+//
+// Only ONE kind: an update that will not happen until a person approves it.
+// Every other verdict is either something that already produced its own
+// notification -- a submitted update raises acquisition and execution events of
+// its own -- or something nobody wants a message about, and a pass over two
+// hundred containers that raised two hundred messages would be a subsystem an
+// operator switched off within a day.
+//
+// Bounded, because a pass's decision count is bounded by the estate rather than
+// by anything HarborMaster chose. Past the bound the rest are counted into one
+// message instead of dropped silently.
+func (s *AutomationService) notifyDecisions(decisions []domain.AutomationDecision) {
+	if s.notifier == nil {
+		return
+	}
+
+	raised := 0
+	pending := 0
+	for _, decision := range decisions {
+		if decision.Verdict != domain.VerdictAwaitingApproval {
+			continue
+		}
+		pending++
+		if raised >= maxApprovalNotificationsPerPass {
+			continue
+		}
+		raised++
+		NotifyApprovalRequired(s.notifier, decision.ContainerName,
+			decision.PlanID, decision.Detail)
+	}
+
+	if pending > raised {
+		s.logger.Info("more updates await approval than were notified individually",
+			slog.Int("awaitingApproval", pending),
+			slog.Int("notified", raised))
+		NotifySchedulerError(s.notifier, "approvals",
+			"More updates are waiting for approval than HarborMaster sends "+
+				"individual messages for. See the automation page for the full list.")
+	}
+}
+
+// maxApprovalNotificationsPerPass bounds how many approval messages one pass
+// sends.
+//
+// A first run against an estate that has never been updated can produce a
+// decision per container. Twenty messages is a prompt; two hundred is a reason
+// to turn notifications off.
+const maxApprovalNotificationsPerPass = 20
 
 // decide evaluates every container and submits what may be submitted.
 func (s *AutomationService) decide(
@@ -561,6 +657,9 @@ func (s *AutomationService) decide(
 	// by a millisecond must not get different answers because time moved
 	// between them.
 	now := s.now().UTC()
+	// And one identity reading, for the same reason: a refresh landing mid-pass
+	// must not make the engine exclude a container it already considered.
+	self := s.selfIdentity()
 
 	budget := NewAutomationBudget(s.cfg.MaxPerRun, s.cfg.MaxConcurrent, inFlight, registryOfReference)
 
@@ -577,6 +676,7 @@ func (s *AutomationService) decide(
 			Policies:                policies,
 			Now:                     now,
 			RequireApprovalForMajor: s.cfg.RequireApprovalForMajor,
+			Self:                    self,
 		}
 		if pause, paused := pausedBy[target.Selection.Name]; paused {
 			input.Pause, input.IsPaused = pause, true

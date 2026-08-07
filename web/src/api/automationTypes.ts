@@ -411,6 +411,32 @@ export interface AutomationStatus {
   windowOpen?: boolean;
   nextWindowOpensAt?: string;
   nextWindowPolicyId?: string;
+  /** The container HarborMaster is running in, and refuses to update. */
+  self?: SelfIdentity;
+}
+
+/**
+ * The container HarborMaster believes it is running in.
+ *
+ * # HarborMaster cannot update itself, and this is not configurable
+ *
+ * There is no setting that permits it. Acquisition and recreation refuse at
+ * four independent layers, and an architecture test fails the build on a
+ * configuration flag that would turn any of them off. Update HarborMaster from
+ * outside it: `docker compose pull && docker compose up -d`.
+ *
+ * Every field is optional, and an EMPTY field matches nothing. A partial
+ * identification therefore never excludes the wrong container, and a wholly
+ * empty identity — HarborMaster running outside a container — excludes nothing.
+ */
+export interface SelfIdentity {
+  containerId?: string;
+  containerName?: string;
+  imageRef?: string;
+  imageId?: string;
+  source?: "configured" | "runtime" | "hostname" | "label" | "none";
+  /** HarborMaster's own sentence about how it decided. */
+  detail?: string;
 }
 
 export interface AutomationStatusResponse {

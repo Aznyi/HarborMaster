@@ -98,6 +98,14 @@ var routedPaths = []string{
 	APIPrefix + "/inventory/filters",
 	APIPrefix + "/inventory/refresh",
 	APIPrefix + "/networks",
+	APIPrefix + "/notifications",
+	APIPrefix + "/notifications/deliveries",
+	APIPrefix + "/notifications/deliveries/{id}",
+	APIPrefix + "/notifications/destinations",
+	APIPrefix + "/notifications/destinations/{id}",
+	APIPrefix + "/notifications/destinations/{id}/test",
+	APIPrefix + "/notifications/rules",
+	APIPrefix + "/notifications/rules/{id}",
 	APIPrefix + "/plans",
 	APIPrefix + "/plans/container/{id}",
 	APIPrefix + "/plans/generate",
@@ -234,7 +242,8 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/automation/run",
 			APIPrefix + "/automation/approve",
 			APIPrefix + "/automation/pause",
-			APIPrefix + "/automation/resume":
+			APIPrefix + "/automation/resume",
+			APIPrefix + "/notifications/destinations/{id}/test":
 			method = http.MethodPost
 		}
 
@@ -274,6 +283,43 @@ func TestNoEventPathAcceptsAWriteMethod(t *testing.T) {
 				t.Errorf("%s %s returned %d; every event endpoint must reject writes",
 					method, target, rec.Code)
 			}
+		}
+	}
+}
+
+// The literal above must cover the router, or a route added without documenting
+// it passes vacuously.
+//
+// # Why this test exists
+//
+// TestOpenAPIDocumentsExactlyTheRoutedPaths compares the specification against
+// the LITERAL, and TestEveryDocumentedPathIsReachable proves each entry in the
+// literal answers. Neither notices a route that is in the router and in neither
+// of the other two -- which is precisely what a new endpoint is on the day it
+// is written. This closes the loop.
+func TestTheRoutedPathLiteralCoversTheRouter(t *testing.T) {
+	listed := make(map[string]bool, len(routedPaths))
+	for _, path := range routedPaths {
+		listed[path] = true
+	}
+
+	seen := make(map[string]bool)
+	for _, route := range (&Server{}).routeTable() {
+		if !strings.HasPrefix(route.pattern, APIPrefix) || seen[route.pattern] {
+			continue
+		}
+		seen[route.pattern] = true
+		if !listed[route.pattern] {
+			t.Errorf("the router serves %s, which is not in routedPaths\n"+
+				"\tadd it there and document it in api/openapi.yaml; an endpoint "+
+				"that is in neither is one nobody outside this codebase can find",
+				route.pattern)
+		}
+	}
+
+	for _, path := range routedPaths {
+		if !seen[path] {
+			t.Errorf("routedPaths lists %s, which the router does not serve", path)
 		}
 	}
 }

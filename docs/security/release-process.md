@@ -38,7 +38,28 @@ filter: that would hide the next genuine instance of the same rule.
 
 | Rule | Location | Why it is accepted |
 | --- | --- | --- |
-| `go/cookie-secure-not-set` (CWE-614) | `internal/api/auth_middleware.go`, in `expireCookie` | The cookie carries an EMPTY value and a negative `Max-Age`; its only purpose is to make the browser delete the one that did carry a token, and there is nothing in it to protect in transit. It cannot be written with `Secure` unconditionally: a browser IGNORES a Secure cookie that arrives over plain HTTP, so on a loopback deployment without TLS the deletion would be silently dropped and the dead token would stay in the browser. The cookie that carries the session token is a different call site and is marked Secure on every path except a loopback request without TLS. |
+| *(none)* | | |
+
+**The table is empty, and it took a fix to get there.**
+
+`go/cookie-secure-not-set` sat here for three phases with a paragraph of
+justification: the flagged cookie carries an empty value and a negative
+`Max-Age`, its only purpose is to delete the one that did carry a token, and it
+could not be written with `Secure` unconditionally because a browser rejects a
+Secure cookie set from an insecure origin — so on a plain-HTTP loopback
+deployment the deletion would be silently dropped and the dead token would stay
+in the browser.
+
+Every sentence of that was true, and the conclusion was still wrong. A cookie's
+identity is its NAME, DOMAIN, and PATH; `Secure` is a property of the cookie
+being written, not part of what it matches. So a Secure deletion removes a
+non-Secure cookie of the same name, and the deletion could simply follow the
+CONNECTION: Secure over HTTPS, not over plain HTTP. The loopback case behaves
+exactly as before and the HTTPS case got better.
+
+The lesson is worth more than the fix. **A justification that survives review
+is not the same as a justification that is the best available answer**, and a
+row in this table is a standing invitation to stop looking. Prefer a fix.
 
 A reviewer adding a row here is asserting that they read the query's intent and
 the code, not that the alert was inconvenient. If the justification takes more
