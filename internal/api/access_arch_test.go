@@ -111,11 +111,21 @@ var writeMethods = map[string]bool{
 // auditedElsewhere lists write routes whose audit record is written by the
 // SERVICE rather than by the handler, with the reason.
 //
-// Every entry is an authentication path. The service writes the row because it
-// knows things the handler must never see: which of several credential
-// failures occurred, whether a session was superseded, how many sessions a
-// password change revoked. A handler-side record would either be less accurate
-// or would require handing the handler that detail.
+// Two groups.
+//
+// The AUTHENTICATION paths, where the service writes the row because it knows
+// things the handler must never see: which of several credential failures
+// occurred, whether a session was superseded, how many sessions a password
+// change revoked. A handler-side record would either be less accurate or would
+// require handing the handler that detail.
+//
+// The AUTOMATION paths, for the same reason in a different shape. A handler
+// cannot know whether an approval was refused because the plan moved on or
+// because the container is paused, whether a pass submitted anything, or which
+// fields a policy edit actually changed -- and those are exactly what the audit
+// reason has to say. Each of these services takes a service.Actor built by
+// s.actorFrom(r) and calls RecordAction with it, so the actor still comes from
+// the request.
 var auditedElsewhere = map[string]string{
 	APIPrefix + "/auth/login":                "AuthService.Login records success, failure, and the reason",
 	APIPrefix + "/auth/logout":               "AuthService.Logout records the revocation",
@@ -125,6 +135,13 @@ var auditedElsewhere = map[string]string{
 	APIPrefix + "/users":                     "UserService.Create records the account and its role",
 	APIPrefix + "/users/{id}":                "UserService.SetRole and SetStatus record the change",
 	APIPrefix + "/users/{id}/password-reset": "UserService.ResetPassword records the reset",
+
+	APIPrefix + "/update-policies":      "UpdatePolicyService.Create records the mode and strategy the rule was created with",
+	APIPrefix + "/update-policies/{id}": "UpdatePolicyService.Update and Archive record which fields moved",
+	APIPrefix + "/automation/run":       "AutomationService records the pass, and its counters, once it knows them",
+	APIPrefix + "/automation/approve":   "AutomationService.Approve records the release, and the refusal when the plan moved on",
+	APIPrefix + "/automation/pause":     "AutomationService.PauseContainer records the pause",
+	APIPrefix + "/automation/resume":    "AutomationService.Resume records who cleared it",
 }
 
 // TestEveryWriteRouteIsAudited fails if a state-changing route neither calls

@@ -27,6 +27,18 @@ import (
 	"syscall"
 	"time"
 
+	// The IANA timezone database, embedded in the binary.
+	//
+	// A maintenance window carries an IANA zone and every comparison is made in
+	// it. The runtime image is distroless and carries no system zoneinfo, so
+	// without this import every named zone would fail to load, every window
+	// would correctly-but-uselessly fail closed, and automation would never act
+	// on any deployment that named one.
+	//
+	// Roughly 450 KB of binary, paid once, for a subsystem whose safety
+	// property depends on getting "02:00 in Europe/London" right twice a year.
+	_ "time/tzdata"
+
 	"github.com/Aznyi/HarborMaster/internal/api"
 	"github.com/Aznyi/HarborMaster/internal/config"
 	"github.com/Aznyi/HarborMaster/internal/diagnostics"
@@ -611,6 +623,54 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Update policies.
+	//
+	// Administration only. Creating a rule records an intention; whether that
+	// intention is ever acted on is the engine's business, and the engine
+	// re-reads the policies from the database on every pass.
+	//
+	// Wired even when the ENGINE is off, deliberately: an operator must be able
+	// to write and review their rules before switching automation on, which is
+	// the order those two things should be done in.
+	updatePolicies := service.NewUpdatePolicyService(service.UpdatePolicyOptions{
+		Store:  db.UpdatePolicies,
+		Audit:  auditRecorder,
+		Limits: domain.DefaultUpdatePolicyLimits(),
+		Logger: logger,
+	})
+
+	// THE AUTOMATION ENGINE.
+	//
+	// The first subsystem that can cause this host to change with nobody
+	// watching -- and note what is NOT handed to it here. There is no
+	// dockerClient, no capability interface, and nowhere on AutomationOptions
+	// to put one. Its whole ability to affect the host is the pipeline adapter
+	// below, which forwards three request types to the three services that
+	// already hold their own capabilities and run their own preflights.
+	//
+	// So automation is a CALLER. It submits exactly the requests an operator's
+	// HTTP request submits, and every one of them is re-validated against the
+	// live host at the moment it acts. Four architecture tests pin this.
+	//
+	// Off unless the deployment asked for it, and configuration validation
+	// refuses to start with automation on and either recreation or rollback
+	// off: automation submits recreations, and an unattended update that fails
+	// verification must be able to put the container back.
+	automation := service.NewAutomationService(service.AutomationOptions{
+		Store:    db.Automation,
+		Policies: db.UpdatePolicies,
+		Evidence: service.NewAutomationEvidence(
+			db.Containers, db.Plans, db.Acquisitions, db.Executions),
+		Pipeline: service.NewAutomationPipeline(acquisitions, executions, rollbacks),
+		// The passes, the pauses, and the approvals reach the security audit
+		// log. The MUTATIONS are audited by the services that perform them --
+		// auditing them twice would make the host-change counter over-report
+		// the one number an administrator most needs to trust.
+		Audit:  auditRecorder,
+		Config: cfg.Automation,
+		Logger: logger,
+	})
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -652,7 +712,7 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(12)
+	background.Add(13)
 
 	go func() {
 		defer background.Done()
@@ -693,6 +753,10 @@ func run() error {
 	go func() {
 		defer background.Done()
 		rollbacks.Run(ctx)
+	}()
+	go func() {
+		defer background.Done()
+		automation.Run(ctx)
 	}()
 	go func() {
 		defer background.Done()
@@ -741,6 +805,9 @@ func run() error {
 		Acquisitions: acquisitions,
 		Executions:   executions,
 		Rollbacks:    rollbacks,
+
+		Automation:     automation,
+		UpdatePolicies: updatePolicies,
 
 		Auth:       auth,
 		Users:      users,

@@ -10,6 +10,9 @@ import { Account } from "./pages/Account";
 import { AcquisitionDetail } from "./pages/AcquisitionDetail";
 import { Acquisitions } from "./pages/Acquisitions";
 import { Audit } from "./pages/Audit";
+import { Automation } from "./pages/Automation";
+import { AutomationPaused } from "./pages/AutomationPaused";
+import { AutomationRun } from "./pages/AutomationRun";
 import { ChangePassword } from "./pages/ChangePassword";
 import { ClaimInstallation } from "./pages/ClaimInstallation";
 import { ExecutionDetail } from "./pages/ExecutionDetail";
@@ -35,6 +38,7 @@ import { SignIn } from "./pages/SignIn";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
 import { Snapshots } from "./pages/Snapshots";
+import { UpdatePolicies } from "./pages/UpdatePolicies";
 import { Users } from "./pages/Users";
 
 /**
@@ -181,6 +185,23 @@ function AuthenticatedApp() {
         <Route
           path="/rollbacks/:id"
           element={<Guard permission="rollback:read"><RollbackDetail /></Guard>}
+        />
+
+        <Route
+          path="/automation"
+          element={<Guard permission="automation:read"><Automation /></Guard>}
+        />
+        <Route
+          path="/automation/runs/:id"
+          element={<Guard permission="automation:read"><AutomationRun /></Guard>}
+        />
+        <Route
+          path="/automation/paused"
+          element={<Guard permission="automation:read"><AutomationPaused /></Guard>}
+        />
+        <Route
+          path="/update-policies"
+          element={<Guard permission="automation:read"><UpdatePolicies /></Guard>}
         />
 
         <Route path="/events" element={<Guard permission="event:read"><Events /></Guard>} />

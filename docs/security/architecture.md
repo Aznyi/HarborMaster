@@ -464,6 +464,237 @@ recovery plan.
 - **A check that could not be PERFORMED is not a pass.** An unreadable container
   listing refuses the rollback rather than assuming the production name is free.
 
+## 3g-bis. Automated updates
+
+Phase 11 broke the premise every earlier phase rested on: that nothing changes
+the host unless a person asked. It broke it on purpose, because "a safer
+replacement for Watchtower" is not a thing HarborMaster can be without it.
+
+What it did NOT break is everything that premise was protecting, and this
+section is the argument for why.
+
+### The engine is a caller, not a capability
+
+The automation service holds **no Docker interface**. There is no field on
+`service.AutomationOptions` for a runtime, an acquirer, a mutator, a capturer,
+or a rollbacker, and none of the automation source names one. Its entire ability
+to affect the host is one interface with five methods:
+
+```
+AutomationPipeline
+    RequestAcquisition(AcquisitionRequest{PlanID, RequestKey, RequestedBy})
+    RequestExecution(ExecutionRequest{AcquisitionID, RequestKey, RequestedBy})
+    RequestRollback(RollbackRequest{ExecutionID, RequestKey, RequestedBy})
+    Acquisition(id)   // read
+    Execution(id)     // read
+```
+
+Those are the same three request types an HTTP handler builds. Each is submitted
+to the same service, which runs the same full preflight against the LIVE host at
+the moment it acts. Automation therefore cannot skip the planner, the digest
+verification, the platform check, the configuration-preservation comparison, the
+health proof, or the checkpoint discipline — because it does not implement any
+of them.
+
+Eight tests in `internal/arch/automation_arch_test.go` hold this: the options
+struct carries no capability, the source names none, the source performs no
+Docker operation, the pipeline is exactly those methods, the evidence interface
+has no write, no request type carries a caller-chosen target, the three request
+shapes are unchanged, and no package outside the engine and the composition root
+may name the pipeline.
+
+### Two loops, and why the split matters
+
+A **decision pass** asks "what should change" and submits acquisitions. A
+**follower** asks "what happened to what I already asked for" and advances it:
+acquisition succeeded, so request the recreation; recreation failed
+verification, so submit the rollback.
+
+They are separate because they have different deadlines, and because the second
+must survive a restart. The follower holds NO in-memory state: every tick it
+re-reads the decisions of the most recent passes from the database, looks up
+what happened to the records they name, and takes the one next step each is
+owed. Restarting HarborMaster mid-update loses nothing.
+
+A pass that a restart cut short is marked `interrupted` at the next startup.
+That is a bookkeeping gap and never a host in an unknown state — a pass submits
+work to services that checkpoint their own.
+
+### Ten checks, in an order that is the security design
+
+`service.DecideAutomation` is a **pure function**: no clock of its own, no
+database, no Docker. Every input arrives as a parameter and the result is a
+decision record carrying a closed-vocabulary reason. That is what lets the most
+consequential judgement HarborMaster makes be tested exhaustively without a
+host, and what makes its answer for a given world identical on every pass.
+
+The order is cheapest and most absolute first, so a container that must never be
+touched is refused before anything expensive or fallible runs:
+
+1. **Paused** — HarborMaster already decided not to. Checked before the policy
+   lookup, so a policy edit cannot clear a pause.
+2. **Label opt-out** — the container's owner already decided not to. Read before
+   the policy is selected, so the label means the same thing whatever the policy
+   set looks like.
+3. **Policy selection** — nothing governs it.
+4. **Policy disabled.**
+5. **A current change plan exists** — the planner has assessed this container.
+6. **The plan proposes a change**, and its proposed reference and digest were
+   resolved together. The Phase 10.1 defect class is re-checked here as well as
+   in the acquisition preflight.
+7. **Strategy ceiling** — the change is no larger than the policy permits.
+   `unknown` and `prerelease` are permitted by no strategy: an update
+   HarborMaster could not size is exactly what a ceiling is for.
+8. **Recommendation** — an ALLOWLIST comparison, not an ordering. Only `proceed`
+   and `proceedWithCaution` can gate automation; the other three verdicts mean a
+   person has to look.
+9. **Maintenance window** — evaluated in the window's own IANA timezone, and
+   **fails closed**: a zone this host cannot resolve authorises nothing.
+10. **Nothing already in flight** for this container.
+
+Only then is the mode consulted, and only `automatic` acts. An unrecognised mode
+fails closed rather than falling through into the branch that changes the host.
+
+### One clock reading per pass
+
+A pass takes a single `now` and decides every container against it. Two
+containers whose windows differ by a millisecond must not get different answers
+because time moved between them.
+
+### The window is the part that is harder than it looks
+
+"Update between 02:00 and 04:00 on weekends" is three problems: whose 02:00,
+which day when the window crosses midnight, and what happens on a DST boundary.
+`domain.MaintenanceWindow` converts the instant into the window's zone FIRST and
+compares minutes-of-day after, which makes a spring-forward gap and an
+autumn-back repeat both come out right without either being special-cased. A
+window that crosses midnight is two spans, and the weekday that governs the
+morning half is the one the window STARTED on.
+
+The runtime image is distroless and carries no system zoneinfo, so
+`cmd/harbormaster` imports `time/tzdata`. Without it every named zone would fail
+to load and every window would correctly-but-uselessly fail closed.
+
+### Labels may only ever make automation safer
+
+Precedence is `container label → policy → built-in default`, implemented in one
+function, `domain.Resolve`. The asymmetry is deliberate and load-bearing:
+
+- `enabled=false` and `pause=true` always win.
+- `enabled=true` **cannot enrol** a container no policy selected. A label is set
+  by whoever can run `docker run`; if that were enough to opt a container into
+  unattended updates, then anyone able to start a container could decide
+  HarborMaster should start changing it.
+- `strategy` may only NARROW. A container cannot label its way from `patch` to
+  `major`, and an unrecognised strategy ranks as the most permissive so it is
+  never adopted.
+- There is **no label for the mode**. Mode is the setting that decides whether
+  the host may be touched at all, and it is a policy's alone.
+
+Unknown and unreadable `io.harbormaster.update.*` keys are reported rather than
+dropped: a misspelled safety label that silently does nothing is worse than one
+that complains.
+
+### Automatic rollback, and why it always pauses
+
+When a recreation fails verification and the governing policy permits it, the
+engine submits the rollback an operator would have submitted — the same
+`RollbackRequest{ExecutionID}`, to the same service, which re-verifies both
+container identities against the live host before anything moves. There is no
+new rollback logic.
+
+A rollback then **always** pauses the container, whatever the failure counters
+say and whatever cooldown the policy configures. The change was wrong AND the
+host was moved twice to discover that, and an engine that retries such a thing
+on a timer is how one bad image becomes a repeated outage.
+
+The rollback decision fails closed in three places: the capability must exist in
+the deployment, the recreation must have reached a checkpoint that leaves an
+arrangement to undo, and the governing policy must be re-readable and still
+permit it. A policy withdrawn between the decision and the failure is not an
+authorisation to act.
+
+### Pauses are keyed on the NAME
+
+A container's id changes every time it is recreated, and recreation is exactly
+what automation does. A pause keyed on the id would be cleared by the very
+action that went wrong. The id is kept for the audit trail only.
+
+A pause with no cooldown is cleared only by an acknowledgement, which records
+who made it and resets the container's failure counters — an operator who
+investigated and fixed the problem must not be one failure away from the same
+pause.
+
+### Every pass is recorded, including the ones that did nothing
+
+The hardest question an operator asks an automation system is "why did you not
+update that container", and it is unanswerable unless the reasoning was recorded
+at the moment it happened, from the evidence it happened on. So every pass
+writes a run row BEFORE it examines anything, and every container it considered
+gets a decision row with a closed-vocabulary reason. Both survive the containers
+they describe, and both survive the policy being withdrawn.
+
+Retention is therefore not optional: `AUTOMATION_RETENTION_AGE` prunes runs and
+their decisions cascade.
+
+### What the schema makes unrepresentable
+
+- A decision naming an execution without an acquisition, or a rollback without
+  an execution. The pipeline's ordering, refused in reverse.
+- A `wouldUpdate` decision that names an acquisition. Observe and dry run
+  cannot have acted, enforced by the database as well as by the engine.
+- A second running pass. A single-run rule that holds across processes and
+  across a restart.
+- A second active pause for one container, by partial unique index.
+- A pause acknowledged by nobody.
+- A policy whose `minimum_recommendation` is a verdict that asks for human
+  review.
+
+### Five conclusions the engine refuses to draw
+
+- **A container the planner has not assessed is not updatable.** No plan is a
+  reason, not an error.
+- **An update whose size is unknown is not a small update.** No strategy permits
+  `unknown` or `prerelease`.
+- **A window nobody can evaluate is not open.** An unresolvable timezone refuses.
+- **A policy that cannot be re-read does not authorise a second mutation.** The
+  rollback check fails closed.
+- **A failure that left the host unchanged is not something to roll back.** A
+  refused preflight and a failed pull are counted, not undone.
+
+### Authorization is four permissions, not one
+
+`automation:read` is held by every role: automation changes the host without
+being asked, and a viewer who cannot see what it decided cannot answer the
+question their role exists for.
+
+`automation:run` and `automation:pause` are operator permissions. A manual pass
+submits exactly the work the scheduled pass would have submitted a few minutes
+later — it changes WHEN, not WHETHER. Pausing is a safety action anyone
+operating the host should be able to take immediately, and resuming shares the
+permission so the safe state is not the inconvenient one.
+
+`automation:approve` is an operator permission and is marked **privileged**: the
+approver releases a change that will stop and replace a running container.
+
+`automation:manage` — writing update policies — is an ADMINISTRATOR permission,
+for the reason `policy:manage` is. An update policy is a standing, unattended
+grant of `execution:create` over every container a selector reaches, and an
+operator able to write one would be granting it to themselves.
+
+### Approval re-derives rather than trusts
+
+A held decision may be minutes or hours old. Before submitting, the engine
+re-reads the container's CURRENT change plan and refuses if it no longer matches
+the one the decision named. Approving a proposal is approving THAT proposal, and
+a registry that republished a tag in the meantime has made it a different one.
+A paused container is not approvable either: clearing a pause is a separate,
+deliberate act.
+
+The approval endpoint takes a run id and a container NAME, and neither chooses a
+target — together they SELECT one of HarborMaster's own held decisions. A name
+matching no held decision approves nothing.
+
 ## 3h. Identity, authorization, and audit
 
 Phase 9.5 closed the boundary every earlier phase was compensating for. Before

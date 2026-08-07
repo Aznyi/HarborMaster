@@ -87,6 +87,20 @@ import type {
   ExecutionRequest,
 } from "./executionTypes";
 import type {
+  AutomationDecision,
+  AutomationPauseListResponse,
+  AutomationRunDetailResponse,
+  AutomationRunListResponse,
+  AutomationRunQuery,
+  AutomationStatusResponse,
+  AutomationUpcomingResponse,
+  PausedContainer,
+  UpdatePolicyListResponse,
+  UpdatePolicyQuery,
+  UpdatePolicyRequest,
+  UpdatePolicyResult,
+} from "./automationTypes";
+import type {
   Rollback,
   RollbackDetailResponse,
   RollbackListResponse,
@@ -1630,4 +1644,244 @@ export function listAuditEvents(
 /** GET /api/v1/audit/summary */
 export function getAuditSummary(options?: RequestOptions): Promise<AuditSummary> {
   return request<AuditSummary>("/audit/summary", options);
+}
+
+/* ----------------------------------------------------------- automation -- */
+
+/**
+ * The update engine, and the rules that drive it.
+ *
+ * **This is the only part of the API that can cause a host change nobody is
+ * watching.** Read the request bodies below and note what they cannot say:
+ * running a pass takes a boolean, approving takes a run id and a container name
+ * that must match a decision the server already recorded, and pausing takes a
+ * container name the inventory already knows.
+ *
+ * There is no function here that takes an image, a tag, a digest, or a
+ * registry, and no server route that would accept one.
+ *
+ * There is also no call that removes a policy row: `archiveUpdatePolicy`
+ * withdraws a rule and keeps the record of what it caused, because an auditor
+ * asking what changed the estate last quarter must not get a different answer
+ * because somebody tidied up this quarter.
+ */
+
+/** Builds the update policy listing query string from closed vocabularies. */
+function buildUpdatePolicyQuery(query: UpdatePolicyQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.order) params.set("order", query.order);
+  if (query.enabled !== undefined) params.set("enabled", String(query.enabled));
+  if (query.includeArchived !== undefined) {
+    params.set("includeArchived", String(query.includeArchived));
+  }
+  if (query.search) params.set("search", query.search);
+
+  for (const mode of query.mode ?? []) params.append("mode", mode);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/update-policies */
+export function listUpdatePolicies(
+  query: UpdatePolicyQuery = {},
+  options?: RequestOptions,
+): Promise<UpdatePolicyListResponse> {
+  return request<UpdatePolicyListResponse>(
+    `/update-policies${buildUpdatePolicyQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/update-policies/{id} */
+export function getUpdatePolicy(
+  policyId: string,
+  options?: RequestOptions,
+): Promise<UpdatePolicyResult> {
+  return request<UpdatePolicyResult>(
+    `/update-policies/${encodeURIComponent(policyId)}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/update-policies — needs `automation:manage`.
+ *
+ * Creates a standing rule that lets HarborMaster change containers unattended.
+ * The response carries `warnings`: settings that are legal but worth seeing.
+ */
+export function createUpdatePolicy(
+  body: UpdatePolicyRequest,
+  options?: RequestOptions,
+): Promise<UpdatePolicyResult> {
+  return request<UpdatePolicyResult>("/update-policies", options, "POST", body);
+}
+
+/** PATCH /api/v1/update-policies/{id} — needs `automation:manage`. */
+export function updateUpdatePolicy(
+  policyId: string,
+  body: UpdatePolicyRequest,
+  options?: RequestOptions,
+): Promise<UpdatePolicyResult> {
+  return request<UpdatePolicyResult>(
+    `/update-policies/${encodeURIComponent(policyId)}`,
+    options,
+    "PATCH",
+    body,
+  );
+}
+
+/**
+ * DELETE /api/v1/update-policies/{id} — needs `automation:manage`.
+ *
+ * ARCHIVES. The rule stops governing immediately and the history it caused
+ * remains.
+ */
+export function archiveUpdatePolicy(
+  policyId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/update-policies/${encodeURIComponent(policyId)}`,
+    options,
+    "DELETE",
+  );
+}
+
+/** GET /api/v1/automation */
+export function getAutomationStatus(
+  options?: RequestOptions,
+): Promise<AutomationStatusResponse> {
+  return request<AutomationStatusResponse>("/automation", options);
+}
+
+/**
+ * GET /api/v1/automation/upcoming
+ *
+ * What the next pass WOULD do, without doing any of it. A read: it writes no
+ * run, no decisions, and reaches no service.
+ */
+export function getAutomationUpcoming(
+  options?: RequestOptions,
+): Promise<AutomationUpcomingResponse> {
+  return request<AutomationUpcomingResponse>("/automation/upcoming", options);
+}
+
+/** Builds the run listing query string from closed vocabularies. */
+function buildAutomationRunQuery(query: AutomationRunQuery): string {
+  const params = new URLSearchParams();
+
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.acted !== undefined) params.set("acted", String(query.acted));
+
+  for (const state of query.state ?? []) params.append("state", state);
+  for (const trigger of query.trigger ?? []) params.append("trigger", trigger);
+
+  const rendered = params.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
+/** GET /api/v1/automation/runs */
+export function listAutomationRuns(
+  query: AutomationRunQuery = {},
+  options?: RequestOptions,
+): Promise<AutomationRunListResponse> {
+  return request<AutomationRunListResponse>(
+    `/automation/runs${buildAutomationRunQuery(query)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/automation/runs/{id} */
+export function getAutomationRun(
+  runId: string,
+  options?: RequestOptions,
+): Promise<AutomationRunDetailResponse> {
+  return request<AutomationRunDetailResponse>(
+    `/automation/runs/${encodeURIComponent(runId)}`,
+    options,
+  );
+}
+
+/** GET /api/v1/automation/paused */
+export function listAutomationPauses(
+  options?: RequestOptions & { all?: boolean },
+): Promise<AutomationPauseListResponse> {
+  const suffix = options?.all ? "?all=true" : "";
+  return request<AutomationPauseListResponse>(
+    `/automation/paused${suffix}`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/automation/run — needs `automation:run`.
+ *
+ * Starts a decision pass now. **One field, and it is a boolean.** With
+ * `dryRun` the pass decides everything and changes nothing; the run is still
+ * recorded, so an operator can read afterwards what would have happened.
+ *
+ * Resolves once the pass has DECIDED, not once the work it submitted finishes.
+ */
+export function runAutomationPass(
+  dryRun: boolean,
+  options?: RequestOptions,
+): Promise<AutomationRunDetailResponse> {
+  return request<AutomationRunDetailResponse>(
+    "/automation/run",
+    options,
+    "POST",
+    { dryRun },
+  );
+}
+
+/**
+ * POST /api/v1/automation/approve — needs `automation:approve`.
+ *
+ * Releases a decision a policy held for a person. **The two fields SELECT one
+ * of HarborMaster's own held decisions; they do not describe one.** The server
+ * re-derives the plan and refuses if it has moved on since the decision.
+ */
+export function approveAutomationDecision(
+  runId: string,
+  containerName: string,
+  options?: RequestOptions,
+): Promise<AutomationDecision> {
+  return request<AutomationDecision>("/automation/approve", options, "POST", {
+    runId,
+    containerName,
+  });
+}
+
+/** POST /api/v1/automation/pause — needs `automation:pause`. */
+export function pauseAutomation(
+  containerName: string,
+  reason: string,
+  options?: RequestOptions,
+): Promise<PausedContainer> {
+  return request<PausedContainer>("/automation/pause", options, "POST", {
+    containerName,
+    ...(reason ? { reason } : {}),
+  });
+}
+
+/**
+ * POST /api/v1/automation/resume — needs `automation:pause`.
+ *
+ * Records WHO cleared it and resets the container's failure counters: an
+ * operator who investigated and fixed the problem must not be one failure away
+ * from the same pause.
+ */
+export function resumeAutomation(
+  containerName: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>("/automation/resume", options, "POST", {
+    containerName,
+  });
 }

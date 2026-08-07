@@ -72,6 +72,16 @@ type Server struct {
 	// rollback disabled, which yields 503 rather than a broken route.
 	rollbacks RollbackService
 
+	// automation answers the update-engine endpoints -- the only ones in this
+	// API that can cause a host change nobody is watching. Nil in a deployment
+	// that has not opted in, which yields a 503 rather than a broken route.
+	automation AutomationService
+	// updatePolicies answers the automation-rule endpoints. Separate from
+	// `policies` above, which is compliance: one reports, the other acts, and
+	// conflating them would let one edit turn a reporting rule into a mutation
+	// rule.
+	updatePolicies UpdatePolicyService
+
 	// auth resolves sessions and answers the authentication endpoints. A nil
 	// auth serves the public routes and refuses everything else with 503 --
 	// fail closed, because a misconfiguration must never silently restore
@@ -224,6 +234,21 @@ type Options struct {
 	// package names it.
 	Rollbacks RollbackService
 
+	// Automation answers the update-engine endpoints. Nil disables them
+	// entirely, which is the correct behaviour for a deployment that has not
+	// asked for unattended updates.
+	//
+	// Note what this interface CANNOT reach: the engine holds no Docker
+	// capability at all, and an architecture test fails the build if the
+	// automation sources so much as name one.
+	Automation AutomationService
+	// UpdatePolicies answers the automation-rule endpoints. Nil disables them.
+	//
+	// Reachable even when the ENGINE is off, deliberately: an operator must be
+	// able to write and review their rules before switching automation on,
+	// which is the order those two things should be done in.
+	UpdatePolicies UpdatePolicyService
+
 	// Auth resolves sessions and answers the authentication endpoints.
 	//
 	// A server built WITHOUT it serves the four public routes and refuses
@@ -291,6 +316,9 @@ func NewServer(opts Options) *Server {
 		acquisitions: opts.Acquisitions,
 		executions:   opts.Executions,
 		rollbacks:    opts.Rollbacks,
+
+		automation:     opts.Automation,
+		updatePolicies: opts.UpdatePolicies,
 
 		auth:    opts.Auth,
 		users:   opts.Users,

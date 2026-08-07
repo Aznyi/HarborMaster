@@ -15,8 +15,7 @@ by the time HarborMaster can change a container it can already undo it.
 > that inventory current. Watching events does not change anything: an event
 > only ever causes HarborMaster to re-read the host.
 >
-> It has exactly three abilities to change the host, all **off by default** and
-> all requested by a person:
+> It has exactly three abilities to change the host, all **off by default**:
 >
 > 1. **Downloading an approved, digest-pinned image** into the local image
 >    store, verified afterwards. It touches no container. See
@@ -30,10 +29,16 @@ by the time HarborMaster can change a container it can already undo it.
 >    It **removes nothing** — the replacement is kept as evidence. See
 >    [Manual rollback](#manual-rollback).
 >
-> Everything else remains absent: no automatic, scheduled, or fleet updates; no
-> automatic rollback; no restore from a snapshot; no image deletion or pruning;
-> and no command-execution path of any kind. See [Status](#status) for what is
-> and is not here yet.
+> Those three are the whole of it. **Who asks for them** is now two things
+> rather than one: a person, or an update policy on a schedule — see
+> [Automatic updates](#automatic-updates), also off by default, and refused
+> unless both recreation and rollback are on. Automation adds no fourth ability:
+> it submits the same three requests to the same three services, each of which
+> re-runs its full preflight against the live host.
+>
+> Everything else remains absent: no fleet management, no restore from a
+> snapshot, no image deletion or pruning, and no command-execution path of any
+> kind. See [Status](#status) for what is and is not here yet.
 >
 > **Every route requires a session**, and which routes an account can reach
 > depends on its role. There is no setting that turns that off. A fresh
@@ -55,6 +60,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Safe image acquisition](#safe-image-acquisition)
 - [Manual container recreation](#manual-container-recreation)
 - [Manual rollback](#manual-rollback)
+- [Automatic updates](#automatic-updates)
 - [Reliability and recovery](#reliability-and-recovery)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -1612,6 +1618,163 @@ attaches the recovery plan for that exact situation. See
 [`docs/engineering/reliability.md`](docs/engineering/reliability.md) for the
 table of checkpoints and what each one means for the host.
 
+## Automatic updates
+
+**This is the only thing HarborMaster does without being asked.** Everything
+else on this page either reports, or acts when you press a button.
+
+Off by default. Turning it on does not start updating anything: what may be
+updated is entirely the business of **update policies**, and every new policy
+starts in a mode that changes nothing.
+
+```bash
+HARBORMASTER_AUTOMATION_ENABLED=true
+```
+
+Refused at startup unless recreation **and** rollback are also enabled.
+Automation submits recreations, and an unattended update that fails
+verification must be able to put the container back.
+
+### It is a caller, not a new capability
+
+The engine holds no Docker interface. For each container a policy selects, it
+submits exactly the two requests your own update would — acquire the planned
+image, then recreate the container with it — to exactly the same services, each
+of which re-runs its **full preflight against the live host** at the moment it
+acts.
+
+So automation cannot skip the planner, the digest verification, the
+configuration-preservation comparison, the health proof, or the checkpoint
+discipline. It does not implement any of them; it asks the components that do.
+Eight architecture tests fail the build if that stops being true.
+
+It also cannot be aimed. A policy names **which containers** and **how far**.
+What image a matched container moves to is decided by the planner from registry
+evidence and re-verified immediately before the pull. There is no field
+anywhere in this feature — not in the API, not in the environment, not in a
+label — that carries an image, a tag, a digest, or a registry.
+
+### An update policy
+
+```
+Name          Nightly patches
+Selects       containers named web, api  — never database
+Ceiling       up to patch
+Mode          automatic
+Window        02:00–04:00 Europe/London, Saturday and Sunday
+On failure    roll back automatically, then pause
+```
+
+**Mode** is the setting that matters most, and there are four:
+
+| Mode | What it does |
+| --- | --- |
+| `observe` | Evaluates everything, records the decision, **changes nothing**. The correct first setting on a real host. |
+| `dryRun` | Observe, plus the order things would happen in. |
+| `approvalRequired` | Decides automatically and waits for a person to release each update. |
+| `automatic` | Downloads and recreates without asking. |
+
+**Ceiling** bounds how far a version may move: `digestOnly` (a republished tag
+and nothing else), `patch`, `minor`, `major`. No ceiling permits an update
+HarborMaster could not size — an `unknown` or a pre-release is never applied,
+whatever the setting says.
+
+`AUTOMATION_REQUIRE_APPROVAL_FOR_MAJOR` is **on by default** and holds major
+versions for a person whatever the policy says. A major version is where
+publishers put breaking changes, and the setting that lets one reach your host
+at 02:00 should have to be turned off in two places.
+
+Writing a policy needs `automation:manage`, which only an **administrator**
+holds. A policy is a standing, unattended grant of `execution:create` over every
+container its selector reaches.
+
+### Maintenance windows
+
+The window carries an IANA timezone and every comparison is made in it. A window
+that crosses midnight is handled as two spans, and the weekday that governs the
+morning half is the one the window **started** on. DST is correct in both
+directions: a spring-forward gap opens nothing and an autumn-back repeat opens
+twice.
+
+**A window whose timezone this host cannot resolve is CLOSED, not open.** A
+mistyped zone never silently authorises updates at any hour. (The IANA database
+is embedded in the binary, so the distroless runtime image does not need one.)
+
+### Container labels
+
+A container can narrow what automation does to it, without a policy edit:
+
+```
+io.harbormaster.update.enabled=false       never update this container
+io.harbormaster.update.pause=true          same, temporarily
+io.harbormaster.update.strategy=patch      a narrower ceiling than the policy's
+io.harbormaster.update.window=02:00-04:00  different times, same timezone
+io.harbormaster.update.rollback=false      do not roll this one back
+```
+
+**A label may only ever make automation safer.** `enabled=true` does *not*
+enrol a container no policy selected, and `strategy` may only narrow. Anyone
+who can run `docker run` can set a label; if that were enough to opt a container
+into unattended updates, it would also be enough to widen how far they go. There
+is no label for the mode.
+
+A misspelled `io.harbormaster.update.*` key is reported rather than ignored.
+
+### What happens when one fails
+
+An unattended update that fails verification is **rolled back automatically**,
+when the policy permits — the same rollback an operator would have asked for,
+through the same service, with the same four proofs.
+
+Then the container is **paused**, and a rollback pause never expires on its own.
+The change was wrong and the host was moved twice to discover that; retrying
+that on a timer is how one bad image becomes a repeated outage. A person clears
+it, and clearing it is recorded against their account.
+
+Repeated failures pause a container too, at the policy's threshold, counted
+within the policy's window.
+
+### Every pass is recorded, including the ones that did nothing
+
+The hardest question to ask an automation system is *why did you not update that
+container*, and it is unanswerable unless the reasoning was written down at the
+time. So every pass records one row per container it considered, each with a
+reason from a closed vocabulary: `windowClosed`, `strategyCeiling`,
+`recommendation`, `automationPaused`, `noPlan`, `labelDisabled`, and so on.
+
+```bash
+# What would the next pass do? A read — it records nothing and pulls nothing.
+curl -s -b cookies.txt localhost:8080/api/v1/automation/upcoming | jq
+
+# Decide everything, change nothing, and keep the record.
+curl -s -b cookies.txt -H "X-HarborMaster-CSRF: $CSRF" \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"dryRun":true}' localhost:8080/api/v1/automation/run | jq
+
+# Which containers is automation refusing to touch, and why?
+curl -s -b cookies.txt localhost:8080/api/v1/automation/paused | jq
+```
+
+### Bounds
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `AUTOMATION_INTERVAL` | `15m` | How often a pass runs. A closed window costs a query. |
+| `AUTOMATION_MAX_CONCURRENT` | `1` | Simultaneous updates, engine-wide. A policy cannot raise it. |
+| `AUTOMATION_MAX_PER_RUN` | `10` | Updates one pass may start. |
+| `AUTOMATION_PASS_TIMEOUT` | `10m` | One decision pass. It does not wait for a pull. |
+| `AUTOMATION_FOLLOW_INTERVAL` | `30s` | How often submitted work is advanced. |
+| `AUTOMATION_RETENTION_AGE` | `90d` | How long the decision history is kept. |
+
+### After a restart
+
+The follower holds no state. Every tick it re-reads recent decisions from the
+database and takes the one next step each is owed, so a restart between the pull
+and the recreation resumes rather than abandons. A pass a restart cut short is
+recorded as `interrupted`: it submits work to services that checkpoint their
+own, so an interrupted pass is a bookkeeping gap and never a host in an unknown
+state.
+
 ## Reliability and recovery
 
 The full runbook is [`docs/engineering/reliability.md`](docs/engineering/reliability.md).
@@ -2317,9 +2480,17 @@ than a public issue.
   it aside, renames the preserved original back, starts it, and proves it four
   ways. It **removes nothing**, acts on one execution at a time, and derives
   every identity from HarborMaster's own record of that recreation.
+- **Automatic updates**: administrator-defined update policies that let
+  HarborMaster keep containers current unattended, inside a maintenance window.
+  Off by default and refused unless recreation and rollback are both on. The
+  engine holds no Docker capability: it submits the same requests a person would
+  to the same three services, each of which re-runs its full preflight. A failed
+  update is rolled back and the container is paused until somebody looks. Every
+  pass records why each container was, or was not, updated.
 - **Web interface**: Dashboard, Containers with detail, Images, Updates,
   Snapshots, Drift, Policies, Compliance, Change plans, Acquisitions,
-  Recreations, Rollbacks, and a live Events page
+  Recreations, Rollbacks, Automation, Update policies, Paused containers, and a
+  live Events page
 - HTTP server with health and version endpoints, graceful shutdown, and
   structured logging
 - SQLite storage with embedded migrations
@@ -2329,17 +2500,20 @@ than a public issue.
 
 ### What is not built yet
 
-- **Automatic rollback.** Explicitly not built. A failed recreation quarantines
-  the replacement, preserves both containers, and records the manual steps.
-  Manual rollback exists and happens only when a person asks for it.
-- **Scheduled or fleet rollback.** No timer creates rollback work, and a
-  rollback acts on exactly one execution's two containers.
+- **Fleet management.** One host. The schema is keyed by host and exactly one
+  host row exists; automation acts on the containers of that host and no other.
 - **Rollback to an arbitrary image, configuration, or snapshot.** A rollback
   undoes one recorded recreation and derives every identity from that record.
-- **Automatic, scheduled, or fleet updates.** Every recreation is requested by a
-  person and acts on exactly one container.
-- **Retrying a recreation.** HarborMaster stops at the first failure. A retry is
-  a new plan and a new acquisition.
+- **Retrying a recreation.** HarborMaster stops at the first failure, and
+  automation counts that failure rather than trying again immediately. A retry
+  is a new plan and a new acquisition.
+- **Choosing what automation updates to.** A policy names containers and a
+  ceiling. There is no setting, API field, or label anywhere in the feature that
+  carries an image, a tag, a digest, or a registry — the target comes from the
+  planner and is re-verified before the pull.
+- **Automation without a person having enabled three things.** Automatic updates
+  are refused at startup unless recreation and rollback are both on, and no
+  policy acts until an administrator moves it out of `observe` mode.
 - Standalone container start, stop, restart, and removal. The five recreation
   lifecycle methods and the four rollback methods exist only inside their own
   pipelines and are not reachable from the API.

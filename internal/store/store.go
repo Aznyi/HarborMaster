@@ -105,6 +105,15 @@ type DB struct {
 	// host, which is what restart recovery reads instead of guessing.
 	Rollbacks *RollbackRepository
 
+	// UpdatePolicies holds the automation rules: which containers HarborMaster
+	// may update without being asked, how far, and when. Deliberately separate
+	// from Policies, which reports and never acts.
+	UpdatePolicies *UpdatePolicyRepository
+	// Automation holds what the scheduler decided and why -- one row per pass,
+	// one per container considered, plus the pauses and failure counts the
+	// safety logic reads. Bookkeeping only: nothing on it can change a host.
+	Automation *AutomationRepository
+
 	// Users holds accounts, their password verifiers, and the bootstrap state
 	// that says whether this installation has been claimed.
 	Users *UserRepository
@@ -324,9 +333,13 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Acquisitions: &AcquisitionRepository{db: sqlDB},
 		Executions:   &ExecutionRepository{db: sqlDB},
 		Rollbacks:    &RollbackRepository{db: sqlDB},
-		Users:        &UserRepository{db: sqlDB},
-		Sessions:     &SessionRepository{db: sqlDB},
-		Audit:        &AuditRepository{db: sqlDB},
+
+		UpdatePolicies: &UpdatePolicyRepository{db: sqlDB},
+		Automation:     &AutomationRepository{db: sqlDB},
+
+		Users:    &UserRepository{db: sqlDB},
+		Sessions: &SessionRepository{db: sqlDB},
+		Audit:    &AuditRepository{db: sqlDB},
 
 		path:       opts.Path,
 		openReport: report,

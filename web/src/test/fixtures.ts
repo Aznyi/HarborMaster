@@ -517,6 +517,24 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
       if (url.includes("/auth/session")) {
         return respond(options.session, sessionResponse());
       }
+      // Automation. The dashboard reads it on every render, so a suite about
+      // something else must not fall over on an unanswered request.
+      if (url.includes("/automation")) {
+        return json({
+          status: { enabled: false, running: false, policies: 0, enabledPolicies: 0 },
+          history: { total: 0 },
+        });
+      }
+      if (url.includes("/update-policies")) {
+        return json({
+          items: [],
+          pagination: {
+            page: 1, pageSize: 25, totalItems: 0, totalPages: 1,
+            hasNext: false, hasPrevious: false,
+          },
+        });
+      }
+
       if (url.includes("/auth/bootstrap")) {
         return respond(options.bootstrap, { completed: true, tokenRequired: true });
       }

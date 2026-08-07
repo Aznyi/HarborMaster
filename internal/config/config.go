@@ -471,6 +471,55 @@ const (
 	// DefaultRollbackMaxEvents bounds one rollback's audit trail.
 	DefaultRollbackMaxEvents = 200
 
+	// DefaultAutomationEnabled keeps the update engine OFF unless a deployment
+	// asks for it. The only subsystem that changes the host unattended is not
+	// something anybody gets by upgrading.
+	DefaultAutomationEnabled = false
+	// DefaultAutomationInterval is how often a scheduled pass runs. Fifteen
+	// minutes is frequent enough that a maintenance window of an hour is never
+	// missed and infrequent enough that a closed window costs almost nothing.
+	DefaultAutomationInterval = 15 * time.Minute
+	// DefaultAutomationStartupDelay lets the inventory, image intelligence, and
+	// planner run before the first pass decides anything.
+	DefaultAutomationStartupDelay = 5 * time.Minute
+	// DefaultAutomationPassTimeout bounds one DECISION pass end to end.
+	//
+	// Short, because a pass decides and submits; it does not wait for a pull or
+	// a recreation. Advancing submitted work is the follower's job, and the
+	// follower is a separate, restartable loop precisely so a pass's duration
+	// never has to cover a multi-minute transfer.
+	DefaultAutomationPassTimeout = 10 * time.Minute
+	// DefaultAutomationFollowInterval is how often the follower advances work a
+	// pass submitted: acquisition succeeded, so request the recreation;
+	// recreation failed, so roll it back.
+	DefaultAutomationFollowInterval = 30 * time.Second
+	// DefaultAutomationMaxConcurrent is the engine-wide concurrency ceiling.
+	// One: unattended updates happen in series unless an operator says
+	// otherwise, so a bad image takes one container down rather than five.
+	DefaultAutomationMaxConcurrent = 1
+	// DefaultAutomationMaxPerRun bounds one pass's blast radius.
+	DefaultAutomationMaxPerRun = 10
+	// DefaultAutomationRetentionAge is how long run history is kept.
+	DefaultAutomationRetentionAge = 90 * 24 * time.Hour
+	// DefaultAutomationPruneInterval is how often retention runs.
+	DefaultAutomationPruneInterval = 6 * time.Hour
+	// DefaultAutomationRequireApprovalForMajor refuses unattended major version
+	// updates deployment-wide.
+	DefaultAutomationRequireApprovalForMajor = true
+
+	// MinAutomationInterval bounds the polling rate. Below this the scheduler
+	// becomes a load source of its own against the database and the planner.
+	MinAutomationInterval = time.Minute
+	// MinAutomationPassTimeout bounds one decision pass.
+	MinAutomationPassTimeout = time.Minute
+	// MinAutomationFollowInterval bounds how often the follower runs, so it
+	// cannot become a busy loop against the database.
+	MinAutomationFollowInterval = 5 * time.Second
+	// MaxAutomationConcurrent is the ceiling an operator may configure.
+	MaxAutomationConcurrent = 8
+	// MaxAutomationPerRun is the ceiling on one pass's updates.
+	MaxAutomationPerRun = 200
+
 	// DefaultExecutionRequestTTL is how long a queued request stays valid.
 	// Short, because the preflight evidence behind it ages: a request that has
 	// waited an hour was approved against a host that may no longer look the
@@ -1093,6 +1142,82 @@ type Acquisition struct {
 	PruneInterval time.Duration
 }
 
+// Automation holds settings for the update engine.
+//
+// # Off by default, and refused without recreation
+//
+// This is the only subsystem that can change the host with nobody watching. A
+// deployment that has not asked for it does not run a scheduler at all, and
+// validation refuses AUTOMATION_ENABLED without EXECUTION_ENABLED: automation
+// submits the same recreation requests an operator would, and with recreation
+// off there is nothing for it to submit.
+//
+// # What is configured here, and what is not
+//
+// Nothing here decides WHAT gets updated. That is entirely the update policies'
+// business, and a policy is an administrator-authenticated database row rather
+// than an environment variable. These settings bound the ENGINE: how often it
+// wakes, how long a pass may take, how much history it keeps.
+type Automation struct {
+	// Enabled turns the scheduler on. When false no pass ever runs, the
+	// endpoints report the feature disabled, and policies already stored remain
+	// readable and editable -- an operator can write and review their rules
+	// before switching the engine on, which is the order they should be done
+	// in.
+	Enabled bool
+
+	// Interval is how often a scheduled pass runs. A pass that finds a closed
+	// maintenance window records that and does nothing, so this is a polling
+	// rate rather than an update rate.
+	Interval time.Duration
+
+	// StartupDelay is how long after start the first pass waits.
+	//
+	// Long enough that the inventory, image intelligence, and planner have all
+	// had a chance to run. A pass over an empty inventory would decide nothing
+	// and record a run saying so, which is noise; worse, a pass over a STALE
+	// inventory would decide against a host it has not looked at.
+	StartupDelay time.Duration
+
+	// PassTimeout bounds one DECISION pass end to end. A pass that exceeds it
+	// is abandoned and recorded as failed; the work it already submitted
+	// continues under the acquisition and execution services' own timeouts,
+	// because those are the components that know how to stop safely.
+	PassTimeout time.Duration
+
+	// FollowInterval is how often the follower advances work a pass submitted.
+	//
+	// Separate from Interval, and much shorter, because the two loops answer
+	// different questions. A pass asks "what should change"; the follower asks
+	// "what happened to what I already asked for" -- and the answer to the
+	// second decides whether a failed update gets rolled back, which should not
+	// wait a quarter of an hour.
+	FollowInterval time.Duration
+
+	// MaxConcurrent is the ENGINE-WIDE ceiling on simultaneous updates, applied
+	// on top of each policy's own. A policy cannot raise it: two policies each
+	// permitting three concurrent updates must not become six.
+	MaxConcurrent int
+
+	// MaxPerRun is the engine-wide ceiling on updates one pass may start.
+	MaxPerRun int
+
+	// RetentionAge is how long run and decision history is kept, and
+	// PruneInterval how often retention runs. Zero retention keeps everything,
+	// which is valid and unbounded.
+	RetentionAge  time.Duration
+	PruneInterval time.Duration
+
+	// RequireApprovalForMajor refuses to let ANY policy apply a major version
+	// update unattended, whatever the policy says.
+	//
+	// A deployment-level override on top of the per-policy strategy, for the
+	// operator who wants automation but not that. Default true: the setting
+	// that lets a publisher's breaking change reach your host at 02:00 should
+	// have to be turned off deliberately, in two places.
+	RequireApprovalForMajor bool
+}
+
 // Rollback holds settings for manual rollback.
 //
 // # Off by default, and refused without recreation
@@ -1420,6 +1545,7 @@ type Config struct {
 	Acquisition Acquisition
 	Execution   Execution
 	Rollback    Rollback
+	Automation  Automation
 	Auth        Auth
 }
 
@@ -1849,6 +1975,44 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	// ---- automation --------------------------------------------------------
+
+	cfg.Automation.Enabled, err = boolVar(lookup, "AUTOMATION_ENABLED", DefaultAutomationEnabled)
+	collect(err)
+	cfg.Automation.RequireApprovalForMajor, err = boolVar(lookup,
+		"AUTOMATION_REQUIRE_APPROVAL_FOR_MAJOR", DefaultAutomationRequireApprovalForMajor)
+	collect(err)
+
+	for _, target := range []struct {
+		name     string
+		fallback time.Duration
+		into     *time.Duration
+	}{
+		{"AUTOMATION_INTERVAL", DefaultAutomationInterval, &cfg.Automation.Interval},
+		{"AUTOMATION_STARTUP_DELAY", DefaultAutomationStartupDelay, &cfg.Automation.StartupDelay},
+		{"AUTOMATION_PASS_TIMEOUT", DefaultAutomationPassTimeout, &cfg.Automation.PassTimeout},
+		{"AUTOMATION_FOLLOW_INTERVAL", DefaultAutomationFollowInterval, &cfg.Automation.FollowInterval},
+		{"AUTOMATION_RETENTION_AGE", DefaultAutomationRetentionAge, &cfg.Automation.RetentionAge},
+		{"AUTOMATION_PRUNE_INTERVAL", DefaultAutomationPruneInterval, &cfg.Automation.PruneInterval},
+	} {
+		value, convErr := durationVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
+	for _, target := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"AUTOMATION_MAX_CONCURRENT", DefaultAutomationMaxConcurrent, &cfg.Automation.MaxConcurrent},
+		{"AUTOMATION_MAX_PER_RUN", DefaultAutomationMaxPerRun, &cfg.Automation.MaxPerRun},
+	} {
+		value, convErr := intVar(lookup, target.name, target.fallback)
+		collect(convErr)
+		*target.into = value
+	}
+
 	// ---- authentication ----------------------------------------------------
 	//
 	// No AUTH_ENABLED. Authentication is always on: see the Auth type.
@@ -1985,6 +2149,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Planner.validate()...)
 	errs = append(errs, c.Acquisition.validate()...)
 	errs = append(errs, c.Execution.validate()...)
+	errs = append(errs, c.Automation.validate()...)
 	errs = append(errs, c.Auth.validate()...)
 
 	// Recreation without acquisition is not a configuration, it is a
@@ -2012,7 +2177,94 @@ func (c Config) Validate() error {
 			envPrefix, envPrefix))
 	}
 
+	// Automation submits the same recreation requests an operator would. With
+	// recreation switched off there is nothing for it to submit, so a
+	// deployment that enabled only automation has enabled a scheduler that can
+	// decide but never act -- and would report every pass as though the
+	// decision were the outcome.
+	if c.Automation.Enabled && !c.Execution.Enabled {
+		errs = append(errs, fmt.Errorf(
+			"%sAUTOMATION_ENABLED requires %sEXECUTION_ENABLED: automation submits the "+
+				"same recreation requests an operator would, and with recreation switched "+
+				"off there is nothing for it to submit",
+			envPrefix, envPrefix))
+	}
+
+	// Automatic rollback is the safety net under an unattended update. Running
+	// automation without it is legal -- a policy may switch rollback off
+	// deliberately -- but running it when the CAPABILITY does not exist means
+	// no policy could ever have it, which is worth saying at startup rather
+	// than discovering after the first failed update.
+	if c.Automation.Enabled && !c.Rollback.Enabled {
+		errs = append(errs, fmt.Errorf(
+			"%sAUTOMATION_ENABLED requires %sROLLBACK_ENABLED: an unattended update that "+
+				"fails verification must be able to put the container back, and with "+
+				"rollback switched off no update policy could ever do so",
+			envPrefix, envPrefix))
+	}
+
 	return errors.Join(errs...)
+}
+
+// validate checks the automation settings.
+//
+// Validated even when automation is disabled, for the same reason every other
+// section is: a configuration error that only surfaces the day someone flips
+// the feature on is a worse failure than one caught at startup.
+func (a Automation) validate() []error {
+	var errs []error
+
+	if a.Interval < MinAutomationInterval {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_INTERVAL must be at least %s",
+			envPrefix, MinAutomationInterval))
+	}
+	if a.PassTimeout < MinAutomationPassTimeout {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_PASS_TIMEOUT must be at least %s",
+			envPrefix, MinAutomationPassTimeout))
+	}
+	if a.FollowInterval < MinAutomationFollowInterval {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_FOLLOW_INTERVAL must be at least %s",
+			envPrefix, MinAutomationFollowInterval))
+	}
+	// A pass that could still be running when the next one is due would either
+	// overlap -- which the single-run rule refuses, so every other pass would
+	// be skipped -- or queue behind itself. Refused rather than clamped: the
+	// operator has stated two settings that cannot both be honoured.
+	if a.PassTimeout > a.Interval {
+		errs = append(errs, fmt.Errorf(
+			"%sAUTOMATION_PASS_TIMEOUT (%s) must not exceed %sAUTOMATION_INTERVAL (%s): "+
+				"a pass that can outlive its own schedule would make every second pass a no-op",
+			envPrefix, a.PassTimeout, envPrefix, a.Interval))
+	}
+	// Zero is a legitimate "start the first pass immediately", for a test or a
+	// deployment whose evidence is already warm. Negative is not a way to do
+	// anything.
+	if a.StartupDelay < 0 {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_STARTUP_DELAY must not be negative", envPrefix))
+	}
+	// Zero keeps run history forever, which is valid but unbounded.
+	if a.RetentionAge < 0 {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_RETENTION_AGE must not be negative", envPrefix))
+	}
+	if a.PruneInterval < MinPlannerPruneInterval {
+		errs = append(errs, fmt.Errorf("%sAUTOMATION_PRUNE_INTERVAL must be at least %s",
+			envPrefix, MinPlannerPruneInterval))
+	}
+
+	for _, b := range []struct {
+		name            string
+		value, min, max int
+	}{
+		{"AUTOMATION_MAX_CONCURRENT", a.MaxConcurrent, 1, MaxAutomationConcurrent},
+		{"AUTOMATION_MAX_PER_RUN", a.MaxPerRun, 1, MaxAutomationPerRun},
+	} {
+		if b.value < b.min || b.value > b.max {
+			errs = append(errs, fmt.Errorf("%s%s must be between %d and %d",
+				envPrefix, b.name, b.min, b.max))
+		}
+	}
+
+	return errs
 }
 
 // validate checks the authentication settings.

@@ -303,6 +303,81 @@ func (s *Server) routeTable() []route {
 		{http.MethodGet, p + "/rollbacks/{id}", requires(domain.PermRollbackRead), s.handleRollbackDetail, ""},
 		{"", p + "/rollbacks/{id}", requires(domain.PermRollbackRead), nil, "GET, HEAD"},
 
+		// ---- update policies -------------------------------------------------
+		//
+		// THE MOST CONSEQUENTIAL WRITES IN THIS TABLE. An update policy is a
+		// standing instruction that lets HarborMaster stop and replace
+		// containers a selector reaches, with nobody watching.
+		//
+		// So writing one is `automation:manage`, which only an ADMINISTRATOR
+		// holds -- for the same reason `policy:manage` is: an operator able to
+		// write one would be granting themselves a permanent, unattended
+		// version of `execution:create` over any container the selector
+		// reaches.
+		//
+		// Reading one is `automation:read`, which every role holds. Automation
+		// changes the host without being asked; a viewer who cannot see the
+		// rules cannot answer the question their role exists for.
+		//
+		// The writes share the POLICY rate budget rather than the shared one:
+		// they cost one small transaction on HarborMaster's own table, not a
+		// Docker sweep.
+
+		{http.MethodGet, p + "/update-policies", requires(domain.PermAutomationRead), s.handleUpdatePolicies, ""},
+		{http.MethodPost, p + "/update-policies", requires(domain.PermAutomationManage).policyBudget(), s.handleUpdatePolicyCreate, ""},
+		{"", p + "/update-policies", requires(domain.PermAutomationRead), nil, "GET, HEAD, POST"},
+
+		{http.MethodGet, p + "/update-policies/{id}", requires(domain.PermAutomationRead), s.handleUpdatePolicyDetail, ""},
+		{http.MethodPatch, p + "/update-policies/{id}", requires(domain.PermAutomationManage).policyBudget(), s.handleUpdatePolicyUpdate, ""},
+		// DELETE archives. Decisions and pauses reference the row, and the
+		// record of what automation did must outlive the rule being withdrawn.
+		{http.MethodDelete, p + "/update-policies/{id}", requires(domain.PermAutomationManage).policyBudget(), s.handleUpdatePolicyDelete, ""},
+		{"", p + "/update-policies/{id}", requires(domain.PermAutomationRead), nil, "GET, HEAD, PATCH, DELETE"},
+
+		// ---- the automation engine -------------------------------------------
+		//
+		// Running a pass is `automation:run`, an OPERATOR permission: a manual
+		// pass submits exactly the work the scheduled pass would have submitted
+		// a few minutes later, so it changes WHEN, not WHETHER.
+		//
+		// Approving a held decision is its own permission, and it is marked
+		// privileged: the approver releases a change that will stop and replace
+		// a running container.
+		//
+		// Pausing and resuming share one permission. Pausing is a safety action
+		// anybody operating the host should be able to take immediately, and
+		// requiring an administrator to undo it would make the safe state the
+		// inconvenient one.
+
+		{http.MethodGet, p + "/automation", requires(domain.PermAutomationRead), s.handleAutomationStatus, ""},
+		{"", p + "/automation", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		// A read that previews the next pass WITHOUT running it: no run row, no
+		// decisions, no request to any service.
+		{http.MethodGet, p + "/automation/upcoming", requires(domain.PermAutomationRead), s.handleAutomationUpcoming, ""},
+		{"", p + "/automation/upcoming", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		{http.MethodGet, p + "/automation/runs", requires(domain.PermAutomationRead), s.handleAutomationRuns, ""},
+		{"", p + "/automation/runs", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		{http.MethodGet, p + "/automation/runs/{id}", requires(domain.PermAutomationRead), s.handleAutomationRunDetail, ""},
+		{"", p + "/automation/runs/{id}", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		{http.MethodGet, p + "/automation/paused", requires(domain.PermAutomationRead), s.handleAutomationPauses, ""},
+		{"", p + "/automation/paused", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		{http.MethodPost, p + "/automation/run", requires(domain.PermAutomationRun).policyBudget(), s.handleAutomationRun, ""},
+		{"", p + "/automation/run", requires(domain.PermAutomationRun), nil, "POST"},
+
+		{http.MethodPost, p + "/automation/approve", requires(domain.PermAutomationApprove), s.handleAutomationApprove, ""},
+		{"", p + "/automation/approve", requires(domain.PermAutomationApprove), nil, "POST"},
+
+		{http.MethodPost, p + "/automation/pause", requires(domain.PermAutomationPause).policyBudget(), s.handleAutomationPause, ""},
+		{"", p + "/automation/pause", requires(domain.PermAutomationPause), nil, "POST"},
+
+		{http.MethodPost, p + "/automation/resume", requires(domain.PermAutomationPause).policyBudget(), s.handleAutomationResume, ""},
+		{"", p + "/automation/resume", requires(domain.PermAutomationPause), nil, "POST"},
+
 		// ---- user administration -------------------------------------------
 
 		{http.MethodGet, p + "/users", requires(domain.PermUserManage), s.handleUsers, ""},

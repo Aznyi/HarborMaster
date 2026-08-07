@@ -106,6 +106,11 @@ func TestOnlyTheSocketTouchingPermissionsArePrivileged(t *testing.T) {
 		// original can take its place. It reaches the socket and it interrupts
 		// a service, so it counts.
 		domain.PermRollbackCreate: true,
+		// Approving an automation decision submits the acquisition that leads
+		// to a recreation. The approver does not touch a socket themselves --
+		// they release a decision that will -- and the outcome is the same
+		// container being replaced, so it counts too.
+		domain.PermAutomationApprove: true,
 	}
 
 	for _, permission := range domain.RoleAdministrator.Permissions() {

@@ -52,6 +52,25 @@ Sixty-four lowercase hex, validated at the adapter. A short id or a name can
 resolve to a different container than the one the preflight checked, and the
 whole safety model rests on those being the same container.
 
+**1.7a Never give the automation engine a Docker capability.**
+There is nowhere on `service.AutomationOptions` to put one, no automation source
+names one, and eight architecture tests hold it. The engine's entire ability to
+affect the host is `AutomationPipeline` — three request submissions and two
+record reads — and every one of those goes to a service that owns its capability
+and runs its own preflight.
+
+If a change needs the engine to "just check whether the daemon is reachable", it
+needs a service to answer that question, not an interface. A capability field
+here is how the whole safety argument stops being true.
+
+**1.7b Never add a field to `AcquisitionRequest`, `ExecutionRequest`, or
+`RollbackRequest`.**
+Each is exactly three fields: an identifier HarborMaster generated, an
+idempotency key, and the requester. `TestAutomationSubmitsOnlyIdentifiersItGenerated`
+pins the count and the names. A fourth field on a request that changes the host
+is a fourth thing a caller can influence, and automation is now one of the
+callers.
+
 **1.8 Never add an exported field or method to `docker.CapturedConfig`.**
 It holds a container's real environment and log-driver credentials in unexported
 fields, and that is the entire secret boundary for recreation. If a caller needs
@@ -449,10 +468,57 @@ has the defect the test was written to catch, and only a time assertion sees it.
 
 ---
 
+## 4d. Automation
+
+**4d.1 Never let automation decide anything outside `DecideAutomation`.**
+It is a pure function of its inputs — no clock, no database, no Docker — which
+is what lets the most consequential judgement in the codebase be tested
+exhaustively. A check added anywhere else is a policy decision made in a place
+nobody will look for it.
+
+**4d.2 Always fail closed on evidence you could not gather.**
+A plan that could not be read is no plan. A window whose zone will not load is
+closed. A policy that cannot be re-read does not authorise a rollback. An
+unrecognised mode does not act. The direction is always towards "not updated",
+because a missed update is a missed update and an unintended one is an incident.
+
+**4d.3 Always read the clock once per pass.**
+Two containers whose windows differ by a millisecond must not get different
+answers because time moved between them.
+
+**4d.4 Never let a container label widen anything.**
+A label may narrow the strategy, replace the window's times, opt out, or pause.
+It may not enrol a container, widen a ceiling, or change the mode. Anyone who
+can run `docker run` can set a label; the asymmetry is the whole reason labels
+are safe to honour at all.
+
+**4d.5 Always record the decision, including the ones that declined.**
+Every pass writes a run row before it examines anything, and every container it
+considered gets a decision with a closed-vocabulary reason. "Why did you not
+update that container" is only answerable from a record written at the time.
+
+**4d.6 A rollback always pauses.**
+Whatever the failure counters say, and whatever cooldown the policy configures.
+The change was wrong and the host was moved twice to discover it.
+
+**4d.7 Never audit an automated mutation twice.**
+The acquisition, execution, and rollback services already record the outcome,
+attributed to whoever the pass was attributed to. Recording it again in the
+engine would make the host-change counter over-report the one number an
+administrator most needs to trust.
+
+**4d.8 Bound every automation read by count, not just by page.**
+A pass's estate read, its policy load, its decision write, and the follower's
+window are all capped, and a cap that bites is REPORTED on the run rather than
+silently truncating. A scheduler that quietly covered a prefix of the host would
+be worse than one that refused.
+
 ## Pull request checklist
 
 - [ ] No new `docker.Runtime` method
 - [ ] No new method on any of the three mutation interfaces
+- [ ] No Docker capability, and no new request field, reachable from automation
+- [ ] Any new automation check lives in `DecideAutomation` and fails closed
 - [ ] No Docker SDK import outside `internal/docker`
 - [ ] Every SQL value bound; every identifier from an allowlist
 - [ ] Every new input validated and bounded

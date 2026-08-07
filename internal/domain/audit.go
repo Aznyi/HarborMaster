@@ -123,6 +123,50 @@ const (
 	AuditRollbackFailed AuditAction = "rollback.failed"
 )
 
+// Automation actions.
+//
+// # Why an automated change is audited more, not less
+//
+// Every row above answers "who asked". Automation is the one path where the
+// answer is "nobody did", and that makes the trail more important rather than
+// less: the only account of why the host changed at 02:14 is the one
+// HarborMaster wrote at 02:14.
+//
+// So automation records the administration of the policies (who created the
+// rule that later acted), the passes (what the engine did and when), and the
+// safety interventions (what it refused to do again, and who cleared that).
+// The mutations themselves are NOT re-audited here -- they are recorded by the
+// acquisition, execution, and rollback actions above, because the automation
+// engine submits exactly the same requests a human would and reaches exactly
+// the same audited code path. Duplicating them would make the host-change
+// counter over-report the very thing it exists to count.
+const (
+	AuditUpdatePolicyCreated  AuditAction = "updatePolicy.created"
+	AuditUpdatePolicyUpdated  AuditAction = "updatePolicy.updated"
+	AuditUpdatePolicyArchived AuditAction = "updatePolicy.archived"
+
+	// AuditAutomationRunStarted is written for a pass a person asked for. A
+	// scheduled pass writes its run row and is not audited as a request,
+	// because a request is something somebody made.
+	AuditAutomationRunStarted AuditAction = "automation.run.started"
+	// AuditAutomationRunCompleted records the counts a pass finished with.
+	AuditAutomationRunCompleted AuditAction = "automation.run.completed"
+	// AuditAutomationRunFailed records a pass that could not complete.
+	AuditAutomationRunFailed AuditAction = "automation.run.failed"
+
+	// AuditAutomationApproved is a person releasing a decision the engine made
+	// but was not permitted to act on.
+	AuditAutomationApproved AuditAction = "automation.approved"
+	AuditAutomationRejected AuditAction = "automation.rejected"
+
+	// AuditAutomationPaused is HarborMaster refusing to keep trying. Recorded
+	// as an event in its own right: an operator must be able to find the moment
+	// automation stopped touching a container without reading every run.
+	AuditAutomationPaused AuditAction = "automation.paused"
+	// AuditAutomationResumed is a person clearing that refusal.
+	AuditAutomationResumed AuditAction = "automation.resumed"
+)
+
 // AuditActions lists every action.
 var AuditActions = []AuditAction{
 	AuditLoginSucceeded, AuditLoginFailed, AuditLoginRateLimited, AuditLogout,
@@ -144,6 +188,11 @@ var AuditActions = []AuditAction{
 	AuditExecutionCompleted, AuditExecutionFailed,
 	AuditRollbackRequested, AuditRollbackCancelled,
 	AuditRollbackCompleted, AuditRollbackFailed,
+
+	AuditUpdatePolicyCreated, AuditUpdatePolicyUpdated, AuditUpdatePolicyArchived,
+	AuditAutomationRunStarted, AuditAutomationRunCompleted, AuditAutomationRunFailed,
+	AuditAutomationApproved, AuditAutomationRejected,
+	AuditAutomationPaused, AuditAutomationResumed,
 }
 
 // ValidAuditAction reports whether name is a known action.
@@ -234,8 +283,15 @@ const (
 	AuditTargetAcquisition AuditTargetType = "acquisition"
 	AuditTargetExecution   AuditTargetType = "execution"
 	AuditTargetRollback    AuditTargetType = "rollback"
-	AuditTargetInventory   AuditTargetType = "inventory"
-	AuditTargetSystem      AuditTargetType = "system"
+	// AuditTargetUpdatePolicy is an automation rule, and AuditTargetAutomation
+	// is a pass, a pause, or an approval. Distinct from AuditTargetPolicy,
+	// which is a compliance rule: the two subsystems are separate on purpose
+	// and an audit page that conflated them would report a reporting rule and
+	// a mutation rule under one word.
+	AuditTargetUpdatePolicy AuditTargetType = "updatePolicy"
+	AuditTargetAutomation   AuditTargetType = "automation"
+	AuditTargetInventory    AuditTargetType = "inventory"
+	AuditTargetSystem       AuditTargetType = "system"
 )
 
 // AuditTargetTypes lists every target type.
@@ -244,6 +300,7 @@ var AuditTargetTypes = []AuditTargetType{
 	AuditTargetSnapshot, AuditTargetDrift, AuditTargetPolicy,
 	AuditTargetViolation, AuditTargetPlan, AuditTargetAcquisition,
 	AuditTargetExecution, AuditTargetRollback,
+	AuditTargetUpdatePolicy, AuditTargetAutomation,
 	AuditTargetInventory, AuditTargetSystem,
 }
 

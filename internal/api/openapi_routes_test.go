@@ -55,6 +55,15 @@ var routedPaths = []string{
 	APIPrefix + "/acquisitions",
 	APIPrefix + "/audit",
 	APIPrefix + "/audit/summary",
+	APIPrefix + "/automation",
+	APIPrefix + "/automation/approve",
+	APIPrefix + "/automation/pause",
+	APIPrefix + "/automation/paused",
+	APIPrefix + "/automation/resume",
+	APIPrefix + "/automation/run",
+	APIPrefix + "/automation/runs",
+	APIPrefix + "/automation/runs/{id}",
+	APIPrefix + "/automation/upcoming",
 	APIPrefix + "/auth/bootstrap",
 	APIPrefix + "/auth/login",
 	APIPrefix + "/auth/logout",
@@ -108,6 +117,8 @@ var routedPaths = []string{
 	APIPrefix + "/snapshots/{id}",
 	APIPrefix + "/snapshots/{id}/diff",
 	APIPrefix + "/snapshots/{id}/restore-readiness",
+	APIPrefix + "/update-policies",
+	APIPrefix + "/update-policies/{id}",
 	APIPrefix + "/roles",
 	APIPrefix + "/users",
 	APIPrefix + "/users/{id}",
@@ -219,7 +230,11 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/auth/logout",
 			APIPrefix + "/auth/password",
 			APIPrefix + "/auth/sessions/{id}/revoke",
-			APIPrefix + "/users/{id}/password-reset":
+			APIPrefix + "/users/{id}/password-reset",
+			APIPrefix + "/automation/run",
+			APIPrefix + "/automation/approve",
+			APIPrefix + "/automation/pause",
+			APIPrefix + "/automation/resume":
 			method = http.MethodPost
 		}
 

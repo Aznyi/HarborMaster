@@ -1,0 +1,525 @@
+import type { Pagination } from "./inventoryTypes";
+import type { UpdateType } from "./imageTypes";
+import type { Recommendation } from "./planTypes";
+
+/**
+ * Automation types: update policies and the update engine.
+ *
+ * # What automation is, and what the UI must never get wrong about it
+ *
+ * Every other feature in HarborMaster reports, or acts when a person presses a
+ * button. **This one changes the host on a timer.** The interface's job is to
+ * make three things unmissable.
+ *
+ *  1. **Which mode a policy is in.** `observe` and `dryRun` change nothing.
+ *     `approvalRequired` waits for a person. Only `automatic` acts. A UI that
+ *     rendered those four the same would be the reason somebody believed their
+ *     estate was being watched when it was being changed, or the reverse.
+ *  2. **Why a container was NOT updated.** The hardest question an operator
+ *     asks an automation system, and the reason every decision carries a
+ *     closed-vocabulary `reason` rather than prose.
+ *  3. **What a pause means.** HarborMaster stopped trying, on purpose, and in
+ *     the rollback case it will not resume until a person says so.
+ *
+ * # There is no target in any request
+ *
+ * Read the request types below. Running a pass takes a boolean. Approving takes
+ * a run id and a container name that must match a decision HarborMaster already
+ * made. Pausing takes a container name the inventory already knows. **There is
+ * no field anywhere in this file that carries an image, a tag, a digest, or a
+ * registry** — a type with nowhere to put one is a stronger guarantee than a
+ * check that rejects one.
+ */
+
+// ------------------------------------------------------------ vocabularies --
+
+/**
+ * How far an update may go. A CEILING, not a filter.
+ *
+ * `digestOnly` is the safest automation there is: the operator chose the tag,
+ * and only its content moved. `major` is never a default — a major version is
+ * where publishers put breaking changes.
+ */
+export type UpdateStrategy = "digestOnly" | "patch" | "minor" | "major";
+
+export const UPDATE_STRATEGY_ORDER: UpdateStrategy[] = [
+  "digestOnly",
+  "patch",
+  "minor",
+  "major",
+];
+
+export const UPDATE_STRATEGY_LABELS: Record<UpdateStrategy, string> = {
+  digestOnly: "Digest only",
+  patch: "Up to patch",
+  minor: "Up to minor",
+  major: "Up to major",
+};
+
+export const UPDATE_STRATEGY_DESCRIPTIONS: Record<UpdateStrategy, string> = {
+  digestOnly:
+    "Only a republished tag. The operator chose the tag; only its content moved.",
+  patch: "A republished tag, or a patch version bump.",
+  minor: "Everything up to and including a minor version bump.",
+  major:
+    "Everything, including a major version bump — where publishers put breaking changes.",
+};
+
+/** How far a policy is allowed to act. */
+export type AutomationMode =
+  | "observe"
+  | "dryRun"
+  | "approvalRequired"
+  | "automatic";
+
+export const AUTOMATION_MODE_ORDER: AutomationMode[] = [
+  "observe",
+  "dryRun",
+  "approvalRequired",
+  "automatic",
+];
+
+export const AUTOMATION_MODE_LABELS: Record<AutomationMode, string> = {
+  observe: "Observe",
+  dryRun: "Dry run",
+  approvalRequired: "Approval required",
+  automatic: "Automatic",
+};
+
+export const AUTOMATION_MODE_DESCRIPTIONS: Record<AutomationMode, string> = {
+  observe:
+    "Evaluates everything and changes nothing. The correct first setting on a real host.",
+  dryRun: "Observe, plus the order things would happen in.",
+  approvalRequired:
+    "Decides automatically and waits for a person to release each update.",
+  automatic: "Downloads and recreates without asking.",
+};
+
+/** Whether a mode can change the host at all. The single check the UI asks. */
+export function modeMutates(mode: AutomationMode): boolean {
+  return mode === "automatic";
+}
+
+/** Where one pass got to. */
+export type AutomationRunState =
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export const AUTOMATION_RUN_STATE_ORDER: AutomationRunState[] = [
+  "running",
+  "completed",
+  "failed",
+  "interrupted",
+];
+
+export const AUTOMATION_RUN_STATE_LABELS: Record<AutomationRunState, string> = {
+  running: "Running",
+  completed: "Completed",
+  failed: "Failed",
+  interrupted: "Interrupted",
+};
+
+/** What started a pass. */
+export type AutomationTrigger = "schedule" | "manual" | "dryRun" | "startup";
+
+export const AUTOMATION_TRIGGER_LABELS: Record<AutomationTrigger, string> = {
+  schedule: "Scheduled",
+  manual: "Run by hand",
+  dryRun: "Dry run",
+  startup: "At startup",
+};
+
+/** What the engine concluded for one container. */
+export type AutomationVerdict =
+  | "update"
+  | "wouldUpdate"
+  | "awaitingApproval"
+  | "skip";
+
+export const AUTOMATION_VERDICT_LABELS: Record<AutomationVerdict, string> = {
+  update: "Updated",
+  wouldUpdate: "Would update",
+  awaitingApproval: "Waiting for approval",
+  skip: "Skipped",
+};
+
+/**
+ * Why, from a closed vocabulary.
+ *
+ * Closed so this file can carry the operator-facing sentence for each, rather
+ * than the server sending prose a client has to render blindly.
+ */
+export type AutomationReason =
+  | "eligible"
+  | "noPlan"
+  | "noUpdate"
+  | "notSelected"
+  | "noPolicy"
+  | "policyDisabled"
+  | "labelDisabled"
+  | "labelPaused"
+  | "observeMode"
+  | "dryRunMode"
+  | "approvalRequired"
+  | "strategyCeiling"
+  | "recommendation"
+  | "windowClosed"
+  | "windowUnresolvable"
+  | "automationPaused"
+  | "alreadyInFlight"
+  | "concurrencyLimit"
+  | "registryLimit"
+  | "runLimit"
+  | "refusedByService"
+  | "error";
+
+export const AUTOMATION_REASON_LABELS: Record<AutomationReason, string> = {
+  eligible: "Every check passed",
+  noPlan: "No change plan",
+  noUpdate: "Nothing to update",
+  notSelected: "No policy selects it",
+  noPolicy: "No policies defined",
+  policyDisabled: "Policy is off",
+  labelDisabled: "Opted out by label",
+  labelPaused: "Paused by label",
+  observeMode: "Observe mode",
+  dryRunMode: "Dry run",
+  approvalRequired: "Needs approval",
+  strategyCeiling: "Larger than the policy permits",
+  recommendation: "Planner wants a person",
+  windowClosed: "Outside the maintenance window",
+  windowUnresolvable: "Window could not be evaluated",
+  automationPaused: "Automation is paused",
+  alreadyInFlight: "Work already in flight",
+  concurrencyLimit: "Concurrency limit",
+  registryLimit: "Per-registry limit",
+  runLimit: "Per-pass limit",
+  refusedByService: "Refused by a preflight",
+  error: "Could not be decided",
+};
+
+/** Why automation stopped for a container. */
+export type PauseReason = "repeatedFailure" | "automaticRollback" | "operator";
+
+export const PAUSE_REASON_LABELS: Record<PauseReason, string> = {
+  repeatedFailure: "Repeated failures",
+  automaticRollback: "Rolled back",
+  operator: "Paused by an operator",
+};
+
+// ------------------------------------------------------------- the policy --
+
+/**
+ * Which containers a policy governs.
+ *
+ * Exclusion is checked FIRST and cannot be overridden. An empty selector
+ * governs NOTHING, which the editor states rather than leaving to be
+ * discovered.
+ */
+export interface UpdateSelector {
+  labels?: Record<string, string>;
+  images?: string[];
+  include?: string[];
+  exclude?: string[];
+}
+
+/** When automation may act. */
+export interface MaintenanceWindow {
+  alwaysOpen: boolean;
+  timezone?: string;
+  /** `time.Weekday` values: 0 is Sunday. Empty means every day. */
+  weekdays?: number[];
+  start?: string;
+  end?: string;
+}
+
+export interface UpdateLimits {
+  maxConcurrent?: number;
+  maxPerRegistry?: number;
+  maxPerRun?: number;
+  acquisitionTimeoutSeconds?: number;
+  recreateTimeoutSeconds?: number;
+  healthTimeoutSeconds?: number;
+}
+
+export interface UpdateFailureHandling {
+  autoRollback?: boolean;
+  pauseAfterFailures?: number;
+  pauseWindowHours?: number;
+  cooldownHours?: number;
+  maxRetries?: number;
+}
+
+/** One administrator-defined automation rule. */
+export interface UpdatePolicy {
+  policyId: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  priority: number;
+  selector: UpdateSelector;
+  strategy: UpdateStrategy;
+  minimumRecommendation: Recommendation;
+  mode: AutomationMode;
+  window: MaintenanceWindow;
+  limits?: UpdateLimits;
+  failure?: UpdateFailureHandling;
+  archived?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Who asked for a pass, or cleared a pause.
+ *
+ * Two fields and no more, matching the server's projection: no role, no
+ * session, no address. What remains is the smallest thing that answers "whose
+ * action was this" after the request is gone.
+ */
+export interface Requester {
+  userId?: string;
+  username?: string;
+}
+
+/** A stored policy plus the warnings it earned. */
+export interface UpdatePolicyResult {
+  policy: UpdatePolicy;
+  /** Legal but worth seeing. They never refuse the policy. */
+  warnings?: string[];
+}
+
+export interface UpdatePolicyListResponse {
+  items: UpdatePolicy[];
+  pagination: Pagination;
+}
+
+/**
+ * A create or edit body.
+ *
+ * Note what is absent: there is no image, digest, tag, or registry field. A
+ * policy says WHICH containers and HOW FAR; what image a matched container
+ * moves to is the planner's decision from registry evidence.
+ */
+export interface UpdatePolicyRequest {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  priority?: number;
+  selector?: UpdateSelector;
+  strategy?: UpdateStrategy;
+  minimumRecommendation?: Recommendation;
+  mode?: AutomationMode;
+  window?: MaintenanceWindow;
+  limits?: UpdateLimits;
+  failure?: UpdateFailureHandling;
+}
+
+export interface UpdatePolicyQuery {
+  page?: number;
+  pageSize?: number;
+  sort?: string;
+  order?: "asc" | "desc";
+  enabled?: boolean;
+  includeArchived?: boolean;
+  mode?: AutomationMode[];
+  search?: string;
+}
+
+// ------------------------------------------------------------- the engine --
+
+export interface AutomationRun {
+  runId: string;
+  trigger: AutomationTrigger;
+  state: AutomationRunState;
+  dryRun?: boolean;
+  considered?: number;
+  eligible?: number;
+  submitted?: number;
+  skipped?: number;
+  failed?: number;
+  requestedBy?: Requester;
+  message?: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+}
+
+/**
+ * One container's outcome in one pass.
+ *
+ * Every identity here was copied from a record HarborMaster wrote itself.
+ */
+export interface AutomationDecision {
+  runId: string;
+  containerId?: string;
+  containerName: string;
+  policyId?: string;
+  policyName?: string;
+  verdict: AutomationVerdict;
+  reason: AutomationReason;
+  detail?: string;
+  planId?: string;
+  currentImage?: string;
+  proposedImage?: string;
+  proposedDigest?: string;
+  updateType?: UpdateType;
+  recommendation?: Recommendation;
+  acquisitionId?: string;
+  executionId?: string;
+  rollbackId?: string;
+  position: number;
+  decidedAt: string;
+}
+
+/** One container automation will not touch. */
+export interface PausedContainer {
+  containerName: string;
+  containerId?: string;
+  reason: PauseReason;
+  detail?: string;
+  failures?: number;
+  policyId?: string;
+  rollbackId?: string;
+  executionId?: string;
+  pausedAt: string;
+  /** Absent means only an acknowledgement clears it. */
+  resumeAfter?: string;
+  acknowledgedAt?: string;
+  acknowledgedBy?: Requester;
+}
+
+export interface AutomationRunSummary {
+  total?: number;
+  completed?: number;
+  failed?: number;
+  submitted?: number;
+}
+
+export interface AutomationStatus {
+  enabled: boolean;
+  running: boolean;
+  policies?: number;
+  enabledPolicies?: number;
+  pausedContainers?: number;
+  awaitingApproval?: number;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  lastRunId?: string;
+  lastOutcome?: string;
+  windowOpen?: boolean;
+  nextWindowOpensAt?: string;
+  nextWindowPolicyId?: string;
+}
+
+export interface AutomationStatusResponse {
+  status: AutomationStatus;
+  history: AutomationRunSummary;
+}
+
+export interface AutomationRunListResponse {
+  items: AutomationRun[];
+  pagination: Pagination;
+  summary: AutomationRunSummary;
+}
+
+export interface AutomationRunDetailResponse {
+  run: AutomationRun;
+  decisions: AutomationDecision[];
+  pagination: Pagination;
+}
+
+export interface AutomationUpcomingResponse {
+  items: AutomationDecision[];
+  eligible: number;
+}
+
+export interface AutomationPauseListResponse {
+  items: PausedContainer[];
+  pagination: Pagination;
+}
+
+export interface AutomationRunQuery {
+  page?: number;
+  pageSize?: number;
+  state?: AutomationRunState[];
+  trigger?: AutomationTrigger[];
+  acted?: boolean;
+}
+
+// ------------------------------------------------------------- rendering --
+
+/** Whether a run is still moving, for the poll decision. */
+export function isAutomationRunActive(run: AutomationRun): boolean {
+  return run.state === "running";
+}
+
+/** Whether a pause still blocks automation at an instant. */
+export function isPauseActive(pause: PausedContainer, at: Date): boolean {
+  if (pause.acknowledgedAt) return false;
+  if (!pause.resumeAfter) return true;
+  return at.getTime() < new Date(pause.resumeAfter).getTime();
+}
+
+/**
+ * Renders a maintenance window in operator-facing words.
+ *
+ * Built in the client from the same fields the server compares against, so the
+ * two cannot disagree about what a window says. The server still owns whether
+ * the window is OPEN — that is a timezone calculation, and duplicating it here
+ * is how a UI comes to disagree with the engine twice a year.
+ */
+const WEEKDAY_NAMES = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+export function describeWindow(window: MaintenanceWindow): string {
+  if (window.alwaysOpen) return "At any time";
+
+  const zone = window.timezone?.trim() || "UTC";
+  const days =
+    window.weekdays && window.weekdays.length > 0
+      ? window.weekdays
+          .filter((day) => day >= 0 && day <= 6)
+          .map((day) => WEEKDAY_NAMES[day])
+          .join(", ")
+      : "every day";
+
+  const crossing = crossesMidnight(window) ? " (crossing midnight)" : "";
+  return `${window.start ?? "??:??"}–${window.end ?? "??:??"}${crossing} ${zone}, ${days}`;
+}
+
+/** Whether the window wraps past midnight, for the label above. */
+export function crossesMidnight(window: MaintenanceWindow): boolean {
+  const start = minutesOfDay(window.start);
+  const end = minutesOfDay(window.end);
+  if (start === null || end === null) return false;
+  return end < start;
+}
+
+function minutesOfDay(value: string | undefined): number | null {
+  if (!value) return null;
+  const parts = value.split(":");
+  if (parts.length !== 2) return null;
+  const hour = Number(parts[0]);
+  const minute = Number(parts[1]);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+/** Whether a selector could match anything at all. */
+export function selectorIsEmpty(selector: UpdateSelector): boolean {
+  return (
+    Object.keys(selector.labels ?? {}).length === 0 &&
+    (selector.images ?? []).length === 0 &&
+    (selector.include ?? []).length === 0
+  );
+}

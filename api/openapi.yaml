@@ -235,6 +235,41 @@ tags:
       Environment-variable rules match NAMES. HarborMaster never reads, stores,
       or serves a variable's value in this feature.
 
+  - name: Automation
+    description: |
+      The update engine: rules that let HarborMaster keep containers current
+      without being asked, and the record of every decision it made.
+
+      **This is the only subsystem that can change the host with nobody
+      watching**, and it introduces no new capability to do so. The engine holds
+      no Docker interface at all. It submits the same `AcquisitionRequest`,
+      `ExecutionRequest`, and `RollbackRequest` an operator's HTTP request
+      produces, to the same three services, each of which re-runs its own full
+      preflight against the LIVE host before acting.
+
+      So automation cannot skip the planner, the digest verification, the
+      preservation comparison, the health proof, or the checkpoint discipline —
+      it does not implement any of them.
+
+      **Nothing here takes a target from a caller.** Read the request bodies:
+      `POST /automation/run` takes a boolean, `POST /automation/approve` selects
+      one of HarborMaster's own held decisions, and the pause endpoints name a
+      container the inventory already knows. There is no field in this section
+      that carries an image, a tag, a digest, or a registry.
+
+      A policy says WHICH containers and HOW FAR. What image a matched container
+      moves to is decided by the planner from registry evidence and re-verified
+      immediately before the pull.
+
+      Off by default, and refused without recreation and rollback:
+      `AUTOMATION_ENABLED` requires `EXECUTION_ENABLED` and `ROLLBACK_ENABLED`.
+      Update policies remain readable and writable with the engine off, so an
+      operator can write and review their rules before switching it on.
+
+      Update policies are deliberately NOT compliance policies. One reports; the
+      other acts. Sharing a type would mean one edit could turn a reporting rule
+      into a mutation rule.
+
   - name: Snapshots
     description: |
       Immutable configuration snapshots, restore-readiness validation, and
@@ -4255,6 +4290,727 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/update-policies:
+    get:
+      tags: [Automation]
+      summary: The rules that let HarborMaster update containers unattended
+      operationId: listUpdatePolicies
+      description: |
+        Every update policy, highest priority first, which is the order the
+        scheduler resolves them in.
+
+        Archived policies are excluded by default. An archived policy is
+        history: it no longer governs anything, and a list dominated by history
+        buries the rules actually in force.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, priority, createdAt, updatedAt, mode, strategy, id]
+            default: priority
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+        - name: enabled
+          in: query
+          description: Only policies that participate in evaluation.
+          schema: { type: boolean }
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+        - name: mode
+          in: query
+          description: |
+            Repeatable, or comma-separated. An unrecognised value is rejected
+            rather than ignored.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/AutomationMode" }
+        - name: search
+          in: query
+          description: |
+            Matches the name and description. Wildcards a caller types are
+            ESCAPED, so a search for a literal `%` searches for that character.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: A page of update policies.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/UpdatePolicy" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+    post:
+      tags: [Automation]
+      summary: Create an update policy
+      operationId: createUpdatePolicy
+      description: |
+        **The most consequential write in this API.** An update policy is a
+        standing instruction that lets HarborMaster stop and replace every
+        container the selector reaches, with nobody watching.
+
+        Requires `automation:manage`, which only an ADMINISTRATOR holds. An
+        operator able to write one would be granting themselves a permanent,
+        unattended version of `execution:create`.
+
+        **The body names no image and no digest.** A policy says WHICH
+        containers and HOW FAR; what image a matched container moves to is
+        decided by the planner from registry evidence, and re-verified by the
+        acquisition preflight. There is no field here that reaches Docker.
+
+        **An empty selector governs nothing, and a bare `*` image pattern is
+        refused by name.** A policy that accidentally covers the whole estate
+        is the failure mode this validation exists for.
+
+        `minimumRecommendation` is constrained to `proceed` and
+        `proceedWithCaution`. The other three planner verdicts mean a person has
+        to look, and automating one would be automating the request for human
+        judgement.
+
+        The response carries `warnings`: settings that are legal but worth
+        seeing, such as unattended major-version updates or no maintenance
+        window. They do not refuse the policy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdatePolicyRequest" }
+            examples:
+              observeFirst:
+                summary: The correct first policy on a real host
+                value:
+                  name: Watch the web tier
+                  selector: { labels: { tier: front } }
+                  strategy: patch
+                  mode: observe
+              nightlyPatches:
+                summary: Unattended patch updates in a maintenance window
+                value:
+                  name: Nightly patches
+                  selector: { include: [web, api] }
+                  strategy: patch
+                  mode: automatic
+                  minimumRecommendation: proceed
+                  window:
+                    alwaysOpen: false
+                    timezone: Europe/London
+                    weekdays: [0, 6]
+                    start: "02:00"
+                    end: "04:00"
+                  failure: { autoRollback: true, pauseAfterFailures: 2 }
+      responses:
+        "201":
+          description: The stored policy, with any warnings it earned.
+          headers:
+            Location:
+              description: The new policy's URL.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A policy with that name already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The policy write budget is exhausted. Retry after the interval in `Retry-After`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/update-policies/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The immutable policy identifier.
+        schema:
+          type: string
+          pattern: "^upd_[0-9a-f]{20}$"
+    get:
+      tags: [Automation]
+      summary: One update policy
+      operationId: getUpdatePolicy
+      responses:
+        "200":
+          description: The policy, with any warnings it earned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+    patch:
+      tags: [Automation]
+      summary: Edit an update policy
+      operationId: updateUpdatePolicy
+      description: |
+        A partial update. An omitted field is left alone; a field set to its
+        zero value is applied.
+
+        The WHOLE merged policy is re-validated, not just the fields that moved:
+        a change that is individually legal can produce a policy that is not,
+        and validating only the delta would store it.
+
+        The policy identifier is immutable and cannot be changed. An archived
+        policy cannot be edited: it is history, and editing it would change what
+        an already-recorded decision appears to have been made under.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdatePolicyRequest" }
+      responses:
+        "200":
+          description: The stored policy, with any warnings it earned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A policy with that name already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The policy write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+    delete:
+      tags: [Automation]
+      summary: Withdraw an update policy
+      operationId: archiveUpdatePolicy
+      description: |
+        **ARCHIVES.** The policy stops governing anything immediately, and the
+        record of what it caused remains.
+
+        Automation decisions and pauses reference this row. An auditor asking
+        what changed the estate in March must not get a different answer because
+        somebody tidied up in April, so there is no endpoint that permanently
+        removes a policy and the schema refuses one through
+        `ON DELETE RESTRICT`.
+      responses:
+        "204":
+          description: Withdrawn.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: The policy write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation:
+    get:
+      tags: [Automation]
+      summary: What the update engine is doing
+      operationId: getAutomationStatus
+      description: |
+        The dashboard payload: whether the engine is on, whether a pass is
+        running, how many policies are in force, how many containers are paused,
+        how many decisions are waiting for a person, and when the next
+        maintenance window opens.
+
+        `enabled: false` with policies present is a normal and deliberate state:
+        an operator writes and reviews their rules before switching the engine
+        on.
+      responses:
+        "200":
+          description: The engine's current state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, history]
+                properties:
+                  status: { $ref: "#/components/schemas/AutomationStatus" }
+                  history: { $ref: "#/components/schemas/AutomationRunSummary" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/upcoming:
+    get:
+      tags: [Automation]
+      summary: What the next pass would do, without doing any of it
+      operationId: getAutomationUpcoming
+      description: |
+        A READ. It runs the same decision function over the same evidence a real
+        pass would and returns the decisions, writing nothing: no run row, no
+        decision rows, no request to any service.
+
+        That is the difference between this and `POST /automation/run` with
+        `dryRun: true`, which does record what it would have done.
+
+        Safe to call repeatedly. It costs one policy query, one inventory query,
+        and a bounded per-container plan lookup — the same cost a real pass pays
+        for its decision half.
+      responses:
+        "200":
+          description: The decisions the next pass would make, in pass order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, eligible]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationDecision" }
+                  eligible:
+                    type: integer
+                    description: How many containers would be updated, approved, or previewed.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/runs:
+    get:
+      tags: [Automation]
+      summary: Scheduler passes, newest first
+      operationId: listAutomationRuns
+      description: |
+        Every pass, including the ones that did nothing.
+
+        A pass that decided to change nothing is the answer to "why did
+        automation not update that container last night", and it is unavailable
+        unless the pass itself was recorded — so every pass writes a row before
+        it examines anything.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: state
+          in: query
+          description: Repeatable, or comma-separated. At most 16 values.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/AutomationRunState" }
+        - name: trigger
+          in: query
+          description: Repeatable, or comma-separated. At most 16 values.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/AutomationTrigger" }
+        - name: acted
+          in: query
+          description: Only passes that submitted work.
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: A page of passes, with the history aggregate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination, summary]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationRun" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  summary: { $ref: "#/components/schemas/AutomationRunSummary" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/runs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The immutable run identifier.
+        schema:
+          type: string
+          pattern: "^run_[0-9a-f]{20}$"
+    get:
+      tags: [Automation]
+      summary: One pass and every decision it made
+      operationId: getAutomationRun
+      description: |
+        The decisions are returned in the pass's own execution ORDER, which is
+        what makes a dry run's output "what would happen, in what sequence"
+        rather than an unordered set.
+
+        Every decision carries a closed-vocabulary `reason`, so "why was this
+        container skipped" is answerable from the record rather than by
+        re-deriving it.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: The pass and its reasoning.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, decisions, pagination]
+                properties:
+                  run: { $ref: "#/components/schemas/AutomationRun" }
+                  decisions:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationDecision" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/paused:
+    get:
+      tags: [Automation]
+      summary: Containers automation will not touch
+      operationId: listAutomationPauses
+      description: |
+        A pause is HarborMaster refusing to keep trying.
+
+        Keyed on the container NAME rather than its id, because an id changes on
+        every recreation and recreation is exactly what automation does — a
+        pause keyed on the id would be cleared by the action that went wrong.
+
+        A pause after an automatic ROLLBACK never expires on its own: the change
+        was wrong and the host was moved twice, and a person needs to look.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: all
+          in: query
+          description: Include pauses an operator has already cleared.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: A page of paused containers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PausedContainer" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/run:
+    post:
+      tags: [Automation]
+      summary: Run a pass now
+      operationId: runAutomationPass
+      description: |
+        Starts a decision pass immediately, instead of waiting for the schedule.
+
+        **One field, and it is a boolean.** There is nothing here to aim: what
+        the pass considers comes from the inventory, what it may do comes from
+        the stored policies, and what it submits comes from plans the planner
+        produced.
+
+        A manual pass changes WHEN the scheduled work happens, not WHETHER it
+        may — which is why this is an operator permission and writing a policy
+        is an administrator one.
+
+        With `dryRun: true` the pass decides everything and changes nothing. The
+        run is still recorded, so an operator can read afterwards exactly what
+        would have happened and in what order.
+
+        Synchronous, and bounded by `AUTOMATION_PASS_TIMEOUT`. The WORK it
+        submits is asynchronous: the response says what was decided and
+        submitted, not what finished.
+
+        `409` when a pass is already running. Only one pass may run at a time,
+        enforced in the database so it holds across a restart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dryRun:
+                  type: boolean
+                  default: false
+                  description: Decide everything and change nothing.
+      responses:
+        "200":
+          description: The pass and the decisions it made.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, decisions, pagination]
+                properties:
+                  run: { $ref: "#/components/schemas/AutomationRun" }
+                  decisions:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationDecision" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: An automation pass is already running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/approve:
+    post:
+      tags: [Automation]
+      summary: Release a decision a policy held for a person
+      operationId: approveAutomationDecision
+      description: |
+        **PRIVILEGED.** Approving submits the acquisition that leads to a
+        container being stopped and replaced.
+
+        The two fields SELECT one of HarborMaster's own held decisions; they do
+        not describe one. A run id and container name that match no decision
+        awaiting approval approve nothing, and there is no way to name an image,
+        a tag, or a digest.
+
+        Before submitting, the engine re-reads the container's CURRENT change
+        plan and refuses if it no longer matches the one the decision named:
+        approving a proposal is approving THAT proposal, and a registry that
+        republished a tag in the meantime has made it a different one.
+
+        Refused with `409` when the plan moved on, when the plan is gone, or
+        when automation is paused for the container.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [runId, containerName]
+              properties:
+                runId:
+                  type: string
+                  pattern: "^run_[0-9a-f]{20}$"
+                containerName:
+                  type: string
+                  description: The container named by the held decision.
+      responses:
+        "202":
+          description: The released decision, with the acquisition it started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationDecision" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            No longer approvable: the plan behind it changed, the plan is gone,
+            automation is paused for this container, or the acquisition
+            preflight refused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/pause:
+    post:
+      tags: [Automation]
+      summary: Stop automation for one container
+      operationId: pauseAutomation
+      description: |
+        A safety action, and available to anyone who can operate the host.
+
+        The container name must be one the INVENTORY already knows: a pause on a
+        container that does not exist is a safety control an operator believes
+        in that protects nothing.
+
+        Pausing cannot change the host either way. It records a refusal.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [containerName]
+              properties:
+                containerName: { type: string }
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: |
+                    The operator's note. Bounded, UTF-8 validated, and
+                    control-character stripped before storage.
+      responses:
+        "200":
+          description: The recorded pause.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PausedContainer" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No container by that name is present in the inventory.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Automation is already paused for this container.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/resume:
+    post:
+      tags: [Automation]
+      summary: Clear an automation pause
+      operationId: resumeAutomation
+      description: |
+        Records WHO cleared it, and resets the container's failure counters: an
+        operator who investigated and fixed the problem must not be one failure
+        away from the same pause.
+
+        An acknowledgement, not a delete. The fact that automation stopped
+        touching a container stays in the history.
+
+        Same permission as pausing. Requiring an administrator to undo a pause
+        would make the safe state the inconvenient one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [containerName]
+              properties:
+                containerName: { type: string }
+      responses:
+        "204":
+          description: Cleared.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Automation is not paused for this container.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          description: The write budget is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+
 components:
   securitySchemes:
     sessionCookie:
@@ -4565,6 +5321,24 @@ components:
         Every rollback route answers 503 in that case, including the reads. A
         404 would say the feature does not exist and send an operator looking
         for the wrong thing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    AutomationUnavailable:
+      description: |
+        The automation engine is not configured in this deployment.
+
+        The default. When automation is off no scheduler ever runs, and the
+        engine — which holds no Docker capability of its own in any case — is
+        never built.
+
+        Update policy READS and WRITES stay available whenever the policy store
+        is wired, even with the engine off: an operator must be able to write
+        and review their rules before switching automation on, and refusing to
+        show yesterday's decisions because today's scheduler is disabled would
+        hide exactly the history somebody turned it off to examine.
       content:
         application/json:
           schema:
@@ -8820,6 +9594,496 @@ components:
         pagination: { $ref: "#/components/schemas/Pagination" }
 
     # ------------------------------------------------------- security audit --
+
+    UpdateStrategy:
+      type: string
+      description: |
+        How far an update may go. A CEILING, not a filter: a policy naming
+        `patch` permits a digest move and a patch bump and refuses everything
+        above.
+
+        `digestOnly` is the safest automation there is — the operator chose the
+        tag, and only its content moved.
+
+        `major` is never a default. A major version is where publishers put
+        breaking changes, and automating one is a decision an operator has to
+        make in as many words. `AUTOMATION_REQUIRE_APPROVAL_FOR_MAJOR`, on by
+        default, refuses it deployment-wide whatever a policy says.
+
+        No strategy permits an `unknown` or `prerelease` update: an unknown
+        update is one HarborMaster could not size, and automating a change whose
+        size is unknown is exactly what a ceiling is for.
+      enum: [digestOnly, patch, minor, major]
+
+    AutomationMode:
+      type: string
+      description: |
+        How far a policy is allowed to act.
+
+        `observe` evaluates everything and does nothing — image intelligence,
+        planning, policy matching, window checks, and the decision are all
+        recorded, and no image is pulled. **The correct first setting on any
+        real host.**
+
+        `dryRun` is observe plus a rendered execution order.
+
+        `approvalRequired` decides automatically and waits for a person to
+        release each decision. Automation chooses; a human commits.
+
+        `automatic` acquires and recreates without asking. The only value for
+        which the engine may change the host.
+      enum: [observe, dryRun, approvalRequired, automatic]
+
+    UpdateSelector:
+      type: object
+      description: |
+        Which containers a policy governs.
+
+        **Exclusion is checked FIRST and cannot be overridden.** An operator who
+        names a container in `exclude` has said "never automate this", and no
+        label, image pattern, or other clause may reverse it.
+
+        Everything else is inclusive: a container matches if ANY populated
+        clause matches it.
+
+        **An entirely empty selector matches NOTHING.** A policy that
+        accidentally governs the whole estate is the failure mode worth
+        designing against, so the empty case is the safe one rather than the
+        convenient one — and validation refuses an empty selector outright.
+
+        Containers are named by NAME, never by id: an id changes on every
+        recreation, and a policy pinned to one would stop governing the
+        container the moment it acted.
+      properties:
+        labels:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Every listed label must be present. An empty value matches the KEY
+            with any value.
+          maxProperties: 16
+        images:
+          type: array
+          description: |
+            Glob patterns matched against the container's image reference, e.g.
+            `ghcr.io/acme/*`. Deliberately NOT regular expressions: an
+            operator-supplied regex is an unbounded backtracking risk on a path
+            the scheduler walks for every container on every pass. A bare `*` is
+            refused.
+          items: { type: string, maxLength: 256 }
+          maxItems: 64
+        include:
+          type: array
+          description: Container names this policy governs.
+          items: { type: string, maxLength: 256 }
+          maxItems: 64
+        exclude:
+          type: array
+          description: Container names this policy must never touch. Checked first, and final.
+          items: { type: string, maxLength: 256 }
+          maxItems: 64
+
+    MaintenanceWindow:
+      type: object
+      description: |
+        When automation may act.
+
+        The window carries an IANA timezone and **every comparison is made in
+        it**, never in the server's local time. A window that crosses midnight
+        is two spans, and the weekday that governs the morning half is the one
+        the window STARTED on.
+
+        **A window whose timezone cannot be resolved is CLOSED, not open.** A
+        mistyped zone must never silently authorise updates at any hour.
+      required: [alwaysOpen]
+      properties:
+        alwaysOpen:
+          type: boolean
+          description: |
+            Disables the window entirely. Explicit rather than implied by empty
+            fields: "no window configured" and "deliberately unrestricted" are
+            different intentions and an operator should have to state the
+            second.
+        timezone:
+          type: string
+          maxLength: 64
+          description: An IANA name, e.g. `Europe/London`. Empty means UTC.
+          example: Europe/London
+        weekdays:
+          type: array
+          description: |
+            The days the window may START on, as `time.Weekday` values where 0
+            is Sunday. Empty means every day.
+          items: { type: integer, minimum: 0, maximum: 6 }
+          maxItems: 7
+        start:
+          type: string
+          pattern: "^[0-9]{2}:[0-9]{2}$"
+          example: "02:00"
+        end:
+          type: string
+          pattern: "^[0-9]{2}:[0-9]{2}$"
+          description: |
+            Exclusive. An end BEFORE the start means the window crosses
+            midnight. An end equal to the start is refused: a zero-length window
+            never opens.
+          example: "04:00"
+
+    UpdateLimits:
+      type: object
+      description: |
+        What one policy may do at once. Every value is bounded, and a zero means
+        "use the default" — never "no limit".
+
+        The engine-wide ceilings from `AUTOMATION_MAX_CONCURRENT` and
+        `AUTOMATION_MAX_PER_RUN` apply on top. A policy cannot raise them.
+      properties:
+        maxConcurrent: { type: integer, minimum: 1, maximum: 8, default: 1 }
+        maxPerRegistry:
+          type: integer
+          minimum: 1
+          maximum: 8
+          default: 1
+          description: |
+            Simultaneous work against one registry, so a policy cannot become a
+            thundering herd against a single host. Must not exceed
+            `maxConcurrent`.
+        maxPerRun:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+          description: |
+            How many updates one pass may START. Distinct from `maxConcurrent`:
+            concurrency bounds parallelism, this bounds the blast radius of a
+            single decision.
+        acquisitionTimeoutSeconds: { type: integer, minimum: 1, maximum: 1800, default: 600 }
+        recreateTimeoutSeconds: { type: integer, minimum: 1, maximum: 1800, default: 300 }
+        healthTimeoutSeconds: { type: integer, minimum: 1, maximum: 1800, default: 120 }
+
+    UpdateFailureHandling:
+      type: object
+      description: What happens when an unattended update goes wrong.
+      properties:
+        autoRollback:
+          type: boolean
+          description: |
+            Permits automation to invoke the EXISTING rollback service when a
+            recreation fails verification. No new rollback logic: it submits the
+            same request an operator would.
+        pauseAfterFailures:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            How many failures within `pauseWindowHours` pause this container's
+            automation. Zero disables pausing, which is not recommended and is
+            reported as a warning.
+        pauseWindowHours: { type: integer, minimum: 1, maximum: 720, default: 24 }
+        cooldownHours:
+          type: integer
+          minimum: 0
+          maximum: 720
+          description: |
+            How long a pause lasts before automation may resume by itself. Zero
+            means it never does and a person must acknowledge — the safer
+            reading of "this went wrong repeatedly", and the default.
+
+            A pause after an automatic ROLLBACK ignores this and never expires.
+        maxRetries: { type: integer, minimum: 0, maximum: 5 }
+
+    UpdatePolicy:
+      type: object
+      description: |
+        One administrator-defined automation rule.
+
+        Deliberately a different type from `Policy`. A compliance policy answers
+        "is this container configured acceptably" and produces a violation; an
+        update policy answers "may HarborMaster change this container, when, and
+        how far" and produces an action.
+      required: [policyId, name, enabled, priority, selector, strategy, mode, window]
+      properties:
+        policyId:
+          type: string
+          pattern: "^upd_[0-9a-f]{20}$"
+          description: |
+            The IMMUTABLE public identifier, generated server-side from the
+            system entropy source. Never accepted from a caller.
+        name: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 1000 }
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: |
+            Orders policies when several match one container. HIGHER wins, and a
+            tie is broken by the policy id so the winner is deterministic across
+            passes.
+        selector: { $ref: "#/components/schemas/UpdateSelector" }
+        strategy: { $ref: "#/components/schemas/UpdateStrategy" }
+        minimumRecommendation:
+          type: string
+          enum: [proceed, proceedWithCaution]
+          description: |
+            The planner verdict a change must carry. Constrained to these two:
+            `unknown` and `manualReview` mean a person has to look, and
+            `notRecommended` means the planner argued against the change.
+        mode: { $ref: "#/components/schemas/AutomationMode" }
+        window: { $ref: "#/components/schemas/MaintenanceWindow" }
+        limits: { $ref: "#/components/schemas/UpdateLimits" }
+        failure: { $ref: "#/components/schemas/UpdateFailureHandling" }
+        archived:
+          type: boolean
+          description: Withdrawn from evaluation. The history that references it survives.
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    UpdatePolicyRequest:
+      type: object
+      description: |
+        A create or edit body. On a create, `name`, `selector`, `strategy` and
+        `mode` are required — defaulting the mode or the strategy would mean
+        HarborMaster choosing how far an unattended change may go on somebody's
+        behalf.
+
+        On an edit, every field is optional and an omitted one is left alone.
+      properties:
+        name: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 1000 }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+        selector: { $ref: "#/components/schemas/UpdateSelector" }
+        strategy: { $ref: "#/components/schemas/UpdateStrategy" }
+        minimumRecommendation: { type: string, enum: [proceed, proceedWithCaution] }
+        mode: { $ref: "#/components/schemas/AutomationMode" }
+        window: { $ref: "#/components/schemas/MaintenanceWindow" }
+        limits: { $ref: "#/components/schemas/UpdateLimits" }
+        failure: { $ref: "#/components/schemas/UpdateFailureHandling" }
+
+    UpdatePolicyResult:
+      type: object
+      description: A stored policy and the warnings it earned.
+      required: [policy]
+      properties:
+        policy: { $ref: "#/components/schemas/UpdatePolicy" }
+        warnings:
+          type: array
+          description: |
+            Settings that are legal but worth telling an operator about, such as
+            unattended major-version updates, no maintenance window, or
+            automatic rollback switched off. They never refuse the policy: an
+            administrator may genuinely want any of them, and should just have
+            to see HarborMaster say so first.
+          items: { type: string }
+
+    AutomationRunState:
+      type: string
+      description: |
+        Where one pass got to.
+
+        `interrupted` marks a pass a restart cut short. A pass changes nothing
+        itself — it submits work to services that checkpoint their own — so an
+        interrupted run is a bookkeeping gap, never a host in an unknown state.
+      enum: [running, completed, failed, interrupted]
+
+    AutomationTrigger:
+      type: string
+      description: What started a pass.
+      enum: [schedule, manual, dryRun, startup]
+
+    AutomationVerdict:
+      type: string
+      description: |
+        What the engine concluded for one container.
+
+        `wouldUpdate` means eligible but the mode was observe or dry run;
+        the schema refuses such a decision from naming an acquisition.
+      enum: [update, wouldUpdate, awaitingApproval, skip]
+
+    AutomationReason:
+      type: string
+      description: |
+        Why, from a closed vocabulary, so a UI can branch and an operator can
+        filter. Every one is a sentence HarborMaster can defend from its own
+        records.
+
+        The hardest question an operator asks an automation system is "why did
+        you not update that container", and it is unanswerable unless the
+        reasoning is recorded at the moment it happened.
+      enum:
+        - eligible
+        - noPlan
+        - noUpdate
+        - notSelected
+        - noPolicy
+        - policyDisabled
+        - labelDisabled
+        - labelPaused
+        - observeMode
+        - dryRunMode
+        - approvalRequired
+        - strategyCeiling
+        - recommendation
+        - windowClosed
+        - windowUnresolvable
+        - automationPaused
+        - alreadyInFlight
+        - concurrencyLimit
+        - registryLimit
+        - runLimit
+        - refusedByService
+        - error
+
+    AutomationRun:
+      type: object
+      description: One scheduler pass.
+      required: [runId, trigger, state, startedAt]
+      properties:
+        runId: { type: string, pattern: "^run_[0-9a-f]{20}$" }
+        trigger: { $ref: "#/components/schemas/AutomationTrigger" }
+        state: { $ref: "#/components/schemas/AutomationRunState" }
+        dryRun:
+          type: boolean
+          description: |
+            A pass that could never have acted, whatever the policies said.
+        considered: { type: integer, description: Every container examined. }
+        eligible: { type: integer }
+        submitted: { type: integer }
+        skipped: { type: integer }
+        failed: { type: integer }
+        requestedBy:
+          $ref: "#/components/schemas/Requester"
+        message:
+          type: string
+          maxLength: 1024
+          description: HarborMaster's own sentence. Never a daemon or registry string.
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        durationMs: { type: integer }
+
+    AutomationDecision:
+      type: object
+      description: |
+        One container's outcome in one pass.
+
+        **Every identity here is copied from a record HarborMaster wrote
+        itself** — the container from the inventory, the image and digest from
+        the change plan, and the acquisition, execution, and rollback ids from
+        the services that created them. Nothing on this type is ever filled from
+        a caller.
+      required: [runId, containerName, verdict, reason, position, decidedAt]
+      properties:
+        runId: { type: string }
+        containerId: { type: string }
+        containerName: { type: string }
+        policyId: { type: string }
+        policyName: { type: string }
+        verdict: { $ref: "#/components/schemas/AutomationVerdict" }
+        reason: { $ref: "#/components/schemas/AutomationReason" }
+        detail:
+          type: string
+          maxLength: 1024
+          description: HarborMaster's own sentence about this decision.
+        planId: { type: string }
+        currentImage: { type: string }
+        proposedImage: { type: string }
+        proposedDigest: { type: string }
+        updateType: { $ref: "#/components/schemas/UpdateType" }
+        recommendation: { $ref: "#/components/schemas/Recommendation" }
+        acquisitionId:
+          type: string
+          description: |
+            Empty in observe and dry run, which is the whole difference between
+            those modes and automatic.
+        executionId: { type: string }
+        rollbackId: { type: string }
+        position:
+          type: integer
+          description: |
+            This decision's place in the pass's execution ORDER, so a dry run
+            renders "what would happen, in what sequence".
+        decidedAt: { type: string, format: date-time }
+
+    PauseReason:
+      type: string
+      description: |
+        Why automation stopped for a container.
+
+        `automaticRollback` is always a pause, whatever the failure count says:
+        a rollback means the change was wrong AND the host was moved twice, and
+        retrying that on a timer is how one bad image becomes an outage loop.
+      enum: [repeatedFailure, automaticRollback, operator]
+
+    PausedContainer:
+      type: object
+      description: One container automation will not touch.
+      required: [containerName, reason, pausedAt]
+      properties:
+        containerName: { type: string }
+        containerId:
+          type: string
+          description: |
+            The container as it was when the pause was recorded. It changes on
+            every recreation, so the NAME is the identity a pause is keyed on
+            and this is kept for the audit trail only.
+        reason: { $ref: "#/components/schemas/PauseReason" }
+        detail: { type: string, maxLength: 1024 }
+        failures: { type: integer }
+        policyId: { type: string }
+        rollbackId: { type: string }
+        executionId: { type: string }
+        pausedAt: { type: string, format: date-time }
+        resumeAfter:
+          type: string
+          format: date-time
+          description: |
+            When a cooldown lets automation resume by itself. Absent means it
+            never does, and a person must acknowledge.
+        acknowledgedAt: { type: string, format: date-time }
+        acknowledgedBy: { $ref: "#/components/schemas/Requester" }
+
+    AutomationRunSummary:
+      type: object
+      description: The pass-history aggregate.
+      properties:
+        total: { type: integer }
+        completed: { type: integer }
+        failed: { type: integer }
+        submitted: { type: integer }
+
+    AutomationStatus:
+      type: object
+      description: The engine's current state.
+      required: [enabled, running]
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            Whether the engine may act at all. Requires both
+            `AUTOMATION_ENABLED` and a working recreation pipeline: a deployment
+            that enabled automation but wired no execution service reports
+            disabled rather than running passes that can only ever decide.
+        running: { type: boolean, description: A pass is in flight right now. }
+        policies: { type: integer }
+        enabledPolicies: { type: integer }
+        pausedContainers: { type: integer }
+        awaitingApproval:
+          type: integer
+          description: |
+            Decisions from the MOST RECENT pass that a person has to release.
+            Older ones stay in the history and are not counted: an approval
+            answers "should this change happen now", and last week's proposal is
+            not that question.
+        lastRunAt: { type: string, format: date-time }
+        nextRunAt: { type: string, format: date-time }
+        lastRunId: { type: string }
+        lastOutcome: { type: string }
+        windowOpen:
+          type: boolean
+          description: Whether ANY enabled policy's maintenance window admits work now.
+        nextWindowOpensAt: { type: string, format: date-time }
+        nextWindowPolicyId: { type: string }
 
     Requester:
       type: object

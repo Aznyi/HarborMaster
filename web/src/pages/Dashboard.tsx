@@ -15,8 +15,10 @@ import {
   LoadingState,
 } from "../components/States";
 import { SnapshotSummary } from "../components/SnapshotSummary";
+import { useAutomationStatus } from "../hooks/useAutomation";
 import { useDriftSummary } from "../hooks/useDrift";
 import { usePolicySummary } from "../hooks/usePolicies";
+import { useSession } from "../hooks/useSession";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
 /** Outcome of a manual refresh, shown until the next attempt. */
@@ -55,6 +57,7 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
       <EventEnginePanel />
       <SnapshotSummary />
       <EstateHealthPanel />
+      <AutomationPanel />
       <ContainerMetrics status={inventory.data} />
       <CatalogMetrics status={inventory.data} />
       <WarningsPanel status={inventory.data} />
@@ -144,6 +147,114 @@ function EstateHealthPanel() {
           to start evaluating.
         </p>
       ) : null}
+    </section>
+  );
+}
+
+/**
+ * The update engine.
+ *
+ * # Why this is on the dashboard at all
+ *
+ * Everything else here reports what HarborMaster OBSERVED. This reports what it
+ * is about to DO, and it is the only panel on the page describing something
+ * that will happen without anybody pressing anything.
+ *
+ * So the panel leads with whether the engine can act, and says the next thing
+ * an operator needs: when. A dashboard that showed "3 policies" and nothing
+ * about whether they were in observe mode or automatic would be reporting a
+ * number that means two entirely different things.
+ *
+ * Renders nothing at all when the account cannot read automation, rather than
+ * an empty box — a panel that says nothing is worse than no panel.
+ */
+function AutomationPanel() {
+  const session = useSession();
+  const automation = useAutomationStatus();
+
+  if (!session.user?.permissions.includes("automation:read")) return null;
+  // A deployment without the subsystem answers 503; that is not a dashboard
+  // error, it is a feature that is not there. A malformed payload is treated
+  // the same way rather than thrown: one panel must never take the page down.
+  const engine = automation.data?.status;
+  if (automation.error || !engine) return null;
+
+  const paused = engine.pausedContainers ?? 0;
+  const waiting = engine.awaitingApproval ?? 0;
+
+  return (
+    <section
+      aria-labelledby="automation-heading"
+      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 id="automation-heading" className="text-lg font-semibold">
+          Automatic updates
+        </h2>
+        <Link to="/automation" className="text-sm font-medium text-accent hover:underline">
+          Open automation
+        </Link>
+      </div>
+      <p className="mt-1 text-sm text-content-muted">
+        {engine.enabled
+          ? "The update engine is on. A policy in Automatic mode will stop and " +
+            "replace matching containers inside its maintenance window."
+          : "The update engine is off. Policies can be written and reviewed; " +
+            "nothing will act on them."}
+      </p>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <Link
+          to="/update-policies"
+          className="rounded-lg border border-border-subtle p-4"
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Policies in force
+          </p>
+          <p className="mt-1 text-2xl font-semibold text-content">
+            {engine.enabledPolicies ?? 0}
+          </p>
+          <p className="mt-1 text-xs text-content-muted">
+            of {engine.policies ?? 0} defined
+          </p>
+        </Link>
+
+        <Link
+          to="/automation"
+          className={`rounded-lg border p-4 ${
+            waiting > 0 ? "border-warn/40" : "border-border-subtle"
+          }`}
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Waiting for approval
+          </p>
+          <p className="mt-1 text-2xl font-semibold text-content">{waiting}</p>
+          <p className="mt-1 text-xs text-content-muted">
+            {engine.windowOpen
+              ? "a maintenance window is open now"
+              : engine.nextWindowOpensAt
+                ? `next window ${formatTimestamp(engine.nextWindowOpensAt)}`
+                : "no policy has an open window"}
+          </p>
+        </Link>
+
+        <Link
+          to="/automation/paused"
+          className={`rounded-lg border p-4 ${
+            paused > 0 ? "border-danger/40" : "border-border-subtle"
+          }`}
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Paused containers
+          </p>
+          <p className="mt-1 text-2xl font-semibold text-content">{paused}</p>
+          <p className="mt-1 text-xs text-content-muted">
+            {paused === 0
+              ? "automation is not refusing to touch anything"
+              : "automation stopped trying; a person has to look"}
+          </p>
+        </Link>
+      </div>
     </section>
   );
 }

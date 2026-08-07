@@ -57,6 +57,14 @@ const (
 	PermAcquisitionRead Permission = "acquisition:read"
 	// PermExecutionRead covers container recreation history.
 	PermExecutionRead Permission = "execution:read"
+	// PermAutomationRead covers update policies, scheduler passes, decisions,
+	// and paused containers.
+	//
+	// A READ permission every role holds, deliberately. Automation is the one
+	// subsystem that changes the host with nobody watching, and a viewer who
+	// cannot see what it decided cannot answer the question the role exists to
+	// let them answer.
+	PermAutomationRead Permission = "automation:read"
 )
 
 // Operator permissions.
@@ -105,12 +113,42 @@ const (
 	PermRollbackCreate Permission = "rollback:create"
 	// PermRollbackCancel stops a rollback that has not yet changed anything.
 	PermRollbackCancel Permission = "rollback:cancel"
+
+	// PermAutomationRun starts a scheduler pass by hand, or previews one as a
+	// dry run.
+	//
+	// An operator permission because a manual pass submits exactly the work the
+	// scheduled pass would have submitted a few minutes later -- it changes
+	// WHEN, not WHETHER. What may be updated at all is the policy's business,
+	// and editing a policy is an administrator permission.
+	PermAutomationRun Permission = "automation:run"
+	// PermAutomationApprove releases a decision a policy held for a person.
+	//
+	// The whole point of approval mode is that a human commits, so the
+	// permission belongs to the role that would have performed the update by
+	// hand.
+	PermAutomationApprove Permission = "automation:approve"
+	// PermAutomationPause stops automation for one container, and resumes it.
+	//
+	// Pausing is a safety action anyone who can operate the host should be able
+	// to take immediately. Resuming is the same permission: an operator who
+	// investigated the failure is the person who should clear it, and requiring
+	// an administrator would make the safe state the inconvenient one.
+	PermAutomationPause Permission = "automation:pause"
 )
 
 // Administrator permissions.
 //
 // Managing who may do the above, and reading the record of who did.
 const (
+	// PermAutomationManage creates, edits, and withdraws UPDATE policies.
+	//
+	// The most consequential permission in HarborMaster, and an administrator
+	// one for the reason PermPolicyManage is: an update policy decides what the
+	// host may do to itself unattended. An operator who could write one could
+	// grant themselves a standing, unattended version of execution:create over
+	// any container a selector reaches.
+	PermAutomationManage Permission = "automation:manage"
 	// PermPolicyManage creates, updates, and archives compliance rules.
 	//
 	// An ADMINISTRATOR permission rather than an operator one: a policy is what
@@ -144,6 +182,8 @@ const (
 var AllPermissions = []Permission{
 	PermAcquisitionCancel, PermAcquisitionCreate, PermAcquisitionRead,
 	PermAuditRead,
+	PermAutomationApprove, PermAutomationManage, PermAutomationPause,
+	PermAutomationRead, PermAutomationRun,
 	PermDriftAnnotate, PermDriftRead,
 	PermEventRead,
 	PermExecutionCancel, PermExecutionCreate, PermExecutionRead,
@@ -190,6 +230,8 @@ func (p Permission) Describe() string {
 		return "read container recreation history"
 	case PermRollbackRead:
 		return "read rollback history"
+	case PermAutomationRead:
+		return "read update policies, automation passes, and paused containers"
 
 	case PermInventoryRefresh:
 		return "re-read this host's inventory"
@@ -217,7 +259,16 @@ func (p Permission) Describe() string {
 		return "ROLL A CONTAINER BACK to its preserved original"
 	case PermRollbackCancel:
 		return "cancel a rollback"
+	case PermAutomationRun:
+		return "run an automation pass now, or preview one"
+	case PermAutomationApprove:
+		return "APPROVE an automation decision, applying the update"
+	case PermAutomationPause:
+		return "pause and resume automation for a container"
 
+	case PermAutomationManage:
+		return "create, edit, and withdraw UPDATE POLICIES, which let HarborMaster " +
+			"change containers unattended"
 	case PermPolicyManage:
 		return "create, edit, and withdraw compliance policies"
 	case PermUserManage:
@@ -231,11 +282,13 @@ func (p Permission) Describe() string {
 
 // Privileged reports whether a permission can change the Docker host.
 //
-// Exactly two do. Used to mark them in the UI and to decide which audit events
-// are logged at a level a default configuration shows.
+// Four do: the three that reach a socket directly, plus approving an automation
+// decision, which submits an acquisition that will lead to a recreation. Used to
+// mark them in the UI and to decide which audit events are logged at a level a
+// default configuration shows.
 func (p Permission) Privileged() bool {
 	return p == PermAcquisitionCreate || p == PermExecutionCreate ||
-		p == PermRollbackCreate
+		p == PermRollbackCreate || p == PermAutomationApprove
 }
 
 // ---------------------------------------------------------------- roles --
@@ -320,6 +373,7 @@ var viewerPermissions = []Permission{
 	PermAcquisitionRead,
 	PermExecutionRead,
 	PermRollbackRead,
+	PermAutomationRead,
 }
 
 // operatorPermissions are what an Operator adds to the Viewer set.
@@ -337,10 +391,14 @@ var operatorPermissions = []Permission{
 	PermRollbackCreate,
 	PermRollbackCancel,
 	PermExecutionCancel,
+	PermAutomationRun,
+	PermAutomationApprove,
+	PermAutomationPause,
 }
 
 // administratorPermissions are what an Administrator adds to the Operator set.
 var administratorPermissions = []Permission{
+	PermAutomationManage,
 	PermPolicyManage,
 	PermUserManage,
 	PermAuditRead,
