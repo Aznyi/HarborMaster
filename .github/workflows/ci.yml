@@ -53,8 +53,16 @@ jobs:
       # -race is not optional here: the event engine owns several long-lived
       # goroutines and a bounded queue, and the detector is what stops a data
       # race reaching a release.
+      #
+      # The timeout is stated rather than left at `go test`'s ten-minute
+      # default. The store package runs several hundred tests against real
+      # SQLite databases, and under -race the pure-Go driver is instrumented
+      # statement by statement -- close enough to the default that CI once
+      # failed on the timeout rather than on a test. An explicit bound makes the
+      # limit a decision, and keeps a genuine deadlock a loud failure rather
+      # than an unbounded run.
       - name: Test
-        run: go test -race -coverprofile=coverage.out ./...
+        run: go test -race -timeout 20m -coverprofile=coverage.out ./...
         env:
           CGO_ENABLED: "1"
 

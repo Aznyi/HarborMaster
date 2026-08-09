@@ -455,6 +455,9 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, issued
 	// cookie back over http://127.0.0.1, which breaks sign-in for the default
 	// standalone deployment. The suppression is this one line and this one
 	// case; the off-box case is what the audit closed.
+	//nolint:gosec // G124: HttpOnly is set and SameSite is Strict or Lax, never None.
+	// Secure is computed, so the analyser cannot prove it; the one case that
+	// yields false is the loopback-without-TLS case argued above.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName(secure),
 		Value:    issued.Token,
@@ -513,6 +516,8 @@ func (s *Server) expireCookie(w http.ResponseWriter, name string, secure bool) {
 	if s.authCfg.CookieSameSiteLax {
 		sameSite = http.SameSiteLaxMode
 	}
+	//nolint:gosec // G124: a deletion. HttpOnly is set and SameSite is Strict or
+	// Lax; Secure is the caller's, and the value being written is empty.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",

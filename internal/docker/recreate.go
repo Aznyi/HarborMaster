@@ -236,6 +236,8 @@ func (c *CapturedConfig) MarshalJSON() ([]byte, error) {
 // anyway, because a hand-built encoder that assumes its input is safe is how a
 // hand-built encoder becomes a vulnerability.
 func quoteJSON(value string) string {
+	const digits = "0123456789abcdef"
+
 	var builder strings.Builder
 	builder.Grow(len(value) + 2)
 	builder.WriteByte('"')
@@ -247,7 +249,12 @@ func quoteJSON(value string) string {
 		case char == '\\':
 			builder.WriteString(`\\`)
 		case char < 0x20:
-			builder.WriteString(fmt.Sprintf(`\u%04x`, char))
+			// The branch bounds char below 0x20, so the escape is always
+			// \u00 followed by two digits. Written out rather than formatted:
+			// the two nibbles are the whole of it.
+			builder.WriteString(`\u00`)
+			builder.WriteByte(digits[char>>4])
+			builder.WriteByte(digits[char&0xf])
 		default:
 			builder.WriteByte(char)
 		}

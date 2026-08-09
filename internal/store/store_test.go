@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,11 +13,60 @@ import (
 	"github.com/Aznyi/HarborMaster/internal/store"
 )
 
+// migratedTemplate is the bytes of a database that has had the migrations
+// applied once. Built at most once per test binary.
+//
+// APPLYING the migrations is the dominant cost of this package's tests, and it
+// is paid by nearly three hundred of them: twenty-one files, each in its own
+// transaction, on a fresh file, is around eighty milliseconds. Sequentially
+// that is most of the suite's runtime, and under `-race` -- where the pure-Go
+// SQLite driver is instrumented statement by statement -- it was enough to push
+// the package past `go test`'s ten-minute default and fail CI on a timeout.
+//
+// A copy is not a weaker fixture. store.Open still runs against it in full:
+// journal mode, the integrity check, and the migration history validation. What
+// it does not do is execute twenty-one DDL transactions to reach a state that
+// is byte-for-byte the one it just read.
+//
+// Tests that are ABOUT migrating -- the matrix, the upgrade path, the
+// validation refusals -- call store.Open on an empty path directly and are
+// unaffected by this.
+var migratedTemplate = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "harbormaster-template-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	path := filepath.Join(dir, "harbormaster.db")
+	db, err := store.Open(context.Background(), path)
+	if err != nil {
+		return nil, err
+	}
+	// Close checkpoints the write-ahead log and drops the -wal and -shm
+	// sidecars, so the single file read below is the whole database. Copying
+	// before the close would capture a database whose most recent pages are in
+	// a file the copy does not include.
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+})
+
 // openTestDB returns a migrated database in a per-test temporary directory.
 func openTestDB(t *testing.T) *store.DB {
 	t.Helper()
 
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "harbormaster.db"))
+	template, err := migratedTemplate()
+	if err != nil {
+		t.Fatalf("build migrated template: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "harbormaster.db")
+	if err := os.WriteFile(path, template, 0o600); err != nil {
+		t.Fatalf("seed test database: %v", err)
+	}
+
+	db, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

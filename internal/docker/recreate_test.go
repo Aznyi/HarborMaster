@@ -575,3 +575,84 @@ func TestFakeMutatorEnforcesNameUniqueness(t *testing.T) {
 		t.Fatal("the fake created a second container under a name already in use")
 	}
 }
+
+// ------------------------------------------------ the hand-built encoder --
+
+// TestQuoteJSONEscapesEveryControlByte pins the escaping in quoteJSON.
+//
+// MarshalJSON is hand-built rather than reflected over a shadow struct, so
+// there is no second type to drift from -- but a hand-built encoder is only
+// safe while its escaping is exhaustive, and nothing was covering the control
+// range. The identifiers it quotes are constrained elsewhere; that is a reason
+// the escaping is unlikely to be exercised, not a reason for it to be wrong.
+//
+// Two things are asserted, and the pair is the point:
+//
+//   - The output decodes back to EXACTLY the bytes that went in. Comparing
+//     bytes against encoding/json would be the WRONG test -- the standard
+//     library prefers the short forms and both are correct JSON.
+//   - The output is byte-identical to the formatted escape. The branch computes
+//     two hex nibbles by hand, and an error in either would still produce a
+//     plausible escape -- for the wrong character.
+func TestQuoteJSONEscapesEveryControlByte(t *testing.T) {
+	for b := 0; b < 0x20; b++ {
+		input := "a" + string(rune(b)) + "b"
+
+		var decoded string
+		if err := json.Unmarshal([]byte(quoteJSON(input)), &decoded); err != nil {
+			t.Fatalf("byte %#02x produced JSON that does not parse: %v", b, err)
+		}
+		if decoded != input {
+			t.Errorf("byte %#02x round-tripped to %q, want %q", b, decoded, input)
+		}
+
+		// Stated as the escape a formatted implementation produces, so this
+		// compares against the obvious version rather than restating the
+		// arithmetic and agreeing with itself.
+		want := `"` + fmt.Sprintf(`\u%04x`, b) + `"`
+		if got := quoteJSON(string(rune(b))); got != want {
+			t.Errorf("quoteJSON(%#02x) = %s, want %s", b, got, want)
+		}
+	}
+
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{`"`, `"\""`},
+		{`\`, `"\\"`},
+		{"plain", `"plain"`},
+		{"", `""`},
+	} {
+		if got := quoteJSON(tc.in); got != tc.want {
+			t.Errorf("quoteJSON(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestCapturedConfigMarshalsToParseableJSON is the same guarantee one level up:
+// the four quoted identifiers must compose into a document an ordinary decoder
+// accepts, with the captured contents still absent from it.
+func TestCapturedConfigMarshalsToParseableJSON(t *testing.T) {
+	captured := capturedWithSecret()
+	captured.ContainerName = "web\x01odd\"quote"
+
+	encoded, err := json.Marshal(captured)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var fields map[string]string
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("the hand-built document does not parse: %v (%s)", err, encoded)
+	}
+	if fields["containerName"] != "web\x01odd\"quote" {
+		t.Errorf("containerName round-tripped to %q", fields["containerName"])
+	}
+	if len(fields) != 4 {
+		t.Errorf("field count = %d, want 4: %s", len(fields), encoded)
+	}
+	if strings.Contains(string(encoded), testSecret) {
+		t.Error("the marshalled capture carries the secret")
+	}
+}
