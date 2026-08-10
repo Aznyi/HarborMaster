@@ -1,9 +1,15 @@
 // Command harbormaster runs the HarborMaster API server and serves the
 // embedded web interface.
 //
-// HarborMaster is read-only today: it inventories the Docker Engine's
-// reachability and establishes the snapshot store. It never creates, updates,
-// removes, or restarts a container, and it never executes a command.
+// HarborMaster observes a Docker host and, when a deployment explicitly opts
+// in, changes it: it inventories containers, snapshots their configuration,
+// tracks images against their registries, plans changes, and can acquire an
+// image, recreate a container onto it, verify the result, and roll it back.
+//
+// Every one of those mutations is off by default and reaches Docker through a
+// separate capability interface held by exactly one service. The read-only
+// runtime interface every other service holds cannot change anything, and it
+// never executes a command inside a container.
 //
 // Usage:
 //

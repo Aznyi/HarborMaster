@@ -62,6 +62,7 @@ by the time HarborMaster can change a container it can already undo it.
 - [Manual container recreation](#manual-container-recreation)
 - [Manual rollback](#manual-rollback)
 - [Automatic updates](#automatic-updates)
+- [Image lineage](#image-lineage)
 - [Notifications](#notifications)
 - [Updating HarborMaster](#updating-harbormaster)
 - [Reliability and recovery](#reliability-and-recovery)
@@ -221,8 +222,14 @@ installed.
 
 ```sh
 docker volume create harbormaster-data
-docker pull ghcr.io/aznyi/harbormaster:latest
+docker pull ghcr.io/aznyi/harbormaster:0.9.0-beta.1
 ```
+
+**Pin the exact version.** `latest` is reserved for stable releases and does not
+point at a beta, so it will not resolve to this one. If you would rather track
+the newest beta as it lands, use `:beta` — a rolling tag that moves with every
+prerelease, which is convenient and means an upgrade can arrive without you
+choosing it. See [Container image](#container-image) for the full tag list.
 
 ### 3. Start it
 
@@ -239,7 +246,7 @@ docker run -d \
   -p 127.0.0.1:8080:8080 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v harbormaster-data:/var/lib/harbormaster \
-  ghcr.io/aznyi/harbormaster:latest
+  ghcr.io/aznyi/harbormaster:0.9.0-beta.1
 ```
 
 What each hardening flag buys you:
@@ -302,7 +309,7 @@ report, not a reason to restart the process.
 The named volume is what carries the database across the replacement:
 
 ```sh
-docker pull ghcr.io/aznyi/harbormaster:latest
+docker pull ghcr.io/aznyi/harbormaster:0.9.0-beta.1   # or the version you are moving to
 docker stop harbormaster
 docker rm harbormaster
 # Re-run the `docker run` command from step 3 unchanged.
@@ -313,13 +320,14 @@ event history survive. Roll back by re-running with the previous digest.
 
 ### Pinning a digest
 
-`latest` is a moving tag. It is not immutable: the same name points at different
-images over time, and pulling it twice can give you two different builds. For
-anything you need to reproduce, pin the digest:
+`latest` and `beta` are moving tags. Neither is immutable: the same name points
+at different images over time, and pulling it twice can give you two different
+builds. A version tag such as `0.9.0-beta.1` is stable in practice but is still
+a tag. For anything you need to reproduce exactly, pin the digest:
 
 ```sh
 # Record the digest you are running
-docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aznyi/harbormaster:latest
+docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aznyi/harbormaster:0.9.0-beta.1
 
 # Deploy that exact image
 docker run -d --name harbormaster \
@@ -332,7 +340,7 @@ digest appears in the container workflow's job summary, and the image carries a
 signed provenance attestation you can verify:
 
 ```sh
-gh attestation verify oci://ghcr.io/aznyi/harbormaster:latest -R Aznyi/HarborMaster
+gh attestation verify oci://ghcr.io/aznyi/harbormaster:0.9.0-beta.1 -R Aznyi/HarborMaster
 ```
 
 ## Accounts and access
@@ -538,11 +546,25 @@ Published to `ghcr.io/aznyi/harbormaster` for `linux/amd64` and `linux/arm64`.
 | --- | --- |
 | Pull request | none — built and smoke-tested only |
 | Push to `main` | `edge`, `sha-<full commit sha>` |
-| Release `v0.1.0` | `0.1.0`, `0.1`, `0`, `latest` |
+| Stable release `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest`, `sha-<full commit sha>` |
+| Prerelease `v0.9.0-beta.1` | `0.9.0-beta.1`, `beta`, `sha-<full commit sha>` |
 | Manual dispatch | none, unless `push_image` is set, and then only `dispatch-<sha>` |
 
-`latest` moves on releases and nowhere else, so merging to `main` can never
-replace the tag a production host is pulling.
+Which tag to use:
+
+| Tag | Moves | Use it when |
+| --- | --- | --- |
+| `0.9.0-beta.1` | no | You want this exact beta. **The recommended way to run the beta.** |
+| `beta` | every prerelease | You want the newest beta and accept that it changes under you. |
+| `latest` | every **stable** release | You want the newest stable release. It does not point at a beta. |
+| `edge` | every push to `main` | You are testing unreleased work. |
+| `sha-<sha>` | no | You need an immutable reference to one commit. |
+
+**`latest` is reserved for stable releases.** A prerelease never claims it, and
+never claims `0.9` or `0` either — so an operator tracking `latest` is not moved
+onto a beta by a release they did not choose. `latest` moves on releases and
+nowhere else, so merging to `main` can never replace the tag a production host
+is pulling.
 
 The runtime layer is `gcr.io/distroless/static-debian13:nonroot`: no shell, no
 package manager, no interpreter, and no curl or wget. The binary is static
@@ -1773,6 +1795,11 @@ is no label for the mode.
 
 A misspelled `io.harbormaster.update.*` key is reported rather than ignored.
 
+Every label above is one **you** set and HarborMaster reads. There is exactly
+one that goes the other way — `io.harbormaster.image.tracking`, which a
+recreation writes onto the replacement to record which tag the new digest was
+approved from. See [Image lineage](#image-lineage).
+
 ### What happens when one fails
 
 An unattended update that fails verification is **rolled back automatically**,
@@ -1827,6 +1854,99 @@ and the recreation resumes rather than abandons. A pass a restart cut short is
 recorded as `interrupted`: it submits work to services that checkpoint their
 own, so an interrupted pass is a bookkeeping gap and never a host in an unknown
 state.
+
+## Image lineage
+
+What a container **runs** and what HarborMaster **follows** for it are two
+different things, and after the first automated update they stop being the same
+string.
+
+A recreation is digest-pinned on purpose. The replacement is created from
+`repo@sha256:…` — the exact artefact that was planned, acquired, approved and
+verified — never from the mutable tag it came from, because a tag can move
+between the approval and the create.
+
+That is correct, and on its own it was also fatal. The next inventory pass saw
+only a digest; a digest cannot move; so the planner had nothing to propose and
+the container fell out of automation permanently. **Every container received
+exactly one automated update, once, and then never again.**
+
+Lineage is the record that closes that:
+
+```
+EXECUTION REFERENCE   repo@sha256:…   what the container runs. Immutable.
+TRACKING REFERENCE    repo:tag        what HarborMaster watches. Mutable.
+```
+
+Update discovery resolves the **tracking** reference against the registry and
+compares what it yields against the digest actually **running**. Execution still
+only ever uses a digest that came out of the pipeline.
+
+### What you will see
+
+A container HarborMaster has updated shows both, on its detail page and in the
+API:
+
+| Field | Example |
+| --- | --- |
+| Image | `docker.io/library/nginx@sha256:28bd5fe8…` |
+| Tracking | `nginx:1.27` |
+
+A container HarborMaster is not following reads **`not tracked — updates are
+not followed for this container`**, which is a real answer rather than an empty
+one.
+
+### The label HarborMaster writes
+
+This is the one label HarborMaster **sets on your containers** rather than
+reads from them:
+
+```
+io.harbormaster.image.tracking=docker.io/library/nginx:1.27
+```
+
+It is written onto the replacement by a recreation, so lineage is recoverable
+from `docker inspect` alone if the database is ever lost. It is the reason a
+recreated container carries one label it did not have before, and drift will
+report that addition.
+
+**It is evidence, never authority.** The database is what HarborMaster
+believes; the label can corroborate a record that already exists, and it can
+never create one. A label on a container HarborMaster has no record of managing
+is refused as `uncorroborated`, and a label naming a *different repository* than
+the image actually running is refused as a cross-repository substitution. Anyone
+who can run `docker run` can set this string; if believing it were enough, an
+unprivileged user could point HarborMaster's update discovery at a repository
+they control.
+
+Preservation verification ignores this one key on both sides — HarborMaster
+writing its own bookkeeping is not a configuration change — and **only** this
+key. Every label of yours is still compared exactly as before.
+
+### Containers that were already digest-pinned
+
+A container running a digest that HarborMaster cannot attribute to a tag it
+trusts is recorded as **untracked**, preserved, and left alone. It is not
+broken: a container somebody pinned by hand is *correctly* untracked, and
+inventing a tag for it would be HarborMaster guessing what you meant.
+
+This includes workloads that a HarborMaster older than this release had already
+updated. There is no automatic recovery of their tracking reference, because
+every way of deriving one — asking the registry which tags resolve to that
+digest, assuming `latest` — produces a tag you never chose. See
+[Upgrading](docs/engineering/upgrading.md).
+
+To bring such a container back under automation, recreate it from the tag you
+want followed; the next reconciliation records it.
+
+### When the host changes underneath it
+
+Lineage is a claim, and Docker is the truth. Every disagreement resolves to one
+of three outcomes — establish, confirm, or re-establish from what is actually
+running — and never to a fourth in which HarborMaster keeps a claim the host
+contradicts. When it re-establishes, the record says the change was **observed**
+rather than performed: HarborMaster never credits itself with a host change it
+did not make.
 
 ## Notifications
 

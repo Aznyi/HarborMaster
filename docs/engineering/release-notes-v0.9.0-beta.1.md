@@ -6,7 +6,65 @@ The first beta. Everything below is implemented, tested, and enforced; what
 > **Not tagged or published.** This document is the prepared release note. See
 > [Release readiness](#release-readiness) for what is still outstanding.
 
+## Installing this beta
+
+```sh
+docker pull ghcr.io/aznyi/harbormaster:0.9.0-beta.1
+```
+
+**`latest` does not point at this release.** It is reserved for stable releases,
+so pin the exact version above — or use `:beta`, the rolling prerelease channel,
+if you want the newest beta as it lands and accept that it moves under you.
+
+The Compose file defaults to this version; override `HARBORMASTER_TAG` to change
+channel, or set `HARBORMASTER_IMAGE` to a digest for a fully reproducible
+deployment. Published for `linux/amd64` and `linux/arm64`.
+
 ## What is new
+
+### Persistent image lineage — containers stay updatable
+
+A recreation is digest-pinned on purpose: the replacement is created from the
+exact artefact that was planned, acquired, approved and verified, never from
+the mutable tag it came from.
+
+That was correct and, on its own, fatal. The next inventory pass saw only a
+digest, a digest cannot move, so the planner had nothing to propose and the
+container fell out of automation permanently. **Every container received exactly
+one automated update, and then never another one.**
+
+HarborMaster now records, per container, what it *follows* as distinct from
+what that container *runs*:
+
+```
+EXECUTION REFERENCE   repo@sha256:…   what runs. Immutable.
+TRACKING REFERENCE    repo:tag        what is watched. Mutable.
+```
+
+Update discovery resolves the tracking reference and compares it against the
+digest actually running. Execution still only ever uses a digest that came out
+of the pipeline.
+
+What shapes the design:
+
+- **The database is authoritative; the container label is evidence.** A
+  recreation writes `io.harbormaster.image.tracking` onto the replacement so
+  lineage survives a lost database and is readable with `docker inspect`. A
+  label alone can never confer managed status, and one naming a different
+  repository than the image running is refused outright — otherwise anyone able
+  to run `docker run` could point update discovery at a repository they
+  control.
+- **The digest a container runs is resolved from the local image**, matched to
+  that exact repository, and ambiguity is reported as unknown rather than
+  guessed.
+- **A rollback returns lineage to the artefact that is running again**, without
+  touching the tag you asked HarborMaster to follow.
+- **A host changed underneath HarborMaster re-establishes from what is
+  actually running**, recorded as *observed* — HarborMaster never credits
+  itself with a change it did not make.
+- **Existing digest-pinned workloads are left alone**, marked untracked and
+  clearly shown as such. No tag is invented. See
+  [Upgrading](upgrading.md#containers-an-older-harbormaster-already-updated).
 
 ### Operator notifications
 
@@ -116,15 +174,13 @@ matrix:
   Backup is a command run outside the server process, so the running server
   never observes a backup outcome. The event exists so that a future scheduled
   backup cannot ship without its notification; today it never fires.
-- **No live-Docker acceptance test was run for this release on the development
-  machine**, which has no Docker daemon. The integration suite runs in CI
-  against the runner's daemon across five Engine API versions.
-- **No multi-architecture image build or container vulnerability scan was run
-  locally**, for the same reason. Both run in CI.
-- **No browser acceptance pass was run against a live deployment.** The
-  frontend's behaviour is covered by 257 component tests asserting on roles and
-  accessible names, but nobody has clicked through a running instance for this
-  release.
+- **The literal same-tag update sequence has not been executed against a
+  registry under our control.** Repeated updates through a moving tag are
+  covered live against a public registry — including a digest moving beneath an
+  unchanged tag — and deterministically end to end. Reproducing the exact
+  A→B→C sequence would need a private registry, and reaching one would mean
+  relaxing the SSRF, TLS and registry-host controls. It was not done, and those
+  controls were not touched.
 - **Notification delivery has not been exercised against a real Slack,
   Discord, Teams, or SMTP endpoint.** The transport, the address guard, the
   channel formatting, and the engine are tested; the wire format has not been
@@ -155,7 +211,9 @@ matrix:
 | Frontend typecheck and tests | Passing |
 | OpenAPI covers every routed path | Enforced by test |
 | Migration matrix | Every schema version upgrades to current |
-| Live Docker acceptance | **Not run.** No daemon on the development machine |
-| Multi-architecture image build | **Not run locally.** CI only |
-| Container vulnerability scan | **Not run locally.** CI only |
-| Browser acceptance pass | **Not run** |
+| Downgrade refusal | A database from a newer build is refused, not migrated |
+| Live Docker acceptance | Passing. Full pipeline, repeated updates, rollback, and interruption recovery against a real daemon |
+| Multi-architecture image build | Passing. `linux/amd64` and `linux/arm64` |
+| Container vulnerability scan | Passing. No HIGH or CRITICAL findings |
+| Authenticated container smoke tests | 74 of 74 passing |
+| Browser acceptance pass | Passing. Every route, no console errors or failed requests |

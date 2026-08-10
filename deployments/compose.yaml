@@ -58,7 +58,12 @@ name: harbormaster
 
 services:
   harbormaster:
-    image: ${HARBORMASTER_IMAGE:-ghcr.io/aznyi/harbormaster}:${HARBORMASTER_TAG:-latest}
+    # The default is the current release, not `latest`: `latest` is reserved for
+    # STABLE releases, so during the beta it resolves to nothing and a default of
+    # `latest` would leave `docker compose up` unable to pull. Override with
+    # HARBORMASTER_TAG — `beta` to follow the newest prerelease — or pin a digest
+    # through HARBORMASTER_IMAGE for an immutable deployment.
+    image: ${HARBORMASTER_IMAGE:-ghcr.io/aznyi/harbormaster}:${HARBORMASTER_TAG:-0.9.0-beta.1}
     container_name: harbormaster
     restart: unless-stopped
 

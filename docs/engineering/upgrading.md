@@ -124,3 +124,39 @@ Nothing to do beyond the steps above. Two things are worth knowing:
   `notification:manage`. They are added to the existing roles automatically:
   every role can read the delivery history, and only an administrator can
   configure destinations. No account changes.
+- **Image lineage is new**, and one migration (`0022_image_lineage`) creates its
+  table. Lineage for the containers you are running is established from what
+  they declare on the first inventory pass after the upgrade; nothing is
+  recreated to do it.
+
+### Containers an older HarborMaster already updated
+
+This is the one upgrade note worth reading twice.
+
+A HarborMaster older than this release recreated containers onto a digest and
+kept no record of the tag that digest came from. Those containers declare
+`repo@sha256:…` and nothing else, so on upgrade they are recorded as
+**untracked**: preserved, running, visible, and *not* candidates for automated
+updates.
+
+They are not broken and nothing is done to them. HarborMaster does not guess a
+tracking reference, because every way of deriving one — asking the registry
+which tags currently resolve to that digest, assuming `latest` — produces a tag
+you never chose, and acting on a guess is how automation installs something
+nobody approved.
+
+To bring one back under automation, recreate it yourself from the tag you want
+followed:
+
+```bash
+docker rm -f web
+docker run -d --name web … nginx:1.27
+```
+
+The next reconciliation records `nginx:1.27` as its tracking reference, and it
+is a normal managed container from then on. Containers HarborMaster updates
+*after* this release carry their tracking reference forward automatically and
+never need this.
+
+You can see which containers are affected on the Containers page: an untracked
+one reads **`not tracked — updates are not followed for this container`**.

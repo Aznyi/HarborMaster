@@ -306,7 +306,16 @@ function CreateAccount({
       }}
       className="flex flex-wrap items-end gap-3 rounded-xl border border-border-subtle bg-surface-raised p-4"
     >
-      <div className="flex flex-col gap-1">
+      {/*
+        `min-w-0` on the field wrappers, `w-full` on the controls.
+
+        A flex item defaults to `min-width: auto`, so it refuses to shrink below
+        its content. The role options are whole sentences, which made the select
+        as wide as its longest one and pushed the page sideways on a narrow
+        screen. With the floor removed the controls fill whatever the row can
+        give them and the page never scrolls horizontally.
+      */}
+      <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="new-username" className="text-sm font-medium">
           New account
         </label>
@@ -316,11 +325,11 @@ function CreateAccount({
           spellCheck={false}
           onChange={(event) => setUsername(event.target.value)}
           placeholder="username"
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
+          className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
         />
       </div>
 
-      <div className="flex flex-col gap-1">
+      <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="new-role" className="text-sm font-medium">
           Role
         </label>
@@ -328,7 +337,7 @@ function CreateAccount({
           id="new-role"
           value={role}
           onChange={(event) => setRole(event.target.value as Role)}
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
+          className="w-full rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm"
         >
           <option value="viewer">viewer — read only</option>
           <option value="operator">operator — can act on the estate</option>

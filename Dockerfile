@@ -87,7 +87,7 @@ ARG BUILD_DATE=unknown
 # The source label is what connects the published package to this repository in
 # the GitHub Packages UI.
 LABEL org.opencontainers.image.title="HarborMaster" \
-      org.opencontainers.image.description="Safety-first container lifecycle manager: read-only Docker inventory, configuration snapshots, and health reporting." \
+      org.opencontainers.image.description="Safety-first container lifecycle manager: Docker inventory, configuration snapshots, drift and compliance, image intelligence, change planning, and verified container updates with rollback. Every capability that changes a host is off by default." \
       org.opencontainers.image.source="https://github.com/Aznyi/HarborMaster" \
       org.opencontainers.image.url="https://github.com/Aznyi/HarborMaster" \
       org.opencontainers.image.documentation="https://github.com/Aznyi/HarborMaster/blob/main/README.md" \
@@ -118,8 +118,12 @@ VOLUME ["/var/lib/harbormaster"]
 
 # Inside a container the network namespace is the isolation boundary, so
 # binding to all interfaces is correct here even though the bare-binary default
-# is loopback. Publish the port to 127.0.0.1 on the host unless an
-# authenticating proxy sits in front of it — HarborMaster has no auth yet.
+# is loopback.
+#
+# Publish the port to 127.0.0.1 on the host unless a TLS-terminating proxy sits
+# in front of it. HarborMaster authenticates every request and there is no
+# setting that disables that, but it speaks plain HTTP: the session cookie
+# needs a trusted network path or a proxy that provides one.
 ENV HARBORMASTER_HTTP_ADDR=0.0.0.0:8080 \
     HARBORMASTER_DB_PATH=/var/lib/harbormaster/harbormaster.db \
     HARBORMASTER_DOCKER_HOST=unix:///var/run/docker.sock \

@@ -139,21 +139,41 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # `latest=false` disables the automatic latest tag so the rule below
-          # is the only thing that can move it.
+          # `latest=false` disables the automatic latest tag so the rules below
+          # are the only things that can move it.
+          #
+          # Release channels, and why they are separate:
+          #
+          #   latest  STABLE ONLY. A prerelease must never move it: the Compose
+          #           default and every published example resolve through this
+          #           tag, so a beta landing here would upgrade every operator
+          #           who followed the documentation into a prerelease without
+          #           asking. `github.event.release.prerelease` is the flag the
+          #           person cutting the release already sets.
+          #   beta    The rolling prerelease channel, for operators who opt in
+          #           to the newest beta on purpose.
+          #   X.Y.Z   The exact version, always. This is what the beta
+          #           documentation tells people to pin.
+          #   sha-…   Immutable, emitted for pushes AND releases, so a published
+          #           release is addressable by commit and not only by a tag
+          #           that could later be re-pointed.
+          #
+          # {{major}}.{{minor}} and {{major}} are skipped by metadata-action for
+          # a prerelease, so `0.9` and `0` cannot be claimed by a beta either.
           flavor: |
             latest=false
           tags: |
             type=edge,branch=main
-            type=sha,prefix=sha-,format=long,enable=${{ github.event_name == 'push' }}
+            type=sha,prefix=sha-,format=long,enable=${{ github.event_name == 'push' || github.event_name == 'release' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease == true }}
             type=raw,value=dispatch-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.title=HarborMaster
-            org.opencontainers.image.description=Safety-first container lifecycle manager: read-only Docker inventory, configuration snapshots, and health reporting.
+            org.opencontainers.image.description=Safety-first container lifecycle manager: Docker inventory, configuration snapshots, drift and compliance, image intelligence, change planning, and verified container updates with rollback. Every capability that changes a host is off by default.
             org.opencontainers.image.licenses=MIT
           annotations: |
             org.opencontainers.image.title=HarborMaster

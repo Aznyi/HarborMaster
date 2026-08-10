@@ -507,7 +507,13 @@ function ImageRow({ intel }: { intel: ImageIntel }) {
           )}
         </div>
 
-        <div className="min-w-0 max-w-md shrink-0">
+        {/*
+          `shrink-0` holds the digest comparison at its full width beside the
+          summary on a wide screen. Below `sm` there is not room for both, and
+          refusing to shrink pushed the whole page sideways — so the floor only
+          applies once the viewport can afford it.
+        */}
+        <div className="min-w-0 max-w-full sm:max-w-md sm:shrink-0">
           <DigestComparison intel={intel} />
         </div>
       </div>
