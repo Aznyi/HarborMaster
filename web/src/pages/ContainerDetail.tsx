@@ -355,6 +355,26 @@ function OverviewTab({ detail }: { detail: ContainerDetailData }) {
           <Field label="Host" value={overview.hostId} />
           <Field label="Image" value={overview.image.raw} mono />
           <Field label="Image ID" value={overview.imageId} mono />
+          {/*
+            What this container FOLLOWS, next to what it RUNS.
+
+            A container HarborMaster has updated is created from an immutable
+            `repo@sha256:...`, so the Image field above shows a digest. Without
+            this, an actively automated workload reads as deliberately pinned —
+            exactly backwards — and an operator has no way to see which tag will
+            drive its next update.
+          */}
+          <Field
+            label="Tracking"
+            value={
+              detail.imageLineage?.state === "tracked"
+                ? (detail.imageLineage.trackingFamiliar ??
+                  detail.imageLineage.trackingReference)
+                : "not tracked — updates are not followed for this container"
+            }
+            mono={detail.imageLineage?.state === "tracked"}
+            span
+          />
           <Field label="Created" value={formatTimestamp(overview.createdAt)} />
           <Field label="Started" value={formatTimestamp(overview.startedAt)} />
           <Field label="Finished" value={formatTimestamp(overview.finishedAt)} />

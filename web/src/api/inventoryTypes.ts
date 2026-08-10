@@ -366,10 +366,38 @@ export interface Image {
   labels?: Record<string, string>;
 }
 
+/**
+ * What HarborMaster FOLLOWS for a container, as distinct from the immutable
+ * digest the container RUNS.
+ *
+ * A container HarborMaster has updated is created from `repo@sha256:...`, so
+ * showing only the running reference makes an actively automated workload read
+ * as deliberately pinned — the opposite of the truth.
+ *
+ * Absent when HarborMaster holds no lineage, which is a real answer rather than
+ * an empty one.
+ */
+export interface ImageLineage {
+  containerName: string;
+  containerId?: string;
+  state: "tracked" | "untracked";
+  origin: "observed" | "recreation" | "migration";
+  trackingReference?: string;
+  trackingFamiliar?: string;
+  repository?: string;
+  runningDigest?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ContainerDetail {
   overview: ContainerSummary;
   state: StateDetail;
   image?: Image;
+  /** What this container follows for updates. Absent when nothing is tracked. */
+  imageLineage?: ImageLineage;
+  /** The digest this container is actually running, resolved from the local image. */
+  runningDigest?: string;
   process: Process;
   healthCheck?: HealthCheck;
   environment: EnvVar[];
