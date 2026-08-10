@@ -132,6 +132,40 @@ working". Settings now reports which capabilities exist in the running process
 - A supported-environments matrix in the README states plainly what is
   supported, what is not, and what will not be.
 
+### The database is owner-only, and account names are discoverable
+
+Two findings from release validation, related by one incident: discovering a
+username required copying the SQLite database off the host, which is when the
+database's own permissions got looked at.
+
+**The database is now `0600` and is restricted at every start**, before anything
+reads from it. SQLite creates it subject to the process umask, which on an
+ordinary host yields `0644` — readable by every account on the machine, holding
+every Argon2id verifier, every live session's keyed digest, and the security
+audit log. The `-wal`, `-shm`, and `-journal` sidecars carry the same pages and
+get the same treatment; backups already did.
+
+Upgrading tightens an existing database automatically and says so once. **Read
+the warning literally**: tightening the file does nothing about a copy somebody
+already took, so on a shared host treat the verifiers as disclosed and reset
+passwords. If the mode cannot be established HarborMaster does not start, and a
+database reached through a symbolic link is refused — `chmod` follows symlinks,
+so honouring one would let whoever planted it choose which file gets changed.
+
+**`harbormaster admin list-users`** answers the question that forced the copy:
+
+```
+USERNAME  ROLE            STATUS    PASSWORD
+hm-admin  administrator   active    set
+watcher   viewer          disabled  must change at next login
+```
+
+Four columns, and the type behind them has four fields: no verifier, no session
+digest, no key material, no password timestamp. Console only, like the other
+recovery commands — an account list is the first thing an unauthenticated scrape
+would want. Two architecture tests hold it there, one pinning the field set and
+one failing the build if the HTTP layer names it.
+
 ## Fixed
 
 - **Automation decisions that reached a rollback were never settled**, so

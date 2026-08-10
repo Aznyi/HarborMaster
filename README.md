@@ -381,7 +381,7 @@ stops working. Or claim it from the host, where no token is needed because
 filesystem access to the database is a stronger proof:
 
 ```sh
-docker exec -it harbormaster /harbormaster admin bootstrap --username admin
+docker exec -it harbormaster /usr/local/bin/harbormaster admin bootstrap --username admin
 ```
 
 Once an administrator exists, the bootstrap endpoint answers `404`. For that
@@ -468,10 +468,30 @@ Two refusals are built in and are not configurable:
 
 ### Recovering an account
 
-From the host, when nobody can sign in:
+From the host, when nobody can sign in. If you do not know which accounts
+exist, ask first:
 
 ```sh
-docker exec -it harbormaster /harbormaster admin reset-password --username admin
+docker exec harbormaster /usr/local/bin/harbormaster admin list-users
+```
+
+```
+USERNAME  ROLE            STATUS    PASSWORD
+hm-admin  administrator   active    set
+watcher   viewer          disabled  must change at next login
+```
+
+That is the whole of what it reports: the name, what the account may do,
+whether it may authenticate at all, and whether a previous recovery left a
+password change outstanding. **No credential material of any kind** — no
+verifier, no session digest, no key, no password timestamp. The type it is
+built on has four fields and an architecture test fails the build if a fifth
+appears.
+
+Then reset the one you need:
+
+```sh
+docker exec -it harbormaster /usr/local/bin/harbormaster admin reset-password --username hm-admin
 ```
 
 It prompts twice with echo off, confirms first (because it ends every session

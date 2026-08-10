@@ -105,6 +105,44 @@ value is a secret, the answer to "is this safe to store" is no. Being wrong in
 that direction costs an operator a value they cannot see; being wrong the other
 way leaks a credential.
 
+### 3b. Who can read the files those secrets end up in
+
+The four layers above decide what is *written*. This decides who can *read it*.
+
+The database holds no plaintext secret by invariant, but it does hold every
+account's Argon2id verifier, every live session's keyed digest, the bootstrap
+token's digest, and the security audit log. Those are the things an offline
+cracker and a session replay want, and until v0.9.0-beta.1 SQLite created the
+file subject to the process umask — `0644` on an ordinary host.
+
+| File | Mode | Established by | If it cannot be set |
+| --- | --- | --- | --- |
+| `harbormaster.db` | `0600` | `store.secureDatabaseFiles`, at every open before any read | **Open fails** |
+| `-wal`, `-shm`, `-journal` | `0600` | Derived by SQLite from the database; tightened directly when an older build left one | **Open fails** |
+| Backup files | `0600` | `store.Backup`, after `VACUUM INTO` | Backup fails and the partial file is removed |
+| `snapshot-hmac.key` | `0600` | `O_CREATE\|O_EXCL` at creation; `O_NOFOLLOW` on read | Creation fails; a wider **existing** file is reported, not changed |
+| Data directory | `0750` | `MkdirAll` when absent | Not tightened; reported by `diagnose` |
+
+Three properties worth stating because each is a decision rather than a default:
+
+- **Only narrowing, and only HarborMaster's own files.** Exactly the configured
+  database path and the three sidecar names SQLite derives from it. The parent
+  directory may be a mount point or shared with a backup agent, so its mode is
+  reported rather than changed.
+- **Symlinks are refused, not followed.** `os.Chmod` follows symlinks, so
+  honouring one would let whoever planted it choose which file HarborMaster
+  changes the mode of.
+- **Windows reports the check as skipped.** Go synthesises a mode there from the
+  read-only attribute alone; the real answer is an ACL this code neither reads
+  nor writes, and reporting "restricted" from a synthesised value would be a
+  control that lies.
+
+This narrows the **Physical/backup access** and **Malicious local user** actors
+in the threat model: a shell on the host no longer reads the verifiers by
+default. It does nothing about root, which is explicitly out of scope, and
+nothing about a copy taken while the file was already readable — hence the
+warning on first tightening tells the operator to rotate.
+
 ## 3a. Configuration drift
 
 Drift compares a container's current configuration against its baseline

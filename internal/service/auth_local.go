@@ -76,6 +76,88 @@ func NewLocalAdmin(
 	return &LocalAdmin{users: users, sessions: sessions, audit: audit, hasher: hasher, now: now}
 }
 
+// AccountSummary is everything the console may know about an account.
+//
+// # Why this is its own type rather than domain.User
+//
+// Recovery needs one thing HarborMaster previously had no way to answer: WHICH
+// USERNAMES EXIST. During release validation the only way to find out was to
+// copy the SQLite database off the host and read it — which meant taking a file
+// holding every Argon2id verifier and every live session digest, to learn a
+// string.
+//
+// So the answer is served, and this type is the shape of the answer. It has
+// four fields and nowhere to put a fifth: no verifier, no session digest, no
+// key material, no password timestamp. domain.User carries more than that —
+// creation and last-login times, the creating administrator, the public user id
+// — and every one of those is a fact about behaviour or structure that account
+// recovery does not need. A type that cannot carry them cannot leak them, and
+// an architecture test pins the field set.
+type AccountSummary struct {
+	// Username is the name `admin reset-password --username` takes.
+	Username string
+	// Role is what the account may do.
+	Role domain.Role
+	// Status is active or disabled: whether it may authenticate at all.
+	Status domain.UserStatus
+	// MustChangePassword reports a credential its holder has not chosen yet,
+	// which is the state a previous recovery leaves behind.
+	MustChangePassword bool
+}
+
+// maxListedAccounts bounds ListAccounts.
+//
+// An operator recovering an installation wants the whole list, so this pages
+// rather than truncating at the repository's page size. It is still bounded:
+// the loop reads a database this process already trusts, but an unbounded read
+// into memory is the kind of thing that turns a corrupt row count into an
+// out-of-memory kill at exactly the moment somebody is trying to recover.
+const maxListedAccounts = 10_000
+
+// ListAccounts returns every account, oldest first.
+//
+// Console only. There is no HTTP caller and no handler that reaches it: the
+// installation's account list is exactly what an unauthenticated scrape would
+// want, and the user-administration endpoints already serve the authenticated
+// case under their own authorization. Architecture tests hold this outside the
+// HTTP surface.
+func (a *LocalAdmin) ListAccounts(ctx context.Context) ([]AccountSummary, error) {
+	summaries := make([]AccountSummary, 0, 16)
+
+	for offset := 0; offset < maxListedAccounts; {
+		users, total, err := a.users.List(ctx, store.UserFilter{
+			Page: store.Page{Limit: accountPageSize, Offset: offset},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(users) == 0 {
+			break
+		}
+
+		for _, user := range users {
+			// Field by field, deliberately. A struct copy or a conversion
+			// would silently start carrying whatever domain.User gains next.
+			summaries = append(summaries, AccountSummary{
+				Username:           user.Username,
+				Role:               user.Role,
+				Status:             user.Status,
+				MustChangePassword: user.MustChangePassword,
+			})
+		}
+
+		offset += len(users)
+		if offset >= total {
+			break
+		}
+	}
+	return summaries, nil
+}
+
+// accountPageSize is the repository's maximum, so the loop above makes as few
+// round trips as the store allows.
+const accountPageSize = 200
+
 // Claimed reports whether this installation already has an administrator.
 func (a *LocalAdmin) Claimed(ctx context.Context) (bool, error) {
 	state, err := a.users.BootstrapState(ctx)

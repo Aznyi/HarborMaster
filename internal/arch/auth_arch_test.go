@@ -3,8 +3,11 @@ package arch_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Aznyi/HarborMaster/internal/service"
 )
 
 // Architecture tests for identity and credentials.
@@ -86,6 +89,97 @@ func TestLocalAdminIsNotReachableFromTheAPI(t *testing.T) {
 				"\tthe console recovery path takes filesystem access as its authority and "+
 				"must never be reachable over HTTP",
 				file.rel, symbol)
+		}
+	}
+}
+
+// TestAccountListingIsNotReachableOverHTTP fails if the account listing added
+// for console recovery grows an HTTP caller.
+//
+// `harbormaster admin list-users` exists because recovering an account needs a
+// username and there was no way to discover one -- release validation had to
+// copy the database off the host to read a string. The listing is deliberately
+// unauthenticated-by-filesystem-access rather than by a session, which is
+// correct for somebody holding the database file and exactly wrong over a
+// network: an installation's account list is the first thing a scrape wants,
+// and the authenticated case is already served by the user-administration
+// endpoints under their own authorization.
+//
+// Checked separately from TestLocalAdminIsNotReachableFromTheAPI because a
+// future refactor could move the summary type somewhere the api package may
+// legitimately import while leaving LocalAdmin behind.
+func TestAccountListingIsNotReachableOverHTTP(t *testing.T) {
+	for _, file := range goFiles(t) {
+		dir := filepath.ToSlash(filepath.Dir(file.rel))
+		if dir != "internal/api" {
+			continue
+		}
+		for _, symbol := range []string{"ListAccounts", "AccountSummary", "list-users"} {
+			if !strings.Contains(file.text, symbol) {
+				continue
+			}
+			t.Errorf("%s names %q\n"+
+				"\tthe console account listing takes filesystem access as its authority; "+
+				"an HTTP route to it would be a second, weaker way to ask who exists",
+				file.rel, symbol)
+		}
+	}
+}
+
+// TestTheAccountSummaryCannotCarryCredentialMaterial pins the shape of what the
+// console may print about an account.
+//
+// The type exists to have nowhere to put a secret. A field added here would be
+// printed by `admin list-users` on the next run without anybody deciding it
+// should be, which is how a verifier, a session digest, or a password timestamp
+// ends up on a terminal and in a scrollback.
+//
+// Reflection rather than source scanning: the question is what the type CAN
+// hold, and that is a property of the type rather than of the file it is
+// written in.
+func TestTheAccountSummaryCannotCarryCredentialMaterial(t *testing.T) {
+	permitted := map[string]string{
+		"Username":           "string",
+		"Role":               "domain.Role",
+		"Status":             "domain.UserStatus",
+		"MustChangePassword": "bool",
+	}
+
+	summary := reflect.TypeOf(service.AccountSummary{})
+	if summary.NumField() != len(permitted) {
+		t.Errorf("service.AccountSummary has %d fields, want %d\n"+
+			"\tevery field here is printed to a console by `admin list-users`",
+			summary.NumField(), len(permitted))
+	}
+
+	for i := range summary.NumField() {
+		field := summary.Field(i)
+		want, allowed := permitted[field.Name]
+		if !allowed {
+			t.Errorf("service.AccountSummary.%s is not in the permitted set\n"+
+				"\taccount recovery needs a username, a role, a status, and whether a "+
+				"password change is outstanding. Anything else is a fact about "+
+				"credentials, behaviour, or structure that recovery does not need",
+				field.Name)
+			continue
+		}
+		if got := field.Type.String(); got != want {
+			t.Errorf("service.AccountSummary.%s is %s, want %s", field.Name, got, want)
+		}
+	}
+
+	// The names that must never appear, whatever the field set becomes.
+	forbidden := []string{
+		"Password", "Hash", "Verifier", "Credential", "Secret", "Token",
+		"Digest", "Session", "Key", "Salt", "CSRF",
+	}
+	for i := range summary.NumField() {
+		name := summary.Field(i).Name
+		for _, banned := range forbidden {
+			if strings.Contains(name, banned) && name != "MustChangePassword" {
+				t.Errorf("service.AccountSummary.%s names %q; the console listing "+
+					"must carry no credential or session material", name, banned)
+			}
 		}
 	}
 }

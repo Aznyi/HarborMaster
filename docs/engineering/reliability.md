@@ -76,10 +76,40 @@ harbormaster admin bootstrap --username admin
 No token is needed here, because filesystem access to the database is a stronger
 proof than any token. It is still refused once an administrator exists.
 
+### Finding out which accounts exist
+
+```
+harbormaster admin list-users
+```
+
+```
+USERNAME  ROLE            STATUS    PASSWORD
+hm-admin  administrator   active    set
+watcher   viewer          disabled  must change at next login
+```
+
+Recovery needs a username, and before this there was no way to discover one.
+During release validation the only method available was copying the SQLite
+database off the host and reading it — carrying every verifier and every session
+digest out of the installation to learn a string. That is a far larger thing to
+hand somebody than the four columns above.
+
+Those four columns are the whole contract: the name `reset-password` takes, what
+the account may do, whether it may authenticate, and whether a previous recovery
+left a password change outstanding. Nothing else — no verifier, no session
+digest, no key material, no password timestamp. The summary type has four fields
+and two architecture tests hold it there: one pins the field set, the other
+fails the build if the HTTP layer so much as names it.
+
+Console only, like every other command here. An installation's account list is
+the first thing an unauthenticated scrape would want, and the authenticated case
+is already served by the user-administration endpoints under their own
+authorization.
+
 ### Recovering an account
 
 ```
-harbormaster admin reset-password --username admin
+harbormaster admin reset-password --username hm-admin
 ```
 
 It prompts for the password twice, with echo off, and asks for confirmation
@@ -125,6 +155,63 @@ point.
 On Windows the check is skipped and says so, because Go synthesises a mode from
 the read-only attribute alone — a "0600, looks fine" from a synthesised value
 would be a security check that lies, which is worse than none.
+
+You should not see that refusal on a database this build created. It is what a
+database from an OLDER HarborMaster looks like: see below.
+
+### Database file permissions
+
+HarborMaster holds its database at **0600 — owner only** and restricts it at
+every start, before anything reads from it.
+
+This corrects a real exposure. SQLite creates a database subject to the process
+umask, which on an ordinary host yields **0644**: readable by every account on
+the machine, holding every Argon2id verifier, every live session's keyed digest,
+the bootstrap token's digest, and the security audit log. Release validation
+found exactly that on a running deployment.
+
+| File | Mode | Set by |
+| --- | --- | --- |
+| `harbormaster.db` | `0600` | Restricted at every open |
+| `harbormaster.db-wal`, `-shm`, `-journal` | `0600` | Derived by SQLite from the database, and tightened directly if an older build left one behind |
+| Backups | `0600` | `harbormaster backup`, which fails rather than leaving a readable copy |
+| `snapshot-hmac.key` | `0600` | Created owner-only; an existing wider one is reported, not changed |
+| The data directory | `0750` | Created if absent; never changed |
+
+Two deliberate asymmetries:
+
+- **The directory is not tightened.** It may be a mount point, or a directory
+  the operator shares with a backup agent. Its mode is reported by
+  `harbormaster diagnose` rather than changed underneath them.
+- **An existing key file is reported, not tightened.** HarborMaster creates it
+  `0600`, so a wider one is something a person did on purpose, and undoing an
+  operator's explicit decision is different from correcting HarborMaster's own
+  umask-derived default. The database gets tightened because the 0644 was
+  HarborMaster's doing.
+
+**Upgrading tightens an existing database automatically.** You will see it once:
+
+```
+WARN the database was readable beyond its owner and has been restricted
+     mode=0600 filesChanged=3
+     effect=any copy taken while it was readable is still exposed; rotate credentials if this host is shared
+```
+
+Read that last clause literally. Tightening the file does nothing about a copy
+somebody already took. On a host where other accounts existed while the database
+was `0644`, treat the verifiers as disclosed: reset passwords, which revokes
+every session those accounts hold.
+
+**If the mode cannot be established, HarborMaster does not start.** Serving
+password verifiers out of a file whose exposure is unknown is the condition this
+exists to end, so an unrestrictable database is a refusal rather than a warning.
+A database reached through a symbolic link is refused for the same reason:
+`chmod` follows symlinks, so honouring one would let whoever planted it choose
+which file HarborMaster changes.
+
+On Windows nothing is changed and `Enforced` is reported false — the mode bits
+Go reports there are synthesised, and the real answer lives in an ACL
+HarborMaster neither reads nor writes.
 
 ### Every console operation is audited
 

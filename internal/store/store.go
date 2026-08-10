@@ -185,6 +185,10 @@ type OpenReport struct {
 	// got a rollback journal because we asked for one" from "we asked for WAL
 	// and the filesystem refused".
 	WALRequested bool
+	// Permissions records what restricting the database files to their owner
+	// did -- see permissions.go. Enforced is false on a platform where mode
+	// bits are not the access control.
+	Permissions PermissionReport
 	// Migrations records what the migration pass did.
 	Migrations MigrateResult
 }
@@ -269,6 +273,30 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 	}
 
 	report := OpenReport{WALRequested: true}
+
+	// Restrict the database to its owner BEFORE anything reads from it or
+	// writes to it.
+	//
+	// The ping above is what creates the file on a first start, so this is the
+	// earliest point the mode can be set, and it is before the migration pass
+	// puts any account or session row in there. SQLite derives the -wal and
+	// -shm modes from the database file, so doing this first is also what
+	// keeps the sidecars this connection is about to create restricted.
+	//
+	// A failure here stops the open. The alternative is serving password
+	// verifiers and session digests out of a file whose exposure HarborMaster
+	// could not establish, which is exactly the condition this exists to end.
+	report.Permissions, err = secureDatabaseFiles(opts.Path)
+	if err != nil {
+		return nil, closeOnError(err)
+	}
+	if len(report.Permissions.Tightened) > 0 {
+		logger.Warn("the database was readable beyond its owner and has been restricted",
+			slog.String("mode", fmt.Sprintf("%#o", DatabaseFileMode)),
+			slog.Int("filesChanged", len(report.Permissions.Tightened)),
+			slog.String("effect", "any copy taken while it was readable is still exposed; "+
+				"rotate credentials if this host is shared"))
+	}
 
 	report.JournalMode, err = JournalMode(ctx, sqlDB)
 	if err != nil {

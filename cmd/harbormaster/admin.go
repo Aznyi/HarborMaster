@@ -63,6 +63,8 @@ func adminCommand(out io.Writer, args []string) int {
 		return adminBootstrap(out, args[1:])
 	case "reset-password":
 		return adminResetPassword(out, args[1:])
+	case "list-users":
+		return adminListUsers(out, args[1:])
 	case "help", "-h", "--help":
 		adminUsage(out)
 		return exitOK
@@ -84,6 +86,11 @@ Usage:
   harbormaster admin reset-password --username NAME [--generate] [--keep-password] [--force]
       Replace an account's password, reactivate it if it was disabled or locked,
       and revoke every one of its live sessions.
+
+  harbormaster admin list-users [--force]
+      List the accounts on this installation: username, role, status, and
+      whether a password change is outstanding. Nothing else — no credential
+      material of any kind. Use it to find the name reset-password needs.
 
 Options:
   --username NAME   The account. Prompted for when omitted.
@@ -198,6 +205,78 @@ func adminBootstrap(out io.Writer, args []string) int {
 	if generated {
 		printGeneratedPassword(out, password)
 	}
+	return exitOK
+}
+
+// adminListUsers prints the accounts on this installation.
+//
+// # Why this command exists
+//
+// Recovering an account needs a username, and until this there was no way to
+// discover one. Release validation had to copy the SQLite database off the host
+// and read it — carrying every Argon2id verifier and every live session digest
+// out of the installation to learn a string. A read-only listing that shows
+// four fields is a far smaller thing to hand somebody than the whole database.
+//
+// # Why it is console-only
+//
+// The same reason `diagnose` and `reset-password` are. An account list is what
+// an unauthenticated scrape wants most, and the authenticated case is already
+// served by the user-administration endpoints under their own authorization.
+// Adding an HTTP route here would create a second, weaker way to ask.
+//
+// It prints no password, no verifier, no digest, and no timestamp: see
+// service.AccountSummary, which has nowhere to put one.
+func adminListUsers(out io.Writer, args []string) int {
+	flags, err := parseAdminFlags(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin list-users: %v\n", err)
+		return exitUsage
+	}
+	if flags.username != "" || flags.generate || flags.keepPassword {
+		fmt.Fprintln(os.Stderr, "admin list-users: takes no options but --force")
+		return exitUsage
+	}
+
+	session, code := openAdminSession(flags.force)
+	if session == nil {
+		return code
+	}
+	defer session.close()
+
+	accounts, err := session.admin.ListAccounts(session.ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin list-users: %v\n", err)
+		return exitFailure
+	}
+
+	if len(accounts) == 0 {
+		_, _ = fmt.Fprintln(out, "\nThis installation has no accounts yet."+
+			"\nCreate the first administrator with `harbormaster admin bootstrap`.")
+		return exitOK
+	}
+
+	// Width from the data, so a long username does not push the columns apart
+	// for every other row.
+	width := len("USERNAME")
+	for _, account := range accounts {
+		if len(account.Username) > width {
+			width = len(account.Username)
+		}
+	}
+
+	_, _ = fmt.Fprintf(out, "\n%-*s  %-14s  %-8s  %s\n",
+		width, "USERNAME", "ROLE", "STATUS", "PASSWORD")
+	for _, account := range accounts {
+		password := "set"
+		if account.MustChangePassword {
+			password = "must change at next login"
+		}
+		_, _ = fmt.Fprintf(out, "%-*s  %-14s  %-8s  %s\n",
+			width, account.Username, account.Role, account.Status, password)
+	}
+	_, _ = fmt.Fprintf(out, "\n%d account(s). Recover one with:"+
+		"\n  harbormaster admin reset-password --username NAME --generate\n", len(accounts))
 	return exitOK
 }
 
