@@ -158,6 +158,28 @@ type ContainerDetail struct {
 	Compose      ComposeMetadata      `json:"compose"`
 	HarborMaster HarborMasterMetadata `json:"harbormaster"`
 	Warnings     []InventoryWarning   `json:"warnings"`
+
+	// ImageLineage distinguishes what this container RUNS from what
+	// HarborMaster FOLLOWS for it. A managed container that has been updated
+	// runs an immutable digest while tracking a mutable tag, and presenting the
+	// tag as the artefact executing would be a lie about what is on the host.
+	//
+	// Nil when HarborMaster holds no lineage for this container, which is
+	// honest rather than empty: it means nothing is being followed.
+	ImageLineage *ImageLineage `json:"imageLineage,omitempty"`
+
+	// RunningDigest is the manifest digest this container is ACTUALLY running,
+	// resolved by RunningDigestFor.
+	//
+	// Distinct from Overview.Image.Digest, which is only ever the digest the
+	// declared REFERENCE carries and is therefore empty for every container
+	// created from a tag. Conflating the two is what left a recreation with no
+	// record of what it replaced, and so left a rollback unable to put lineage
+	// back.
+	//
+	// Empty means UNESTABLISHED -- a locally built image, or RepoDigests too
+	// ambiguous to choose between. It never means "no digest is running".
+	RunningDigest string `json:"runningDigest,omitempty"`
 }
 
 // StateDetail is the expanded runtime state of a container.

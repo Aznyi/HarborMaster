@@ -281,7 +281,57 @@ func (r *ContainerRepository) Get(ctx context.Context, id string) (*domain.Conta
 	if err := r.loadMounts(ctx, detail, id); err != nil {
 		return nil, err
 	}
+	if err := r.loadRunningDigest(ctx, detail, id); err != nil {
+		return nil, err
+	}
 	return detail, nil
+}
+
+// loadRunningDigest resolves what this container is ACTUALLY running.
+//
+// Separate from the summary row because the answer does not live on the
+// container: for a tag-created container it lives on the IMAGE, in the
+// RepoDigests the daemon reported, and only domain.RunningDigestFor may decide
+// which of them applies to this repository.
+//
+// A container whose image the inventory no longer holds resolves to empty
+// rather than failing. An unestablished digest is a handled outcome everywhere
+// it is read; a failed container lookup would not be.
+func (r *ContainerRepository) loadRunningDigest(
+	ctx context.Context, detail *domain.ContainerDetail, id string,
+) error {
+	var repoDigests string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(im.repo_digests, '[]')
+		FROM containers c
+		LEFT JOIN images im ON im.id = c.image_id
+		WHERE c.id = ?`, id).Scan(&repoDigests)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read running digest: %w", AsError(err))
+	}
+
+	var digests []string
+	if repoDigests != "" {
+		// A malformed column is an absent list, not a failure.
+		_ = json.Unmarshal([]byte(repoDigests), &digests)
+	}
+
+	declared, parseErr := domain.NormalizeImageRef(detail.Overview.Image.Raw)
+	if parseErr != nil {
+		// A reference this build will not parse cannot be matched against a
+		// RepoDigest safely, so nothing is claimed and the digest stays
+		// unestablished. Deliberately not an error: one container with an odd
+		// reference must not make the whole detail lookup fail, and every
+		// consumer already treats an empty running digest as "cannot assess".
+		//nolint:nilerr // an unparseable reference is an unknown digest, not a failure.
+		return nil
+	}
+	digest, _ := domain.RunningDigestFor(declared, digests)
+	detail.RunningDigest = digest
+	return nil
 }
 
 func (r *ContainerRepository) loadConfig(ctx context.Context, detail *domain.ContainerDetail, id string) error {

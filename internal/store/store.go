@@ -120,6 +120,13 @@ type DB struct {
 	// readable through exactly one method, called only by the sender.
 	Notifications *NotificationRepository
 
+	// Lineage holds what a managed container FOLLOWS, as distinct from the
+	// immutable digest it RUNS. Recreation is digest-pinned on purpose, which
+	// used to destroy the tag a container was deployed from and remove it from
+	// automation permanently; this is the record that survives the recreation.
+	// Authoritative -- the container label of the same name is evidence only.
+	Lineage *LineageRepository
+
 	// Users holds accounts, their password verifiers, and the bootstrap state
 	// that says whether this installation has been claimed.
 	Users *UserRepository
@@ -343,6 +350,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		UpdatePolicies: &UpdatePolicyRepository{db: sqlDB},
 		Automation:     &AutomationRepository{db: sqlDB},
 		Notifications:  &NotificationRepository{db: sqlDB},
+		Lineage:        &LineageRepository{db: sqlDB},
 
 		Users:    &UserRepository{db: sqlDB},
 		Sessions: &SessionRepository{db: sqlDB},

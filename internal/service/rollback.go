@@ -132,6 +132,10 @@ type RollbackOptions struct {
 	// account that asked for it.
 	Audit *AuditRecorder
 
+	// Lineage returns what the container follows to the artefact that is
+	// running again. Nil leaves lineage untouched.
+	Lineage LineageStore
+
 	// Notify raises operator notifications. Nil sends none, which is the default:
 	// notifications are off unless a deployment asks for them, and every service
 	// must behave identically without one.
@@ -150,7 +154,9 @@ type RollbackService struct {
 	rollbacker docker.ContainerRollbacker
 	hasher     *Hasher
 	audit      *AuditRecorder
-	notifier   Notifier
+	// lineage returns the tracking record to the restored digest.
+	lineage  LineageStore
+	notifier Notifier
 
 	cfg    config.Rollback
 	logger *slog.Logger
@@ -214,6 +220,7 @@ func NewRollbackService(opts RollbackOptions) *RollbackService {
 		rollbacker: opts.Rollbacker,
 		hasher:     opts.Hasher,
 		audit:      opts.Audit,
+		lineage:    opts.Lineage,
 		notifier:   opts.Notify,
 		cfg:        cfg,
 		logger:     logger,

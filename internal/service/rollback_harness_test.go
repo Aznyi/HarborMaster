@@ -901,6 +901,9 @@ type rbHarness struct {
 	store    *fakeRollbackStore
 	evidence *fakeRollbackEvidence
 	host     *rollbackHost
+	// lineage is what the container FOLLOWS. A rollback must put the running
+	// digest back without disturbing the tracking reference.
+	lineage *fakeLineageStore
 
 	base  time.Time
 	start time.Time
@@ -932,9 +935,10 @@ func newRollbackHarness(t *testing.T, tune ...func(*rbHarness)) *rbHarness {
 			inventoryAge:   time.Minute,
 			inventoryKnown: true,
 		},
-		host:  host,
-		base:  base,
-		start: time.Now(),
+		host:    host,
+		lineage: newFakeLineageStore(),
+		base:    base,
+		start:   time.Now(),
 	}
 	for _, apply := range tune {
 		apply(harness)
@@ -955,6 +959,7 @@ func newRollbackHarness(t *testing.T, tune ...func(*rbHarness)) *rbHarness {
 		Evidence:   harness.evidence,
 		Runtime:    harness.host,
 		Rollbacker: harness.host,
+		Lineage:    harness.lineage,
 		Hasher:     service.NewHasher(key),
 		Config: config.Rollback{
 			Enabled:              true,

@@ -382,6 +382,25 @@ func (s *RollbackService) succeed(ctx, parent context.Context, work *rollbackWor
 		return
 	}
 
+	// Lineage returns to the artefact that is running again.
+	//
+	// It matters most after a rollback of a SUCCEEDED recreation: lineage was
+	// advanced to the replacement's digest then, and leaving it there would
+	// have the next pass compare the registry against a digest that is not
+	// running and conclude there was nothing to do -- the original Phase 13
+	// defect, reintroduced through the failure path. The tracking reference is
+	// deliberately untouched: a rollback undoes which artefact runs, not which
+	// tag the operator asked HarborMaster to follow.
+	//
+	// Logged rather than propagated: the host is already correct.
+	if err := RestoreLineageAfterRollback(ctx, s.lineage, work.decision.ContainerName,
+		work.decision.OriginalDigest, work.decision.OriginalID, s.now); err != nil {
+		s.logger.WarnContext(ctx, "the rollback succeeded but its image lineage could not be restored",
+			slog.String("rollbackId", id),
+			slog.String("containerName", work.decision.ContainerName),
+			slog.String("error", err.Error()))
+	}
+
 	s.logger.InfoContext(ctx, "rollback complete",
 		slog.String("rollbackId", id),
 		slog.String("executionId", work.rollback.ExecutionID),

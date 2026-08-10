@@ -480,6 +480,89 @@ func TestPreservationPassesOnAFaithfulRecreation(t *testing.T) {
 	}
 }
 
+// TestPreservationIgnoresTheLineageLabelHarborMasterWritesItself is the
+// regression test for the defect the first live automated update exposed.
+//
+// A recreation stamps domain.LineageLabel onto the replacement so lineage
+// survives a lost database. The original it was captured from does not carry
+// that label, so a projection that compared it reported a difference on EVERY
+// tracked recreation -- verification failed, auto-rollback undid a replacement
+// that was in fact correct, and no container could ever be updated. That is not
+// a theoretical failure: it is exactly what the first live run did.
+//
+// The three cases below are the three the second update of a workload walks
+// through, and the reason the label is filtered from BOTH sides rather than
+// only from the replacement.
+func TestPreservationIgnoresTheLineageLabelHarborMasterWritesItself(t *testing.T) {
+	const tracked = "docker.io/library/nginx:1.27"
+
+	withLineage := func(detail domain.ContainerDetail, value string) domain.ContainerDetail {
+		labels := append([]domain.Label(nil), detail.Labels...)
+		detail.Labels = append(labels, domain.Label{
+			Key: domain.LineageLabel, Value: value, Source: domain.LabelSourceUser,
+		})
+		return detail
+	}
+
+	original := detailFor(strings.Repeat("a", 64), "web")
+	replacement := detailFor(strings.Repeat("b", 64), "web")
+
+	for _, testCase := range []struct {
+		name              string
+		before, after     domain.ContainerDetail
+		describesTheWorld string
+	}{
+		{
+			name: "the first update adds the label",
+			// The original was created by an operator and carries no lineage
+			// label; the replacement HarborMaster creates carries one.
+			before: original, after: withLineage(replacement, tracked),
+			describesTheWorld: "a workload HarborMaster is updating for the first time",
+		},
+		{
+			name: "a later update carries it on both sides",
+			// The original is itself a previous replacement.
+			before: withLineage(original, tracked), after: withLineage(replacement, tracked),
+			describesTheWorld: "the second and every subsequent update of the same workload",
+		},
+		{
+			name: "the tracked reference moved between updates",
+			// A series upgrade rewrites the tag the label records. HarborMaster
+			// owns this value, so changing it is not a preservation failure.
+			before:            withLineage(original, tracked),
+			after:             withLineage(replacement, "docker.io/library/nginx:1.28"),
+			describesTheWorld: "a minor upgrade that moved the tracking tag",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			report := domain.ComparePreservation(
+				domain.BuildPreservationSummary(testCase.before, fixedDigester),
+				domain.BuildPreservationSummary(testCase.after, fixedDigester),
+			)
+			if report.Status != domain.VerificationPassed {
+				t.Fatalf("%s was reported as %s: %s\n\tdifferences: %+v\n"+
+					"\ta label HarborMaster writes itself must not fail the operator's "+
+					"configuration check", testCase.describesTheWorld,
+					report.Status, report.Reason, report.Differences)
+			}
+		})
+	}
+
+	// The filter must be narrow. An OPERATOR's label going missing across a
+	// recreation is still a preservation failure -- if this passed, the fix
+	// above would have blinded the check it was meant to keep working.
+	lost := withLineage(replacement, tracked)
+	lost.Labels = lost.Labels[1:] // drop "app=web", keep the lineage label
+	report := domain.ComparePreservation(
+		domain.BuildPreservationSummary(withLineage(original, tracked), fixedDigester),
+		domain.BuildPreservationSummary(lost, fixedDigester),
+	)
+	if report.Status == domain.VerificationPassed {
+		t.Error("a replacement that lost one of the operator's labels passed verification; " +
+			"the lineage filter is too wide")
+	}
+}
+
 // TestPreservationIsUnverifiableAcrossKeys fails closed rather than comparing
 // digests that cannot be compared.
 func TestPreservationIsUnverifiableAcrossKeys(t *testing.T) {

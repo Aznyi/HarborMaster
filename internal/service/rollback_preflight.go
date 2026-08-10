@@ -54,6 +54,11 @@ type rollbackDecision struct {
 	OriginalImage    string
 	OriginalImageID  string
 	ReplacementImage string
+	// OriginalDigest is the manifest digest the container ran BEFORE the
+	// recreation. It is what image lineage is returned to, so that after a
+	// rollback HarborMaster compares the registry against the artefact that is
+	// actually running again rather than the one it stopped.
+	OriginalDigest string
 
 	// Baseline is the original's configuration projection taken BEFORE anything
 	// moved. The post-restore comparison is made against it, which is what
@@ -134,6 +139,7 @@ func (s *RollbackService) assessRecords(
 	decision.ReplacementID = execution.ReplacementID
 	decision.OriginalImage = execution.OldImage
 	decision.OriginalImageID = execution.OldImageID
+	decision.OriginalDigest = execution.OldImageDigest
 	decision.ReplacementImage = execution.Target.Reference
 
 	if execution.State.Active() {

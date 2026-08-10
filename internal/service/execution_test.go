@@ -612,6 +612,9 @@ type execHarness struct {
 	evidence *fakeExecutionEvidence
 	runtime  *docker.Fake
 	mutator  *docker.FakeMutator
+	// lineage is what the container FOLLOWS. Advanced only by a recreation that
+	// passed verification, which is what the refusal tests assert stays true.
+	lineage *fakeLineageStore
 
 	// base is the harness's epoch and start the wall-clock moment it was
 	// created. now() returns base plus elapsed real time.
@@ -668,6 +671,7 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		evidence: healthyExecutionEvidence(base),
 		runtime:  runtime,
 		mutator:  mutator,
+		lineage:  newFakeLineageStore(),
 		base:     base,
 		start:    time.Now(),
 	}
@@ -692,6 +696,7 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		Runtime:  harness.runtime,
 		Capturer: harness.mutator,
 		Mutator:  harness.mutator,
+		Lineage:  harness.lineage,
 		Hasher:   service.NewHasher(key),
 		Config: config.Execution{
 			Enabled:               true,

@@ -320,6 +320,16 @@ type CreateRequest struct {
 	Image domain.ExecutionTarget
 	// Name is the name the replacement takes.
 	Name string
+	// TrackingReference is the mutable reference HarborMaster follows for this
+	// workload, written onto the replacement as domain.LineageLabel.
+	//
+	// It does NOT affect what is created. The container is created from
+	// Image's digest, exactly as before; this only records, in Docker's own
+	// metadata, which tag that digest was approved from, so lineage survives a
+	// lost database and can be read with `docker inspect`.
+	//
+	// Empty writes no label, which is what an untracked workload gets.
+	TrackingReference string
 }
 
 // Validate reports whether the request is safe to send to the daemon.
@@ -336,6 +346,13 @@ func (r CreateRequest) Validate() error {
 	}
 	if !domain.ValidContainerName(r.Name) {
 		return fmt.Errorf("%w: the container name is not acceptable", ErrMutationRefused)
+	}
+	// Bounded before it becomes a label value. This string originates in
+	// HarborMaster's own lineage record, but it is written to the daemon and
+	// read back by a later reconciliation, so it is checked at the boundary
+	// rather than trusted because of where it came from.
+	if len(r.TrackingReference) > domain.MaxLineageReferenceBytes {
+		return fmt.Errorf("%w: the tracking reference is not acceptable", ErrMutationRefused)
 	}
 	return nil
 }
@@ -855,6 +872,19 @@ func (c *Client) CreateContainer(ctx context.Context, request CreateRequest) (st
 	// image having been written into the capture.
 	config := *captured.config
 	config.Image = request.Image.PinnedReference()
+
+	// The lineage label goes onto a COPY of the label map. The struct copy
+	// above is shallow, so writing into config.Labels directly would write into
+	// the capture the caller still holds -- and a retry would then be creating
+	// from a configuration the previous attempt edited.
+	if request.TrackingReference != "" {
+		labels := make(map[string]string, len(config.Labels)+1)
+		for key, value := range config.Labels {
+			labels[key] = value
+		}
+		labels[domain.LineageLabel] = request.TrackingReference
+		config.Labels = labels
+	}
 
 	options := client.ContainerCreateOptions{
 		Config:           &config,

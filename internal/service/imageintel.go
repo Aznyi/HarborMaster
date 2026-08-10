@@ -85,6 +85,15 @@ type ImageIntelOptions struct {
 	Store    ImageIntelStore
 	Registry RegistryClient
 
+	// Lineage supplies the TRACKING references of managed containers. Nil
+	// restores the pre-Phase-13.1 behaviour, in which only the references
+	// containers declare are resolved -- and a container HarborMaster has
+	// updated declares an immutable digest, so it would never be checked again.
+	Lineage LineageReader
+	// Reconciler establishes and corrects lineage against the observed estate.
+	// Runs at the start of each pass, before the projection that reads from it.
+	Reconciler *LineageReconciler
+
 	Config config.ImageIntel
 	// Notify raises operator notifications. Nil sends none, which is the default:
 	// notifications are off unless a deployment asks for them, and every service
@@ -99,6 +108,12 @@ type ImageIntelOptions struct {
 type ImageIntelService struct {
 	store    ImageIntelStore
 	registry RegistryClient
+	// lineage supplies the TRACKING references of managed containers, which are
+	// what has to be resolved for a container that runs a digest. Nil restores
+	// the pre-Phase-13.1 behaviour: only declared references are checked.
+	lineage LineageReader
+	// reconciler keeps lineage honest against what the inventory observed.
+	reconciler *LineageReconciler
 
 	cfg      config.ImageIntel
 	notifier Notifier
@@ -169,13 +184,15 @@ func NewImageIntelService(opts ImageIntelOptions) *ImageIntelService {
 	}
 
 	return &ImageIntelService{
-		store:    opts.Store,
-		registry: opts.Registry,
-		cfg:      cfg,
-		notifier: opts.Notify,
-		logger:   logger,
-		now:      now,
-		wake:     make(chan struct{}, 1),
+		store:      opts.Store,
+		registry:   opts.Registry,
+		lineage:    opts.Lineage,
+		reconciler: opts.Reconciler,
+		cfg:        cfg,
+		notifier:   opts.Notify,
+		logger:     logger,
+		now:        now,
+		wake:       make(chan struct{}, 1),
 	}
 }
 
@@ -211,14 +228,98 @@ func (s *ImageIntelService) SyncInventory(ctx context.Context) (store.SyncResult
 	}
 
 	seeds := make([]store.ImageReferenceSeed, 0, len(references))
+	seen := make(map[string]struct{}, len(references))
 	for _, reference := range references {
-		seeds = append(seeds, s.seed(reference))
+		seed := s.seed(reference)
+		seeds = append(seeds, seed)
+		seen[strings.ToLower(seed.Reference)] = struct{}{}
 	}
+
+	// THE TRACKING REFERENCES.
+	//
+	// A container HarborMaster has updated runs `repo@sha256:...`, and the
+	// loop above therefore seeds a digest reference -- which is immutable, and
+	// answering "has this moved?" for it is answering the wrong question. What
+	// has to be resolved against the registry is the TAG that container
+	// follows, so those are seeded here from the authoritative lineage record.
+	//
+	// Without this the estate is checked exactly as it was before Phase 13.1
+	// and every updated container reports `none` forever.
+	seeds = append(seeds, s.lineageSeeds(ctx, seen, len(seeds))...)
+
 	if len(seeds) == 0 {
 		return store.SyncResult{}, nil
 	}
 
 	return s.store.SyncReferences(ctx, seeds, s.now().UTC())
+}
+
+// lineageSeeds adds the tracking reference of every tracked container that the
+// inventory sweep did not already cover.
+//
+// Never fails the sync. Lineage is an enhancement to coverage: without it the
+// estate is still checked, just as it was before, so an unreadable lineage
+// table degrades to the previous behaviour rather than stopping update
+// discovery for everything.
+func (s *ImageIntelService) lineageSeeds(
+	ctx context.Context,
+	seen map[string]struct{},
+	already int,
+) []store.ImageReferenceSeed {
+	if s.lineage == nil {
+		return nil
+	}
+	tracked, err := s.lineage.Tracked(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "image lineage could not be read; update discovery is covering "+
+			"only the references containers declare",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	budget := s.cfg.MaxTrackedReferences - already
+	seeds := make([]store.ImageReferenceSeed, 0, len(tracked))
+	for _, lineage := range tracked {
+		if budget <= 0 {
+			s.logger.WarnContext(ctx, "the tracked reference limit was reached before every "+
+				"managed container's tracking reference was covered",
+				slog.Int("limit", s.cfg.MaxTrackedReferences))
+			break
+		}
+		key := strings.ToLower(lineage.TrackingReference)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+
+		// Re-parsed rather than trusted: this string is read back out of the
+		// database and is about to become a registry request, so it is
+		// validated at the point of use like any other stored reference.
+		normalized, parseErr := domain.NormalizeImageRef(lineage.TrackingReference)
+		if parseErr != nil || normalized.Tag == "" || normalized.Digest != "" {
+			continue
+		}
+
+		seen[key] = struct{}{}
+		budget--
+		seeds = append(seeds, store.ImageReferenceSeed{
+			Reference:  normalized.Canonical,
+			Familiar:   normalized.Familiar,
+			Kind:       normalized.Kind,
+			Registry:   normalized.Host,
+			Namespace:  normalized.Namespace,
+			Repository: normalized.Path,
+			Tag:        normalized.Tag,
+			// No local digest and no image id, deliberately. The local daemon
+			// may not carry this tag at all -- it was pulled by digest -- and
+			// the comparison this seed exists for is made per container in the
+			// planner, against the digest lineage says is running, not against
+			// whatever the local tag happens to point at.
+			LocalDigestDetail: domain.RepoDigestNone.Explain(),
+			Pinned:            false,
+			Supported:         true,
+		})
+	}
+	return seeds
 }
 
 // seed projects one inventory reference into a tracked record.

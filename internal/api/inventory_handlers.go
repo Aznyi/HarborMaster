@@ -37,6 +37,16 @@ type ContainerReader interface {
 	DistinctImages(ctx context.Context) ([]string, error)
 }
 
+// LineageReader reports what a container FOLLOWS, as distinct from the
+// immutable digest it runs.
+//
+// One method: the detail view asks about one container. There is deliberately
+// nothing here that WRITES -- lineage is established by reconciliation and
+// advanced by a verified recreation, and no HTTP request may set it.
+type LineageReader interface {
+	Get(ctx context.Context, containerName string) (domain.ImageLineage, error)
+}
+
 // WarningReader supplies a container's inventory warnings.
 type WarningReader interface {
 	WarningsForContainer(ctx context.Context, containerID string) ([]domain.InventoryWarning, error)
@@ -246,6 +256,15 @@ func (s *Server) handleContainerDetail(w http.ResponseWriter, r *http.Request) {
 	if s.warnings != nil {
 		if warnings, warnErr := s.warnings.WarningsForContainer(r.Context(), id); warnErr == nil {
 			detail.Warnings = warnings
+		}
+	}
+
+	// What this container FOLLOWS, when HarborMaster follows anything for it.
+	// Absent rather than empty when it does not: "nothing is tracked" is a real
+	// answer and must not read as "tracking something unnamed".
+	if s.lineage != nil {
+		if lineage, lineageErr := s.lineage.Get(r.Context(), detail.Overview.Name); lineageErr == nil {
+			detail.ImageLineage = &lineage
 		}
 	}
 

@@ -509,7 +509,12 @@ func run() error {
 	// already holds; there is no configuration setting and no API parameter that
 	// supplies a host. See internal/registry for the layered SSRF defences.
 	imageIntel := service.NewImageIntelService(service.ImageIntelOptions{
-		Store: db.ImageIntel,
+		// The tracking references of managed containers. Without this a
+		// container HarborMaster has updated declares only an immutable digest
+		// and is never checked against a registry again.
+		Lineage:    db.Lineage,
+		Reconciler: service.NewLineageReconciler(db.Lineage, logger, nil),
+		Store:      db.ImageIntel,
 		Registry: registry.New(registry.Options{
 			Version:        build.Version,
 			RequestTimeout: cfg.ImageIntel.RequestTimeout,
@@ -531,10 +536,11 @@ func run() error {
 	// network request, and nothing that executes a plan -- a plan is analysis an
 	// operator acts on with their own tooling.
 	planner := service.NewPlannerService(service.PlannerOptions{
-		Store:  db.Plans,
-		Config: cfg.Planner,
-		Notify: notifications.Notifier,
-		Logger: logger,
+		Lineage: db.Lineage,
+		Store:   db.Plans,
+		Config:  cfg.Planner,
+		Notify:  notifications.Notifier,
+		Logger:  logger,
 	})
 
 	// Identity, authorization, and the security audit log.
@@ -647,7 +653,8 @@ func run() error {
 		mutator = dockerClient
 	}
 	executions := service.NewExecutionService(service.ExecutionOptions{
-		Store: db.Executions,
+		Lineage: db.Lineage,
+		Store:   db.Executions,
 		Evidence: service.NewExecutionEvidence(
 			db.Acquisitions, db.Plans, db.Containers,
 			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
@@ -692,6 +699,7 @@ func run() error {
 		rollbacker = dockerClient
 	}
 	rollbacks := service.NewRollbackService(service.RollbackOptions{
+		Lineage:    db.Lineage,
 		Store:      db.Rollbacks,
 		Evidence:   service.NewRollbackEvidence(db.Executions, db.Inventory),
 		Runtime:    dockerClient,
@@ -914,6 +922,7 @@ func run() error {
 		Inventory:    inventory,
 		Containers:   db.Containers,
 		Warnings:     db.Inventory,
+		Lineage:      db.Lineage,
 		Images:       db.Images,
 		Networks:     db.Networks,
 		Volumes:      db.Volumes,

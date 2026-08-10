@@ -157,6 +157,12 @@ type ExecutionOptions struct {
 	// a test but not for a deployment.
 	Audit *AuditRecorder
 
+	// Lineage carries the tracking reference across the recreation. Nil leaves
+	// lineage unrecorded, which is what a deployment without the update
+	// pipeline gets; a recreation still succeeds, it is simply not followed
+	// afterwards.
+	Lineage LineageStore
+
 	Config config.Execution
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -176,6 +182,9 @@ type ExecutionService struct {
 	// audit records the OUTCOME of a recreation in the security log. Nil in a
 	// test that is not about attribution; reportOutcome is nil-safe.
 	audit *AuditRecorder
+	// lineage records what the container FOLLOWS, carried across the
+	// replacement. Nil in a deployment without the update pipeline.
+	lineage LineageStore
 
 	cfg    config.Execution
 	logger *slog.Logger
@@ -251,6 +260,7 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		notifier:   opts.Notify,
 		self:       opts.Self,
 		audit:      opts.Audit,
+		lineage:    opts.Lineage,
 		cfg:        cfg,
 		logger:     logger,
 		now:        now,

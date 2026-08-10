@@ -315,6 +315,8 @@ func BuildPreservationSummary(detail ContainerDetail, digest SecretDigester) Pre
 	add("environment", renderEnv(detail.Environment, digest))
 
 	// ---- labels ----------------------------------------------------------
+	//
+	// HarborMaster's own lineage label is excluded -- see renderLabels.
 
 	add("labels", renderLabels(detail.Labels))
 
@@ -497,13 +499,45 @@ func renderEnv(vars []EnvVar, digest SecretDigester) string {
 	return strings.Join(parts, recordSeparator)
 }
 
+// renderLabels projects a container's labels, excluding the one HarborMaster
+// writes itself.
+//
+// # Why the lineage label is excluded
+//
+// Preservation answers one question: did the OPERATOR's configuration survive
+// the recreation? LineageLabel is not the operator's configuration. HarborMaster
+// stamps it onto every replacement it creates for a tracked workload, so it is
+// present on the replacement and absent from the original that was captured --
+// and comparing it would make every tracked recreation report a difference it
+// caused itself, fail verification, and roll back a replacement that was
+// correct. That is not a hypothetical: it is what happened the first time a
+// recreation ran with lineage enabled.
+//
+// It is dropped from BOTH sides rather than only from the replacement, and that
+// symmetry is the point. The second update of the same workload captures an
+// original that ALREADY carries the label from the first, so a one-sided filter
+// would compare "absent" against "present" in one direction and "present"
+// against "changed" in the other. Dropping it everywhere means the field simply
+// is not part of the comparison, whichever side carries it.
+//
+// Nothing else is filtered. Every operator label is still compared exactly as
+// before, so a label the recreation genuinely lost is still caught -- and the
+// value of this one is not a safety property: it is re-derived from the plan on
+// every recreation and re-validated by LineageFromLabel before it is ever
+// believed.
 func renderLabels(labels []Label) string {
 	if len(labels) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(labels))
 	for _, label := range labels {
+		if label.Key == LineageLabel {
+			continue
+		}
 		parts = append(parts, label.Key+unitSeparator+label.Value)
+	}
+	if len(parts) == 0 {
+		return ""
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, recordSeparator)

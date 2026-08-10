@@ -116,6 +116,30 @@ func (s *ImageIntelService) runPass(ctx context.Context) {
 	passCtx, cancel := GraceContext(ctx, imageWriteGrace, s.passBudget())
 	defer cancel()
 
+	// Lineage first, then projection.
+	//
+	// Reconciliation is what establishes lineage for a container the inventory
+	// has just seen, and SyncInventory seeds the registry check set FROM
+	// lineage. In the other order a container would wait a whole pass before
+	// its tracking reference was ever resolved.
+	if s.reconciler != nil {
+		if result, err := s.reconciler.Reconcile(passCtx); err != nil {
+			if passCtx.Err() != nil {
+				return
+			}
+			// Not fatal to the pass: without lineage, update discovery still
+			// covers every reference a container declares, exactly as it did
+			// before Phase 13.1.
+			s.logger.Warn("could not reconcile image lineage",
+				slog.String("error", err.Error()))
+		} else if result.Established+result.Reestablished > 0 {
+			s.logger.Info("image lineage reconciled",
+				slog.Int("established", result.Established),
+				slog.Int("reestablished", result.Reestablished),
+				slog.Int("untracked", result.Untracked))
+		}
+	}
+
 	if _, err := s.SyncInventory(passCtx); err != nil {
 		if passCtx.Err() != nil {
 			return

@@ -224,7 +224,20 @@ func (s *ExecutionService) preflight(
 	decision.ContainerName = domain.NormaliseContainerName(container.Overview.Name)
 	decision.OldImage = container.Overview.Image.Raw
 	decision.OldImageID = container.Overview.ImageID
-	decision.OldImageDigest = container.Overview.Image.Digest
+	// What the container is RUNNING, not what its reference happens to spell.
+	//
+	// This value's only job is to survive into the execution record so that a
+	// ROLLBACK can put lineage back onto the artefact it restored. Taking it
+	// from the declared reference left it empty for every tag-created container,
+	// so a rollback restored the original while lineage went on claiming the
+	// replacement's digest -- and the next pass then read the workload as
+	// already up to date.
+	decision.OldImageDigest = container.RunningDigest
+	if decision.OldImageDigest == "" {
+		// A digest-pinned reference still answers when the image itself is not
+		// in the inventory yet.
+		decision.OldImageDigest = container.Overview.Image.Digest
+	}
 
 	// The container must still be running the image the plan assessed. If it is
 	// not, something else has already changed it, and the plan describes a

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,11 @@ type PlanStore interface {
 type PlannerOptions struct {
 	Store PlanStore
 
+	// Lineage supplies what each container FOLLOWS. Nil restores the
+	// pre-Phase-13.1 behaviour, in which a container running an immutable
+	// digest has nothing to assess and is skipped forever.
+	Lineage LineageReader
+
 	Config config.Planner
 	// Notify raises operator notifications. Nil sends none, which is the default:
 	// notifications are off unless a deployment asks for them, and every service
@@ -79,7 +85,8 @@ type PlannerOptions struct {
 
 // PlannerService generates change plans.
 type PlannerService struct {
-	store PlanStore
+	store   PlanStore
+	lineage LineageReader
 
 	cfg      config.Planner
 	notifier Notifier
@@ -135,6 +142,7 @@ func NewPlannerService(opts PlannerOptions) *PlannerService {
 
 	return &PlannerService{
 		store:    opts.Store,
+		lineage:  opts.Lineage,
 		cfg:      cfg,
 		notifier: opts.Notify,
 		logger:   logger,
@@ -257,8 +265,23 @@ func (s *PlannerService) planBatch(
 	referenceSet := make(map[string]struct{}, len(candidates))
 	normalized := make(map[string]domain.NormalizedRef, len(candidates))
 
+	// Lineage, by container name.
+	//
+	// Read once for the batch. A container HarborMaster has updated declares an
+	// immutable digest, so the reference it DECLARES answers the wrong
+	// question; what has to be looked up is the tag it FOLLOWS.
+	lineages := s.lineageFor(ctx, candidates)
+
 	for _, candidate := range candidates {
 		containerIDs = append(containerIDs, candidate.ContainerID)
+
+		// The tracking reference goes into the lookup set whether or not the
+		// declared reference does, because it is the one whose registry answer
+		// this container is assessed against.
+		if lineage, tracked := lineages[candidate.ContainerName]; tracked && lineage.Tracked() {
+			referenceSet[lineage.TrackingReference] = struct{}{}
+		}
+
 		if candidate.ImageRef == "" {
 			continue
 		}
@@ -285,7 +308,8 @@ func (s *PlannerService) planBatch(
 
 	result.plans = make([]domain.ChangePlan, 0, len(candidates))
 	for _, candidate := range candidates {
-		plan, state := s.planOne(candidate, normalized[candidate.ContainerID], inputs, evaluatedAt)
+		plan, state := s.planOne(candidate, normalized[candidate.ContainerID],
+			lineages[candidate.ContainerName], inputs, evaluatedAt)
 		switch state {
 		case planNew:
 			result.plans = append(result.plans, plan)
@@ -326,9 +350,28 @@ const (
 func (s *PlannerService) planOne(
 	candidate store.PlanCandidate,
 	reference domain.NormalizedRef,
+	lineage domain.ImageLineage,
 	batch store.PlanBatchInputs,
 	evaluatedAt time.Time,
 ) (domain.ChangePlan, planState) {
+	// THE LINEAGE PATH.
+	//
+	// A container HarborMaster has updated runs `repo@sha256:...`. Asking
+	// whether that reference has an update is asking whether a digest can move,
+	// and the honest answer -- no -- is what used to remove every updated
+	// container from automation for good.
+	//
+	// When lineage says what the container FOLLOWS, the question becomes the
+	// right one: does the tag resolve to something other than what is running?
+	// Everything downstream of this branch is unchanged, so a lineage plan goes
+	// through the same risk model, the same policy gates, and the same
+	// acquisition and execution verification as any other.
+	if lineage.Tracked() {
+		if plan, state, handled := s.planTracked(candidate, reference, lineage, batch, evaluatedAt); handled {
+			return plan, state
+		}
+	}
+
 	intel, hasIntel := batch.Intel[reference.Canonical]
 
 	// A plan describes a PROPOSED CHANGE. A container whose image has no update
@@ -350,27 +393,203 @@ func (s *PlannerService) planOne(
 		return domain.ChangePlan{}, planSkipped
 	}
 
-	baseline := batch.Baselines[candidate.ContainerID]
-	drift := batch.Drift[candidate.ContainerID]
-	policy := batch.Policy[candidate.ContainerID]
-
 	// The reference and digest to move onto, resolved together. An invalid
 	// target means nothing is proposed, and the plan says so rather than
 	// pairing a reference with a digest that was resolved for another one.
 	target := proposedChange(intel)
-	proposedImage, proposedDigest := target.Reference(), target.Digest()
+
+	return s.buildPlan(candidate, imageEvidence{
+		Intel:          intel,
+		CurrentImage:   intel.Familiar,
+		CurrentDigest:  intel.LocalDigest,
+		CurrentDetail:  intel.LocalDigestDetail,
+		CurrentTag:     reference.Tag,
+		ProposedImage:  target.Reference(),
+		ProposedDigest: target.Digest(),
+		UpdateType:     intel.Update,
+	}, batch, evaluatedAt)
+}
+
+// lineageFor reads the lineage of every container in the batch, by name.
+//
+// One read for the batch rather than one per container. Never fails the pass:
+// without lineage the planner behaves exactly as it did before Phase 13.1 --
+// tag-referenced containers are still planned, and digest-pinned ones are still
+// skipped -- so an unreadable lineage table degrades to the old behaviour rather
+// than stopping planning for the estate.
+func (s *PlannerService) lineageFor(
+	ctx context.Context,
+	candidates []store.PlanCandidate,
+) map[string]domain.ImageLineage {
+	if s.lineage == nil || len(candidates) == 0 {
+		return nil
+	}
+	all, err := s.lineage.All(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "image lineage could not be read; containers already moved onto "+
+			"a digest will not be assessed this pass",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	wanted := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		wanted[candidate.ContainerName] = struct{}{}
+	}
+	lineages := make(map[string]domain.ImageLineage, len(candidates))
+	for _, lineage := range all {
+		if _, ok := wanted[lineage.ContainerName]; ok {
+			lineages[lineage.ContainerName] = lineage
+		}
+	}
+	return lineages
+}
+
+// planTracked assesses a container against the reference it FOLLOWS.
+//
+// Returns handled=false when lineage cannot carry the assessment, which sends
+// the container back to the declared-reference path -- the pre-Phase-13.1
+// behaviour, and the right fallback for a container whose lineage exists but
+// whose registry evidence does not.
+//
+// # The comparison
+//
+//	tracking reference -> registry digest   VS   digest actually running
+//
+// The digest actually running is taken from LINEAGE, not from the inventory.
+// The two disagreeing means somebody changed the host outside HarborMaster, and
+// this path refuses rather than reconciles: proposing a change from a state
+// HarborMaster did not establish is how an automated updater acts on a
+// misunderstanding.
+func (s *PlannerService) planTracked(
+	candidate store.PlanCandidate,
+	reference domain.NormalizedRef,
+	lineage domain.ImageLineage,
+	batch store.PlanBatchInputs,
+	evaluatedAt time.Time,
+) (domain.ChangePlan, planState, bool) {
+	intel, hasIntel := batch.Intel[lineage.TrackingReference]
+	if !hasIntel {
+		// The tracking reference has not been checked yet. Nothing to say --
+		// and importantly NOT "no update", which is what the old behaviour
+		// amounted to.
+		return domain.ChangePlan{}, planSkipped, true
+	}
+
+	// What the container is OBSERVED to run, compared against what lineage says
+	// HarborMaster approved.
+	//
+	// Resolved through the one shared definition: the declared reference when it
+	// is pinned, otherwise the local image's RepoDigests matched to this exact
+	// repository. Deriving it from the reference alone left this empty for every
+	// tag-created container, which silently disabled the external-change guard
+	// below on precisely the containers it was written to protect.
+	observed, _ := domain.RunningDigestFor(reference, candidate.RepoDigests)
+	if observed != "" && lineage.RunningDigest != "" &&
+		!strings.EqualFold(observed, lineage.RunningDigest) {
+		// EXTERNAL CHANGE. Somebody moved this container while HarborMaster was
+		// not looking. Refused rather than reconciled here: the planner's job is
+		// to assess, and it cannot assess a container whose starting point it
+		// does not know. Reconciliation owns this case and will re-establish
+		// lineage from what is actually running.
+		s.logger.Info("a managed container is running a digest HarborMaster did not put there; "+
+			"it is not being planned until its lineage is reconciled",
+			slog.String("containerName", candidate.ContainerName))
+		return domain.ChangePlan{}, planSkipped, true
+	}
+
+	running := lineage.RunningDigest
+	if running == "" {
+		running = observed
+	}
+
+	proposal := domain.EvaluateLineage(lineage, intel, running)
+	if !proposal.Usable {
+		// Not established. Fall through to the declared-reference path, which
+		// reports an unassessable container honestly rather than as settled.
+		return domain.ChangePlan{}, planSkipped, false
+	}
+	if proposal.Update == domain.UpdateNone {
+		// Settled. Nothing to propose, and a row saying so for every current
+		// container is the noise the planner already declines to write.
+		return domain.ChangePlan{}, planSkipped, true
+	}
+
+	plan, state := s.buildPlan(candidate, imageEvidence{
+		Intel: intel,
+		// The container is running an artefact, and what it is running is the
+		// digest -- so that is what the plan reports as current. The tracking
+		// tag is carried separately in CurrentTag, so a reader can see both
+		// without either being mistaken for the other.
+		CurrentImage:   currentImageFor(reference, lineage),
+		CurrentDigest:  running,
+		CurrentDetail:  intel.LocalDigestDetail,
+		CurrentTag:     lineage.TrackingReferenceTag(),
+		ProposedImage:  proposal.Familiar,
+		ProposedDigest: proposal.Digest,
+		UpdateType:     proposal.Update,
+	}, batch, evaluatedAt)
+	return plan, state, true
+}
+
+// currentImageFor renders what the container is running, for a reader.
+//
+// The DECLARED reference when there is one -- that is literally what the
+// container runs -- falling back to the tracking reference's familiar form when
+// the declared one could not be parsed.
+func currentImageFor(reference domain.NormalizedRef, lineage domain.ImageLineage) string {
+	if reference.Familiar != "" {
+		return reference.Familiar
+	}
+	return lineage.TrackingFamiliar
+}
+
+// imageEvidence is the image-side input to a plan.
+//
+// Extracted so the DECLARED-reference path and the TRACKING-reference path
+// produce a plan through exactly the same code. Everything after this struct --
+// the risk model, the fingerprint, the duplicate suppression -- is shared, which
+// is what makes a lineage plan pass the same gates as any other rather than
+// becoming a second, weaker planner.
+type imageEvidence struct {
+	// Intel is the registry record the plan's status fields come from. For a
+	// tracked container it is the record for the TRACKING reference.
+	Intel domain.ImageIntel
+
+	CurrentImage  string
+	CurrentDigest string
+	CurrentDetail string
+	CurrentTag    string
+
+	ProposedImage  string
+	ProposedDigest string
+	UpdateType     domain.UpdateType
+}
+
+// buildPlan turns resolved image evidence into a change plan.
+func (s *PlannerService) buildPlan(
+	candidate store.PlanCandidate,
+	evidence imageEvidence,
+	batch store.PlanBatchInputs,
+	evaluatedAt time.Time,
+) (domain.ChangePlan, planState) {
+	intel := evidence.Intel
+
+	baseline := batch.Baselines[candidate.ContainerID]
+	drift := batch.Drift[candidate.ContainerID]
+	policy := batch.Policy[candidate.ContainerID]
 
 	inputs := domain.PlanInputs{
 		ContainerID:   candidate.ContainerID,
 		ContainerName: candidate.ContainerName,
 
-		CurrentImage:        intel.Familiar,
-		ProposedImage:       proposedImage,
-		CurrentDigest:       intel.LocalDigest,
-		CurrentDigestDetail: intel.LocalDigestDetail,
-		ProposedDigest:      proposedDigest,
-		CurrentTag:          reference.Tag,
-		UpdateType:          intel.Update,
+		CurrentImage:        evidence.CurrentImage,
+		ProposedImage:       evidence.ProposedImage,
+		CurrentDigest:       evidence.CurrentDigest,
+		CurrentDigestDetail: evidence.CurrentDetail,
+		ProposedDigest:      evidence.ProposedDigest,
+		CurrentTag:          evidence.CurrentTag,
+		UpdateType:          evidence.UpdateType,
 
 		SnapshotID:       baseline.SnapshotID,
 		RestoreReadiness: readinessOrUnknown(baseline),

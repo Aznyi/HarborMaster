@@ -356,10 +356,17 @@ func (s *ExecutionService) mutate(ctx, parent context.Context, work *pipeline) {
 	if s.shuttingDown(parent, work) {
 		return
 	}
+	// The tracking reference comes from the APPROVED plan, so the label can
+	// never disagree with the change that was authorised. It affects only the
+	// metadata written onto the replacement: the container is still created
+	// from decision.Target's digest, exactly as before.
+	tracking, _ := TrackingReferenceFor(decision.Plan)
+
 	replacementID, err := s.mutator.CreateContainer(ctx, docker.CreateRequest{
-		Captured: work.captured,
-		Image:    decision.Target,
-		Name:     decision.ContainerName,
+		Captured:          work.captured,
+		Image:             decision.Target,
+		Name:              decision.ContainerName,
+		TrackingReference: tracking.Canonical,
 	})
 	if err != nil {
 		s.failAfterMutation(parent, work, classifyMutationFailure(err, domain.ExecutionFailureCreate),
@@ -472,6 +479,23 @@ func (s *ExecutionService) succeed(ctx, parent context.Context, work *pipeline) 
 		s.failAfterMutation(parent, work, domain.ExecutionFailurePersistence,
 			domain.ExecutionFailurePersistence.Explain())
 		return
+	}
+
+	// Lineage advances HERE: after verification passed and the record says so,
+	// and before the housekeeping below whose failure must not change what
+	// HarborMaster believes it is following.
+	//
+	// A failure is logged rather than propagated. The host is already in the
+	// desired state, and calling a working replacement a failed recreation is
+	// the more harmful inaccuracy. Stale lineage degrades safely: the next pass
+	// proposes a digest that is already running and the execution preflight
+	// refuses it.
+	if err := AdvanceLineageAfterRecreation(ctx, s.lineage, work.decision.ContainerName,
+		work.decision.Plan, work.decision.Target.Digest, work.replacementID, s.now); err != nil {
+		s.logger.WarnContext(ctx, "the recreation succeeded but its image lineage could not be recorded",
+			slog.String("executionId", id),
+			slog.String("containerName", work.decision.ContainerName),
+			slog.String("error", err.Error()))
 	}
 
 	if err := s.mutator.RemoveContainer(ctx, docker.RemoveRequest{

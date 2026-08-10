@@ -20,9 +20,11 @@ type Server struct {
 	inventory  InventoryReader
 	containers ContainerReader
 	warnings   WarningReader
-	images     ImageReader
-	networks   NetworkReader
-	volumes    VolumeReader
+	// lineage reports what a container follows, for the detail view.
+	lineage  LineageReader
+	images   ImageReader
+	networks NetworkReader
+	volumes  VolumeReader
 
 	dockerEvents DockerEventReader
 	eventEngine  EventEngineReader
@@ -148,6 +150,9 @@ type Options struct {
 	Containers ContainerReader
 	// Warnings supplies per-container inventory warnings.
 	Warnings WarningReader
+	// Lineage supplies what a container FOLLOWS, for the detail view. Nil
+	// omits the field, which is what a deployment without lineage should show.
+	Lineage LineageReader
 	// Images answers the image endpoints.
 	Images ImageReader
 	// Networks and Volumes answer their list endpoints.
@@ -302,6 +307,7 @@ func NewServer(opts Options) *Server {
 		inventory:  opts.Inventory,
 		containers: opts.Containers,
 		warnings:   opts.Warnings,
+		lineage:    opts.Lineage,
 		images:     opts.Images,
 		networks:   opts.Networks,
 		volumes:    opts.Volumes,

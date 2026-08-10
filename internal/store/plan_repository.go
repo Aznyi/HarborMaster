@@ -128,6 +128,19 @@ type PlanCandidate struct {
 	ContainerName string
 	ImageRef      string
 	ImageID       string
+	// ImageDigest is the digest carried by the DECLARED REFERENCE, set only for
+	// a container created from a digest-pinned reference.
+	ImageDigest string
+	// RepoDigests are the registry manifest references the local image is known
+	// by, and for a TAG-created container the only place its running digest
+	// exists.
+	//
+	// Both fields feed domain.RunningDigestFor, which is what the planner
+	// compares against lineage: the two disagreeing means the container was
+	// moved outside HarborMaster, and a container whose starting point is
+	// unknown must not be planned from. Without the RepoDigests that comparison
+	// was made against an empty string and so never fired.
+	RepoDigests []string
 }
 
 // Candidates returns a page of present containers, oldest id first.
@@ -143,10 +156,12 @@ func (r *PlanRepository) Candidates(ctx context.Context, offset, limit int) ([]P
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, image_ref, image_id
-		FROM containers
-		WHERE present = 1
-		ORDER BY id
+		SELECT c.id, c.name, c.image_ref, c.image_id, c.image_digest,
+		       COALESCE(im.repo_digests, '[]')
+		FROM containers c
+		LEFT JOIN images im ON im.id = c.image_id
+		WHERE c.present = 1
+		ORDER BY c.id
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("query plan candidates: %w", AsError(err))
@@ -155,10 +170,20 @@ func (r *PlanRepository) Candidates(ctx context.Context, offset, limit int) ([]P
 
 	candidates := make([]PlanCandidate, 0, limit)
 	for rows.Next() {
-		var candidate PlanCandidate
+		var (
+			candidate   PlanCandidate
+			repoDigests string
+		)
 		if err := rows.Scan(&candidate.ContainerID, &candidate.ContainerName,
-			&candidate.ImageRef, &candidate.ImageID); err != nil {
+			&candidate.ImageRef, &candidate.ImageID, &candidate.ImageDigest,
+			&repoDigests); err != nil {
 			return nil, fmt.Errorf("scan plan candidate: %w", err)
+		}
+		// A malformed column is an absent list rather than a failure: the
+		// container is still planned, with an unestablished running digest,
+		// which every downstream check treats as "cannot assess".
+		if repoDigests != "" {
+			_ = json.Unmarshal([]byte(repoDigests), &candidate.RepoDigests)
 		}
 		candidates = append(candidates, candidate)
 	}

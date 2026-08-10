@@ -119,6 +119,46 @@ func SelectRepoDigest(repoDigests []string, want NormalizedRef) (string, RepoDig
 	}
 }
 
+// RunningDigestFor resolves the manifest digest a container is ACTUALLY
+// running, from the reference it declares and the local image's RepoDigests.
+//
+// # Why this exists as one function
+//
+// "The digest this container is running" was being derived independently in
+// four places, and three of them derived it wrongly: they read the digest out
+// of the DECLARED REFERENCE, which is empty for every container created from a
+// tag -- which is to say almost every container anywhere.
+//
+// The consequences were not cosmetic. Lineage never learned what a tag-created
+// container was running, so a lineage record contradicted by the host could
+// never correct itself; the planner's external-change guard compared against an
+// empty string and so never fired; and a rollback recorded no original digest,
+// which left lineage claiming the REPLACEMENT's digest after the replacement
+// had been removed. That last one is the Phase 13 defect reintroduced through
+// the failure path: the next pass compares the registry against a digest that
+// is not running and concludes there is nothing to do.
+//
+// So there is now exactly one definition, and every caller uses it.
+//
+// # The order, and why it is this way round
+//
+//  1. A DIGEST-PINNED REFERENCE is the answer. The container was created from
+//     that exact manifest, so nothing the local image store says can be more
+//     authoritative about what it is running.
+//  2. Otherwise the local image's RepoDigests, matched to this repository by
+//     SelectRepoDigest -- exact registry and path, ambiguity refused.
+//
+// Anything else is UNKNOWN, reported as an empty digest. Unknown is a usable
+// answer here: every caller treats an unestablished digest as "cannot assess"
+// rather than as "no change", which is the fail-closed direction. A guess would
+// not be.
+func RunningDigestFor(declared NormalizedRef, repoDigests []string) (string, RepoDigestMatch) {
+	if declared.Digest != "" && ValidImageDigest(declared.Digest) {
+		return declared.Digest, RepoDigestResolved
+	}
+	return SelectRepoDigest(repoDigests, declared)
+}
+
 // Explain renders a match outcome as the operator-facing reason for a missing
 // local digest.
 //
