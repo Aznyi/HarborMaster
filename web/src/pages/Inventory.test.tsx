@@ -343,16 +343,21 @@ describe("Containers page", () => {
     const user = userEvent.setup();
     renderContainers();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /^state/i })).toBeInTheDocument());
+    // "Sort by State", not "State": the column header's control now says what
+    // it DOES, because a screen reader announcing a bare column name gives no
+    // hint that activating it reorders the table.
+    const sortByState = () => screen.getByRole("button", { name: /^sort by state$/i });
 
-    await user.click(screen.getByRole("button", { name: /^state/i }));
+    await waitFor(() => expect(sortByState()).toBeInTheDocument());
+
+    await user.click(sortByState());
     await waitFor(() => {
       const query = lastContainerQuery(requests);
       expect(query.get("sort")).toBe("state");
       expect(query.get("direction")).toBe("asc");
     });
 
-    await user.click(screen.getByRole("button", { name: /^state/i }));
+    await user.click(sortByState());
     await waitFor(() => expect(lastContainerQuery(requests).get("direction")).toBe("desc"));
   });
 

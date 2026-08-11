@@ -12,6 +12,7 @@ import { Acquisitions } from "./pages/Acquisitions";
 import { Audit } from "./pages/Audit";
 import { Automation } from "./pages/Automation";
 import { AutomationPaused } from "./pages/AutomationPaused";
+import { PendingApprovals } from "./pages/PendingApprovals";
 import { AutomationRun } from "./pages/AutomationRun";
 import { ChangePassword } from "./pages/ChangePassword";
 import { ClaimInstallation } from "./pages/ClaimInstallation";
@@ -195,6 +196,10 @@ function AuthenticatedApp() {
         <Route
           path="/automation/runs/:id"
           element={<Guard permission="automation:read"><AutomationRun /></Guard>}
+        />
+        <Route
+          path="/automation/approvals"
+          element={<Guard permission="automation:read"><PendingApprovals /></Guard>}
         />
         <Route
           path="/automation/paused"

@@ -1333,6 +1333,67 @@ func TestApprovingAContainerWithNoHeldDecisionApprovesNothing(t *testing.T) {
 	}
 }
 
+func TestApprovingTheSameDecisionTwiceSubmitsOnce(t *testing.T) {
+	// The double-click, the retried request, the two operators reading the
+	// same queue. Approving is a state TRANSITION out of awaitingApproval, so
+	// the second attempt finds nothing held and refuses -- rather than
+	// submitting a second acquisition for a container that is already being
+	// updated.
+	policy := automaticPolicy()
+	policy.Mode = domain.ModeApprove
+	harness := newAutomationHarness(t, policy)
+
+	run, _, err := harness.engine.RunNow(context.Background(), false, domain.Requester{})
+	if err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+
+	approver := domain.Requester{UserID: "usr_1", Username: "colby"}
+	if _, err := harness.engine.Approve(context.Background(), run.RunID, "web",
+		approver, service.Actor{}); err != nil {
+		t.Fatalf("first Approve: %v", err)
+	}
+
+	_, err = harness.engine.Approve(context.Background(), run.RunID, "web",
+		approver, service.Actor{})
+	if !errors.Is(err, service.ErrDecisionNotApprovable) {
+		t.Fatalf("second Approve: want ErrDecisionNotApprovable, got %v", err)
+	}
+
+	if requests := harness.pipeline.recorded("acquire"); len(requests) != 1 {
+		t.Fatalf("want exactly one acquisition after two approvals, got %d", len(requests))
+	}
+}
+
+func TestApprovingCannotBorrowAnotherContainersHeldDecision(t *testing.T) {
+	// The container name SELECTS; it does not aim. Naming a container that has
+	// no held decision must not release the one that does, and must not submit
+	// anything under the borrowed name.
+	policy := automaticPolicy()
+	policy.Mode = domain.ModeApprove
+	harness := newAutomationHarness(t, policy)
+
+	run, _, err := harness.engine.RunNow(context.Background(), false, domain.Requester{})
+	if err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+
+	approver := domain.Requester{UserID: "usr_1", Username: "colby"}
+	if _, err := harness.engine.Approve(context.Background(), run.RunID, "database",
+		approver, service.Actor{}); !errors.Is(err, service.ErrDecisionNotApprovable) {
+		t.Fatalf("want ErrDecisionNotApprovable, got %v", err)
+	}
+	if requests := harness.pipeline.recorded("acquire"); len(requests) != 0 {
+		t.Fatalf("a borrowed name submitted %d acquisitions", len(requests))
+	}
+
+	// And the real decision is still held, not consumed by the failed attempt.
+	if _, err := harness.engine.Approve(context.Background(), run.RunID, "web",
+		approver, service.Actor{}); err != nil {
+		t.Fatalf("the held decision was consumed by a failed approval: %v", err)
+	}
+}
+
 // ------------------------------------------------------------- upcoming --
 
 func TestUpcomingWritesNothing(t *testing.T) {

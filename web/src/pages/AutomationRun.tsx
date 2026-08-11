@@ -257,7 +257,7 @@ function RecordLinks({ decision }: { decision: AutomationDecision }) {
  * what will actually happen. Approving is not a preference — it stops a
  * container and starts a different one in its place.
  */
-function ApproveButton({
+export function ApproveButton({
   runId,
   containerName,
   onApproved,

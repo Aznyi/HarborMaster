@@ -4756,6 +4756,55 @@ paths:
         "503":
           $ref: "#/components/responses/AutomationUnavailable"
 
+  /api/v1/automation/approvals:
+    get:
+      tags: [Automation]
+      summary: Decisions waiting for a person
+      operationId: listAutomationApprovals
+      description: |
+        The decisions an approval-required policy is holding, and nothing else.
+
+        A pass records a decision for every container it considered, and skips
+        most of them. Finding the ones that ask something of an operator meant
+        opening an archived pass and reading its whole table; this returns only
+        the `awaitingApproval` verdict, newest pass first.
+
+        A READ. Approving still goes through `POST /api/v1/automation/approve`
+        with `automation:approve`, and that path keeps its own staleness,
+        preflight and audit checks — this route changes nothing.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: container
+          in: query
+          required: false
+          description: |
+            Narrow to one container, so a container's own page can ask whether
+            something is waiting for it rather than scanning the queue. A value
+            that is not a name HarborMaster would have recorded is refused.
+          schema: { type: string, maxLength: 255 }
+      responses:
+        "200":
+          description: A page of decisions awaiting approval.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutomationDecision" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
   /api/v1/automation/paused:
     get:
       tags: [Automation]

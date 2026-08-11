@@ -522,6 +522,19 @@ type AutomationDecisionFilter struct {
 	ContainerName string
 	PolicyID      string
 	Verdicts      []domain.AutomationVerdict
+	// LatestRunOnly restricts the result to the most recent pass.
+	//
+	// The same restriction CountAwaitingApproval applies, and for the same
+	// reason: an approval answers "should this change happen now", and a pass
+	// that ran an hour ago asked a question about an hour ago. Every pass since
+	// re-asked it and recorded its own held decision, so without this an
+	// operator with two outstanding approvals sees one row per pass -- fourteen
+	// identical rows for two decisions, thirteen of them answering a question
+	// nobody is still asking.
+	//
+	// It also keeps the queue and the dashboard counter telling the same story.
+	// They disagreed while this did not exist.
+	LatestRunOnly bool
 	Page          Page
 }
 
@@ -550,6 +563,10 @@ func (r *AutomationRepository) ListDecisions(
 	if filter.PolicyID != "" {
 		where = append(where, "policy_id = ?")
 		args = append(args, filter.PolicyID)
+	}
+	if filter.LatestRunOnly {
+		where = append(where,
+			"run_id = (SELECT run_id FROM automation_runs ORDER BY id DESC LIMIT 1)")
 	}
 	if len(filter.Verdicts) > 0 {
 		placeholders := make([]string, 0, len(filter.Verdicts))

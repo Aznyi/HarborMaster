@@ -220,9 +220,11 @@ export function RecreationWarningNotice() {
       <strong>stops it and replaces it with a new one</strong> built from its own
       configuration and an image already downloaded to this host. The original is
       kept until the replacement passes every check, and then removed.{" "}
-      <strong>There is no automatic rollback</strong> — if the replacement fails,
-      both containers are left in place and HarborMaster records the manual steps
-      to restore service.
+      <strong>A recreation you start here is not rolled back automatically</strong>{" "}
+      — if the replacement fails, both containers are left in place and
+      HarborMaster records the manual steps to restore service. Only an
+      unattended update run by an update policy can roll itself back, and only
+      when that policy asks for it.
     </p>
   );
 }

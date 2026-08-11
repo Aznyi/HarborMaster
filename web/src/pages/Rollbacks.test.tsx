@@ -20,9 +20,10 @@ import { Rollbacks } from "./Rollbacks";
  * something running, so the properties under test are about what an operator is
  * told before and after they use it:
  *
- *   - The confirmation says the container will be UNAVAILABLE, that rollback is
- *     never automatic, and that NOTHING IS REMOVED. All three, in as many
- *     words, and it shows both container ids.
+ *   - The confirmation says the container will be UNAVAILABLE, who can start a
+ *     rollback (a person, or the update policy that made the failed change),
+ *     and that NOTHING IS REMOVED. All three, in as many words, and it shows
+ *     both container ids.
  *   - It cannot be triggered in one click, or without reading the name.
  *   - An ineligible recreation offers no control at all, and says why.
  *   - A record that left containers behind says so above everything else, and
@@ -193,7 +194,7 @@ it("says plainly that a rollback causes downtime and removes nothing", async () 
 
   const note = await screen.findByRole("note");
   expect(note).toHaveTextContent(/unavailable while the rollback runs/i);
-  expect(note).toHaveTextContent(/never automatic/i);
+  expect(note).toHaveTextContent(/started either by a person or by the update policy/i);
   expect(note).toHaveTextContent(/nothing is removed/i);
 });
 
@@ -368,7 +369,10 @@ it("states all three consequences before it will roll anything back", async () =
 
   const dialog = await screen.findByRole("dialog");
   expect(dialog).toHaveTextContent(/will be unavailable while this runs/i);
-  expect(dialog).toHaveTextContent(/manual, and it is not automatic anywhere else/i);
+  // The operator is starting this one; the policy-driven path is named rather
+  // than denied, and it is described as pausing afterwards.
+  expect(dialog).toHaveTextContent(/you are starting this one yourself/i);
+  expect(dialog).toHaveTextContent(/pauses the container afterwards/i);
   expect(dialog).toHaveTextContent(/nothing is removed/i);
 
   // Both container ids, so an operator can check them against `docker ps`.

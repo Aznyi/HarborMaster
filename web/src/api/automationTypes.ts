@@ -466,6 +466,18 @@ export interface AutomationPauseListResponse {
   pagination: Pagination;
 }
 
+/**
+ * The decisions an approval-required policy is holding.
+ *
+ * A pass records a decision for every container it considered and skips most of
+ * them, so the ones that ask something of an operator were previously buried in
+ * an archived pass table. This carries only the `awaitingApproval` verdict.
+ */
+export interface AutomationApprovalListResponse {
+  items: AutomationDecision[];
+  pagination: Pagination;
+}
+
 export interface AutomationRunQuery {
   page?: number;
   pageSize?: number;

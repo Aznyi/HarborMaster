@@ -13,6 +13,7 @@ import { useDockerEventPage } from "../hooks/useDockerEvents";
 import { useSnapshots } from "../hooks/useSnapshots";
 import { useContainerPolicy } from "../hooks/usePolicies";
 import { useContainerPlans } from "../hooks/usePlans";
+import { useAutomationApprovals } from "../hooks/useAutomation";
 import {
   PolicySeverityBadge,
   PolicyStatusBadge,
@@ -112,6 +113,8 @@ export function ContainerDetailPage() {
       </header>
 
       {container.warnings.length > 0 ? <WarningList detail={container} /> : null}
+
+      <PendingApprovalNotice name={container.overview.name} />
 
       <div role="tablist" aria-label="Container sections" className="flex flex-wrap gap-1">
         {TABS.map((name) => (
@@ -324,6 +327,84 @@ function formatEventTime(iso: string | undefined): string {
   if (!iso) return "â€”";
   const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
+}
+
+/**
+ * "Something is waiting for you on this container."
+ *
+ * # Why it is here
+ *
+ * A policy in `approvalRequired` mode holds an update and records why. Until
+ * now the only trace of that on the container itself was its absence: the
+ * change plan tab showed the proposed change, and nothing anywhere said a
+ * decision about it was sitting unanswered. An operator opening the container
+ * they were worried about was the one person guaranteed to miss it.
+ *
+ * # What it is not
+ *
+ * Not an approval control. It states the fact and links to the queue, where
+ * approving goes through the same endpoint under the same permission with the
+ * same staleness and preflight checks. Adding an approve button to a page whose
+ * every other panel is read-only would also be a new mutation on a surface that
+ * has never had one.
+ *
+ * # Why it fails silent
+ *
+ * The query needs `automation:read`, and the whole engine is optional. A viewer
+ * on a deployment without automation would otherwise get an error panel on
+ * every container page for a subsystem they cannot use. A failed lookup
+ * establishes that nothing is waiting no more than it establishes that
+ * something is, so it says neither.
+ */
+function PendingApprovalNotice({ name }: { name: string }) {
+  // One page is enough: this asks a yes/no question about a single container,
+  // and a container cannot hold more than a handful of held decisions.
+  const approvals = useAutomationApprovals(1, 5, name || undefined);
+
+  if (!name || approvals.error || !approvals.data) return null;
+
+  // A shape check, not a formality: this panel is decoration on somebody
+  // else's page, and a response that is not the queue must leave the container
+  // page exactly as it was rather than take it down.
+  const waiting = approvals.data.items;
+  if (!Array.isArray(waiting) || waiting.length === 0) return null;
+
+  return (
+    <section
+      role="status"
+      className="rounded-xl border border-warn/40 bg-warn-soft p-4"
+    >
+      <h3 className="font-semibold">
+        {waiting.length === 1
+          ? "An update is waiting for your approval"
+          : `${waiting.length} updates are waiting for your approval`}
+      </h3>
+      <ul className="mt-2 flex flex-col gap-1 text-sm">
+        {waiting.map((decision) => (
+          <li key={`${decision.runId}-${decision.containerName}`}>
+            <span className="font-mono text-xs break-all">
+              {decision.currentImage || "unknown"}
+            </span>{" "}
+            &rarr;{" "}
+            <span className="font-mono text-xs break-all">
+              {decision.proposedImage || "unknown"}
+            </span>
+            {decision.policyName ? (
+              <span className="text-content-muted">
+                {" "}
+                &mdash; held by {decision.policyName}
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-sm">
+        <Link to="/automation/approvals" className="text-accent hover:underline">
+          Review and approve
+        </Link>
+      </p>
+    </section>
+  );
 }
 
 function WarningList({ detail }: { detail: ContainerDetailData }) {

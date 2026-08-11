@@ -391,6 +391,77 @@ func (s *Server) handleAutomationApprove(w http.ResponseWriter, r *http.Request)
 
 // --------------------------------------------------------------- pauses --
 
+// automationApprovalListResponse is the queue of decisions waiting for a person.
+type automationApprovalListResponse struct {
+	Items      []domain.AutomationDecision `json:"items"`
+	Pagination Pagination                  `json:"pagination"`
+}
+
+// handleAutomationApprovals returns only the decisions awaiting an approval.
+//
+// # Why this exists as its own route
+//
+// A decision that needs a person was previously reachable only by opening the
+// automation pass that produced it and finding its row among every other
+// container the pass considered -- most of which it skipped. An operator with
+// two approvals outstanding had to read a twenty-two row table inside an
+// archived pass record to find them, and nothing pointed at which pass.
+//
+// This is a READ over the same decisions, filtered to the one verdict that asks
+// something of the operator. It creates no new state and no new way to change
+// anything: approving still goes through POST /automation/approve, with the
+// same authorization, CSRF, staleness and preflight checks it always had.
+//
+// Bounded like every other list here. A host with hundreds of containers can
+// produce a long queue, and the browser must not be handed all of it.
+func (s *Server) handleAutomationApprovals(w http.ResponseWriter, r *http.Request) {
+	if s.automationUnavailable(w, r) {
+		return
+	}
+
+	page, pageSize, err := parsePage(r.URL.Query())
+	if err != nil {
+		s.writeQueryError(w, r, err)
+		return
+	}
+
+	// An optional narrowing to one container, so a container's own page can ask
+	// "is something waiting for me here" exactly rather than by scanning a page
+	// of the queue. Validated by SHAPE: a name that is not one HarborMaster
+	// would accept cannot match a record, so it is refused rather than queried.
+	containerName := strings.TrimSpace(r.URL.Query().Get("container"))
+	if containerName != "" && !domain.ValidContainerName(containerName) {
+		writeError(w, r, s.logger, http.StatusBadRequest, CodeInvalidRequest,
+			"the container name is not one HarborMaster would have recorded")
+		return
+	}
+
+	items, total, err := s.automation.Decisions(r.Context(), store.AutomationDecisionFilter{
+		// The whole point of the route. Nothing else is actionable, and a
+		// caller cannot widen it: the verdict is fixed here rather than read
+		// from the query string.
+		Verdicts:      []domain.AutomationVerdict{domain.VerdictAwaitingApproval},
+		ContainerName: containerName,
+		// The same pass the dashboard counts. Every scheduler pass re-asks the
+		// same question and records its own held decision, so without this the
+		// queue shows one row per pass per container and disagrees with the
+		// number that sent the operator here.
+		LatestRunOnly: true,
+		Page:          store.Page{Limit: pageSize, Offset: (page - 1) * pageSize},
+	})
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "automation approval list failed",
+			slog.String("error", err.Error()))
+		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+
+	writeJSON(w, r, s.logger, http.StatusOK, automationApprovalListResponse{
+		Items:      items,
+		Pagination: newPagination(page, pageSize, total),
+	})
+}
+
 // automationPauseListResponse is the paused-container listing.
 type automationPauseListResponse struct {
 	Items      []domain.PausedContainer `json:"items"`

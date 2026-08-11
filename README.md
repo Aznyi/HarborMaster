@@ -1853,7 +1853,26 @@ curl -s -b cookies.txt -H "X-HarborMaster-CSRF: $CSRF" \
 
 # Which containers is automation refusing to touch, and why?
 curl -s -b cookies.txt localhost:8080/api/v1/automation/paused | jq
+
+# What is an approval-required policy holding for a person right now?
+curl -s -b cookies.txt localhost:8080/api/v1/automation/approvals | jq
+
+# ...and is anything waiting on one particular container?
+curl -s -b cookies.txt   'localhost:8080/api/v1/automation/approvals?container=web' | jq
 ```
+
+`/automation/approvals` is a **read**, needing only `automation:read`. It
+returns the `awaitingApproval` decisions of the most recent pass -- the same
+pass the dashboard counts, so the queue and the number that sent you to it
+always agree. Every pass re-asks the same question, so without that restriction
+one held update would read as one row per pass.
+
+Releasing one is still `POST /automation/approve` under `automation:approve`,
+and it keeps every check it had: the decision must still be held, its change
+plan must still be the container's current one, and the acquisition and
+recreation preflights run afterwards exactly as they do for an update you start
+yourself. **Approval is permission to proceed through those checks, not to skip
+them.**
 
 ### Bounds
 

@@ -51,10 +51,11 @@ type fakeAutomation struct {
 	pauses    []domain.PausedContainer
 
 	// What the API asked for. The point of the whole file.
-	runCalls     []bool // dryRun flags
-	approveCalls []struct{ runID, containerName string }
-	pauseCalls   []struct{ name, reason string }
-	resumeCalls  []string
+	decisionFilters []store.AutomationDecisionFilter
+	runCalls        []bool // dryRun flags
+	approveCalls    []struct{ runID, containerName string }
+	pauseCalls      []struct{ name, reason string }
+	resumeCalls     []string
 
 	runErr     error
 	approveErr error
@@ -91,9 +92,23 @@ func (f *fakeAutomation) RunDetail(
 }
 
 func (f *fakeAutomation) Decisions(
-	_ context.Context, _ store.AutomationDecisionFilter,
+	_ context.Context, filter store.AutomationDecisionFilter,
 ) ([]domain.AutomationDecision, int, error) {
+	f.mu.Lock()
+	f.decisionFilters = append(f.decisionFilters, filter)
+	f.mu.Unlock()
 	return f.decisions, len(f.decisions), nil
+}
+
+// lastDecisionFilter is what the handler actually asked the engine for.
+func (f *fakeAutomation) lastDecisionFilter(t *testing.T) store.AutomationDecisionFilter {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.decisionFilters) == 0 {
+		t.Fatalf("the engine was never asked for decisions")
+	}
+	return f.decisionFilters[len(f.decisionFilters)-1]
 }
 
 func (f *fakeAutomation) Summary(context.Context) (domain.AutomationRunSummary, error) {
@@ -702,6 +717,7 @@ func TestAnonymousCallersReachNoAutomationEndpoint(t *testing.T) {
 		{http.MethodGet, APIPrefix + "/automation/runs", ""},
 		{http.MethodGet, APIPrefix + "/automation/upcoming", ""},
 		{http.MethodGet, APIPrefix + "/automation/paused", ""},
+		{http.MethodGet, APIPrefix + "/automation/approvals", ""},
 		{http.MethodPost, APIPrefix + "/automation/run", `{"dryRun":true}`},
 		{http.MethodPost, APIPrefix + "/automation/approve",
 			`{"runId":"` + sampleRunID + `","containerName":"web"}`},
@@ -770,6 +786,14 @@ func TestTheAutomationRoleMatrix(t *testing.T) {
 
 			if rec := do(t, srv, http.MethodGet, APIPrefix+"/automation", nil); rec.Code != testCase.read {
 				t.Errorf("read = %d, want %d", rec.Code, testCase.read)
+			}
+			// The approvals queue is a READ. A viewer holds it for the same
+			// reason they hold every other automation read: automation changes
+			// the host unasked, and somebody has to be able to see that a
+			// change is being held even if they cannot release it.
+			if rec := do(t, srv, http.MethodGet, APIPrefix+"/automation/approvals",
+				nil); rec.Code != testCase.read {
+				t.Errorf("approvals read = %d, want %d", rec.Code, testCase.read)
 			}
 			if rec := doJSON(t, srv, http.MethodPost, APIPrefix+"/automation/run",
 				`{"dryRun":true}`); rec.Code != testCase.run {

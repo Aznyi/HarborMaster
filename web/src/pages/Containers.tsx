@@ -254,24 +254,50 @@ function ContainerTable({
             <tr>
               {SORTABLE_COLUMNS.map((column) => {
                 const active = query.sort === column.field;
+                const ascending = active && query.direction === "asc";
                 return (
-                  <th key={column.field} scope="col" className="px-4 py-3 font-medium">
+                  /*
+                    `aria-sort` belongs on the COLUMN HEADER, not on the control
+                    inside it. It is only defined for a row/column header, so a
+                    button carrying it is an unsupported attribute - axe reports
+                    it as a critical violation, and a screen reader gets no sort
+                    state from the header it is actually reading.
+                  */
+                  <th
+                    key={column.field}
+                    scope="col"
+                    aria-sort={active ? (ascending ? "ascending" : "descending") : "none"}
+                    className="px-4 py-3 font-medium"
+                  >
                     <button
                       type="button"
                       onClick={() => onSort(column.field)}
-                      aria-sort={
-                        active
-                          ? query.direction === "asc"
-                            ? "ascending"
-                            : "descending"
-                          : "none"
-                      }
+                      /*
+                        The name says what the control DOES. The current state is
+                        the header's job, above, so saying it here as well would
+                        have a screen reader announce the sort twice.
+                      */
+                      aria-label={`Sort by ${column.label}`}
                       className="inline-flex items-center gap-1 hover:text-content"
                     >
                       {column.label}
-                      <span aria-hidden="true" className={active ? "" : "opacity-0"}>
-                        {query.direction === "asc" ? "â–²" : "â–¼"}
-                      </span>
+                      {/*
+                        Escapes rather than the literal triangle characters. Those
+                        were once written into this file as UTF-8 and read back as
+                        CP1252, which baked a corrupted sequence into the source and showed it
+                        on every sortable column. An escape cannot be corrupted by
+                        a re-encode.
+
+                        Rendered only for the ACTIVE column: the previous markup
+                        drew the active column's direction on every header and
+                        merely hid it with opacity, so an inactive column carried
+                        an arrow that contradicted its own state.
+                      */}
+                      {active ? (
+                        <span aria-hidden="true">
+                          {ascending ? "\u25B2" : "\u25BC"}
+                        </span>
+                      ) : null}
                     </button>
                   </th>
                 );

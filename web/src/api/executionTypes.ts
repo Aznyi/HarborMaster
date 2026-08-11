@@ -20,8 +20,10 @@ import type { Pagination } from "./inventoryTypes";
  *
  *  1. `checkpoint` says what is TRUE OF THE HOST. `state` says what
  *     HarborMaster was doing. On a failed record only the first matters.
- *  2. There is NO automatic rollback. A failure leaves both containers in
- *     place and records manual steps.
+ *  2. A recreation an OPERATOR requested is never rolled back for them. A
+ *     failure leaves both containers in place and records manual steps. Only
+ *     an unattended update whose policy enables rollback undoes itself, and
+ *     that path pauses the container afterwards — see the automation types.
  *  3. An acquisition is SINGLE USE. There is no retry control, because a
  *     second recreation needs a fresh plan and a fresh acquisition.
  *

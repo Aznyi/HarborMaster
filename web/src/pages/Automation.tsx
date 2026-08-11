@@ -133,6 +133,22 @@ function StatusPanel({ state }: { state: ReturnType<typeof useAutomationStatus> 
             : "nothing waiting for approval"
         }
       />
+      {/* The approvals are an ACTION, not a statistic. Without this the only
+          route to them was opening an archived pass and finding the row. */}
+      {(engine.awaitingApproval ?? 0) > 0 ? (
+        <Link
+          to="/automation/approvals"
+          className="rounded-lg border border-warn/40 bg-warn-soft p-4 sm:col-span-2 lg:col-span-4"
+        >
+          <p className="text-sm font-medium text-content">
+            {engine.awaitingApproval} update
+            {engine.awaitingApproval === 1 ? "" : "s"} waiting for you to approve
+          </p>
+          <p className="mt-1 text-xs text-content-muted">
+            Review and release them &rarr;
+          </p>
+        </Link>
+      ) : null}
     </section>
   );
 }

@@ -366,6 +366,12 @@ func (s *Server) routeTable() []route {
 		{http.MethodGet, p + "/automation/paused", requires(domain.PermAutomationRead), s.handleAutomationPauses, ""},
 		{"", p + "/automation/paused", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
 
+		// The decisions waiting for a person, and nothing else. A READ: it
+		// needs only automation:read, and approving still goes through
+		// POST /automation/approve under automation:approve.
+		{http.MethodGet, p + "/automation/approvals", requires(domain.PermAutomationRead), s.handleAutomationApprovals, ""},
+		{"", p + "/automation/approvals", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
 		{http.MethodPost, p + "/automation/run", requires(domain.PermAutomationRun).policyBudget(), s.handleAutomationRun, ""},
 		{"", p + "/automation/run", requires(domain.PermAutomationRun), nil, "POST"},
 

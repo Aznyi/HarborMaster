@@ -2,6 +2,7 @@ import { useCallback } from "react";
 
 import {
   approveAutomationDecision,
+  listAutomationApprovals,
   archiveUpdatePolicy,
   createUpdatePolicy,
   getAutomationRun,
@@ -17,6 +18,7 @@ import {
 } from "../api/client";
 import type {
   AutomationDecision,
+  AutomationApprovalListResponse,
   AutomationPauseListResponse,
   AutomationRunDetailResponse,
   AutomationRunListResponse,
@@ -124,6 +126,29 @@ export function useAutomationRun(
   );
 
   return useApiResource<AutomationRunDetailResponse>(fetcher, { key: runId });
+}
+
+/**
+ * The decisions waiting for a person.
+ *
+ * Its own query rather than a filter over the run history: an operator asking
+ * "what needs me" should not have to know which pass produced the answer, and
+ * the previous route to it was reading an archived pass table row by row.
+ */
+export function useAutomationApprovals(
+  page = 1,
+  pageSize = 25,
+  container?: string,
+): ResourceState<AutomationApprovalListResponse> {
+  const fetcher = useCallback(
+    ({ signal }: { signal: AbortSignal }) =>
+      listAutomationApprovals({ signal, page, pageSize, container }),
+    [page, pageSize, container],
+  );
+
+  return useApiResource<AutomationApprovalListResponse>(fetcher, {
+    key: `approvals-${page}-${pageSize}-${container ?? ""}`,
+  });
 }
 
 /** The containers automation will not touch. */

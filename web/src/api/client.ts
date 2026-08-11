@@ -103,6 +103,7 @@ import type {
 } from "./executionTypes";
 import type {
   AutomationDecision,
+  AutomationApprovalListResponse,
   AutomationPauseListResponse,
   AutomationRunDetailResponse,
   AutomationRunListResponse,
@@ -1819,6 +1820,32 @@ export function getAutomationRun(
 ): Promise<AutomationRunDetailResponse> {
   return request<AutomationRunDetailResponse>(
     `/automation/runs/${encodeURIComponent(runId)}`,
+    options,
+  );
+}
+
+/**
+ * GET /api/v1/automation/approvals — the decisions waiting for a person.
+ *
+ * A read. Approving is a separate call with its own permission; this only says
+ * what is outstanding, so an operator can find it without opening the archived
+ * pass that produced it.
+ */
+export function listAutomationApprovals(
+  options?: RequestOptions & {
+    page?: number;
+    pageSize?: number;
+    /** Narrow to one container, for a container's own page. */
+    container?: string;
+  },
+): Promise<AutomationApprovalListResponse> {
+  const params = new URLSearchParams();
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options?.container) params.set("container", options.container);
+  const suffix = params.toString() ? `?${params}` : "";
+  return request<AutomationApprovalListResponse>(
+    `/automation/approvals${suffix}`,
     options,
   );
 }

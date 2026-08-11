@@ -169,9 +169,11 @@ export function RollbackContainerAction({
               start and pass its checks before service resumes.
             </li>
             <li>
-              <strong>This is manual, and it is not automatic anywhere else.</strong>{" "}
-              HarborMaster rolls back only when a person asks, on one recreation
-              at a time, and never on a schedule.
+              <strong>You are starting this one yourself.</strong> HarborMaster
+              rolls back on its own only for an unattended update whose policy
+              asks for it, and that pauses the container afterwards. Nothing rolls
+              back on a schedule, and only one recreation is ever rolled back at a
+              time.
             </li>
             <li>
               <strong>Nothing is removed.</strong> The replacement is stopped and

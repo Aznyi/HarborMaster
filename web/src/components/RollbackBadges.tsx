@@ -180,10 +180,12 @@ export function RollbackWarningNotice() {
       Rolling back <strong>stops the replacement container and starts the one it
       replaced</strong>. There is a gap between the two, so the container is
       unavailable while the rollback runs.{" "}
-      <strong>Rollback is never automatic</strong> — HarborMaster does it only
-      when a person asks, on one recreation at a time. The replacement is kept,
-      stopped and renamed aside, as the evidence of why the recreation was backed
-      out; nothing is removed.
+      <strong>A rollback is started either by a person or by the update policy
+      that made the failed change</strong> — never on a schedule, and only ever
+      one recreation at a time. A policy rolls back only when it is set to, and a
+      rollback it starts pauses the container afterwards. The replacement is
+      kept, stopped and renamed aside, as the evidence of why the recreation was
+      backed out; nothing is removed.
     </p>
   );
 }

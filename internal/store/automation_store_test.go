@@ -611,6 +611,68 @@ func TestCountAwaitingApprovalOnlyCountsTheLatestPass(t *testing.T) {
 	}
 }
 
+func TestListingDecisionsCanMatchTheApprovalCount(t *testing.T) {
+	// The defect this pins, found against a live host: the approvals queue
+	// listed every pass's held decisions while the dashboard counted only the
+	// latest pass's. Two outstanding approvals read as twenty-eight rows, and
+	// the number that sent the operator to the page said two.
+	//
+	// The list and the count must answer the same question, so the list can
+	// apply the same restriction.
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	older := startRun(t, db, domain.AutoTriggerSchedule)
+	if _, err := db.Automation.RecordDecisions(ctx, []domain.AutomationDecision{
+		decisionFor(older, "web", domain.VerdictAwaitingApproval),
+		decisionFor(older, "api", domain.VerdictAwaitingApproval),
+	}); err != nil {
+		t.Fatalf("RecordDecisions: %v", err)
+	}
+	if err := db.Automation.FinishRun(ctx, older.RunID, domain.RunCompleted,
+		domain.AutomationRun{}, time.Now().UTC()); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	newer := startRun(t, db, domain.AutoTriggerSchedule)
+	if _, err := db.Automation.RecordDecisions(ctx, []domain.AutomationDecision{
+		decisionFor(newer, "web", domain.VerdictAwaitingApproval),
+	}); err != nil {
+		t.Fatalf("RecordDecisions: %v", err)
+	}
+
+	filter := store.AutomationDecisionFilter{
+		Verdicts:      []domain.AutomationVerdict{domain.VerdictAwaitingApproval},
+		LatestRunOnly: true,
+	}
+	items, total, err := db.Automation.ListDecisions(ctx, filter)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+
+	count, err := db.Automation.CountAwaitingApproval(ctx)
+	if err != nil {
+		t.Fatalf("CountAwaitingApproval: %v", err)
+	}
+	if total != count {
+		t.Fatalf("the queue holds %d and the counter says %d; they must agree", total, count)
+	}
+	if len(items) != 1 || items[0].ContainerName != "web" {
+		t.Fatalf("want only the latest pass's held decision, got %+v", items)
+	}
+
+	// And the unrestricted listing still sees the whole history, because that
+	// is what the pass detail is for.
+	filter.LatestRunOnly = false
+	_, all, err := db.Automation.ListDecisions(ctx, filter)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if all != 3 {
+		t.Fatalf("the history holds %d held decisions, want 3", all)
+	}
+}
+
 func TestPruningRunsTakesTheirDecisionsWithThem(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

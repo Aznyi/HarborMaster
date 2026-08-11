@@ -208,7 +208,9 @@ it("says plainly that rollback is not automatic", async () => {
   renderList();
 
   const note = await screen.findByRole("note");
-  expect(note).toHaveTextContent(/no automatic rollback/i);
+  expect(note).toHaveTextContent(/not rolled back automatically/i);
+  // The correction: it must NOT claim rollback is categorically never automatic.
+  expect(note).toHaveTextContent(/update policy/i);
   expect(note).toHaveTextContent(/stops it and replaces it/i);
 });
 

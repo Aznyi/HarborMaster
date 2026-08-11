@@ -219,8 +219,11 @@ function AutomationPanel() {
           </p>
         </Link>
 
+        {/* The queue itself, not the automation landing page. A counter that
+            says something needs a person has to lead to the thing they can
+            act on; this one used to lead to a page with no approve control. */}
         <Link
-          to="/automation"
+          to="/automation/approvals"
           className={`rounded-lg border p-4 ${
             waiting > 0 ? "border-warn/40" : "border-border-subtle"
           }`}
