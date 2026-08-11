@@ -224,7 +224,7 @@ it("explains an empty history rather than showing a blank page", async () => {
   renderList();
 
   expect(
-    await screen.findByText("No acquisitions match these filters"),
+    await screen.findByText("No image downloads match these filters"),
   ).toBeInTheDocument();
   // And says that nothing happens on a schedule, which is the question an
   // empty list invites.

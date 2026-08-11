@@ -75,7 +75,10 @@ export function RecoveryPlanPanel({ plan }: { plan: RecoveryPlan }) {
                 )}
               </p>
               {step.command && (
-                <pre className="overflow-x-auto rounded-md border border-border-subtle bg-surface px-3 py-2 font-mono text-xs text-content">
+                <pre
+                  className="overflow-x-auto rounded-md border border-border-subtle bg-surface px-3 py-2 font-mono text-xs text-content"
+                  tabIndex={0}
+                >
                   <code>{step.command}</code>
                 </pre>
               )}

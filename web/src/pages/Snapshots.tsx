@@ -135,7 +135,7 @@ function SnapshotResults({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border-subtle bg-surface-raised">
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" tabIndex={0}>
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border-subtle text-xs uppercase tracking-wide text-content-muted">
             <tr>

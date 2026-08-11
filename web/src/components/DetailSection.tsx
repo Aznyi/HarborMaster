@@ -91,7 +91,34 @@ export function CodeBlock({ content, label }: { content: string; label: string }
   );
 }
 
-/** A horizontally scrollable wrapper, so wide tables never scroll the page. */
-export function ScrollArea({ children }: { children: ReactNode }) {
-  return <div className="overflow-x-auto">{children}</div>;
+/**
+ * A horizontally scrollable wrapper, so wide tables never scroll the page.
+ *
+ * `tabIndex={0}` is load-bearing, not decoration: a region that scrolls must be
+ * reachable by keyboard or the columns past the fold are unreachable without a
+ * mouse. axe reports the omission as a serious violation, and it is right to --
+ * on a container list, the columns off the right-hand edge are the ones
+ * carrying the update and the verdict.
+ *
+ * `label` names the region when one is given. Without a name, the element is
+ * focusable but announced only as a group, which is still better than
+ * unreachable.
+ */
+export function ScrollArea({
+  children,
+  label,
+}: {
+  children: ReactNode;
+  label?: string;
+}) {
+  return (
+    <div
+      className="overflow-x-auto"
+      tabIndex={0}
+      role={label ? "region" : undefined}
+      aria-label={label}
+    >
+      {children}
+    </div>
+  );
 }

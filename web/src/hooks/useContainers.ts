@@ -10,7 +10,7 @@ import {
 import type {
   ContainerDetail,
   ContainerQuery,
-  ContainerSummary,
+  ContainerListRow,
   FilterOptions,
   ImageUsage,
   InventoryStatus,
@@ -36,7 +36,7 @@ export function useInventory(pollIntervalMs = INVENTORY_POLL_INTERVAL_MS): Resou
  * The query is serialised into the fetcher's identity, so changing a filter
  * refetches from the server. Nothing is filtered or paged in the browser.
  */
-export function useContainerPage(query: ContainerQuery): ResourceState<ListResponse<ContainerSummary>> {
+export function useContainerPage(query: ContainerQuery): ResourceState<ListResponse<ContainerListRow>> {
   // Serialised so a structurally equal query does not retrigger the effect on
   // every render, which would poll the API continuously.
   const key = useMemo(() => JSON.stringify(query), [query]);
@@ -46,7 +46,7 @@ export function useContainerPage(query: ContainerQuery): ResourceState<ListRespo
       listContainers(JSON.parse(key) as ContainerQuery, { signal }),
     [key],
   );
-  return useApiResource<ListResponse<ContainerSummary>>(fetcher, { key });
+  return useApiResource<ListResponse<ContainerListRow>>(fetcher, { key });
 }
 
 /** Fetches one container's detail. */

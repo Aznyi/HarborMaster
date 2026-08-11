@@ -3,6 +3,8 @@ import { Link, useParams } from "react-router";
 
 import { getContainerRaw } from "../api/client";
 import type {
+  ActionOutcome,
+  ContainerAttention,
   ContainerDetail as ContainerDetailData,
   EnvVar,
   RawInspection,
@@ -14,6 +16,13 @@ import { useSnapshots } from "../hooks/useSnapshots";
 import { useContainerPolicy } from "../hooks/usePolicies";
 import { useContainerPlans } from "../hooks/usePlans";
 import { useAutomationApprovals } from "../hooks/useAutomation";
+import {
+  ATTENTION_MEANINGS,
+  AttentionBadge,
+  UpdateCell,
+  preservedMeaning,
+  rowAttention,
+} from "../components/AttentionBadges";
 import {
   PolicySeverityBadge,
   PolicyStatusBadge,
@@ -54,7 +63,7 @@ const TABS = [
   "Compose",
   "Snapshots",
   "Policy",
-  "Change plan",
+  "Update review",
   "Events",
   "Raw inspection",
 ] as const;
@@ -93,7 +102,10 @@ export function ContainerDetailPage() {
   return (
     <div className="flex flex-col gap-6">
       <header>
-        <Link to="/containers" className="text-sm text-accent hover:underline">
+        <Link
+          to="/containers"
+          className="inline-flex min-h-11 items-center text-sm text-accent hover:underline"
+        >
           &larr; All containers
         </Link>
         <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -103,7 +115,9 @@ export function ContainerDetailPage() {
           <ContainerStateBadge state={container.overview.state} />
           <ContainerHealthBadge health={container.overview.health} />
         </div>
-        <p className="mt-1 font-mono text-xs text-content-muted">{container.overview.id}</p>
+        <p className="mt-1 break-all font-mono text-xs text-content-muted">
+          {container.overview.id}
+        </p>
         {!container.overview.present ? (
           <p className="mt-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-sm">
             This container was not seen in the most recent refresh. The record is
@@ -148,7 +162,7 @@ export function ContainerDetailPage() {
         {tab === "Compose" && <ComposeTab detail={container} />}
         {tab === "Snapshots" && <SnapshotsTab id={container.overview.id} />}
         {tab === "Policy" && <PolicyTab id={container.overview.id} />}
-        {tab === "Change plan" && <PlanTab id={container.overview.id} />}
+        {tab === "Update review" && <PlanTab id={container.overview.id} />}
         {tab === "Events" && <EventsTab id={container.overview.id} />}
         {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
       </div>
@@ -423,84 +437,386 @@ function WarningList({ detail }: { detail: ContainerDetailData }) {
   );
 }
 
+/**
+ * The Overview tab.
+ *
+ * # What it used to be
+ *
+ * Three field lists: identity, state, and image. Twenty-eight labelled values,
+ * every one of them a fact about the container as Docker reports it. An
+ * operator could read all of it and still not know whether an update was
+ * available, whether a policy was holding one for their approval, whether
+ * automation had given up on this container, whether the last update had
+ * succeeded, or whether HarborMaster wanted anything from them at all.
+ *
+ * # What it is now
+ *
+ * Four answers, in the order somebody asks them:
+ *
+ *   1. Is it running and healthy, and does HarborMaster want anything?
+ *   2. What image is it running, and what does HarborMaster follow?
+ *   3. What has HarborMaster done to it?
+ *   4. What has HarborMaster found wrong with it?
+ *
+ * ...and then the Docker-level state, unchanged, under a disclosure. Nothing
+ * was removed: every field that was here is still here, and every other tab is
+ * where it was.
+ */
 function OverviewTab({ detail }: { detail: ContainerDetailData }) {
   const { overview, state } = detail;
+  const attention = rowAttention(detail.attention);
 
   return (
     <div className="flex flex-col gap-4">
-      <DetailSection title="Identity">
-        <FieldList>
-          <Field label="Name" value={overview.name} />
-          <Field label="Short ID" value={overview.shortId} mono />
-          <Field label="Container ID" value={overview.id} mono span />
-          <Field label="Host" value={overview.hostId} />
-          <Field label="Image" value={overview.image.raw} mono />
-          <Field label="Image ID" value={overview.imageId} mono />
-          {/*
-            What this container FOLLOWS, next to what it RUNS.
+      <HeadlineSection detail={detail} attention={attention} />
+      <ImageSection detail={detail} attention={attention} />
+      <HistorySection attention={attention} />
+      <FindingsSection attention={attention} id={overview.id} />
 
-            A container HarborMaster has updated is created from an immutable
-            `repo@sha256:...`, so the Image field above shows a digest. Without
-            this, an actively automated workload reads as deliberately pinned —
-            exactly backwards — and an operator has no way to see which tag will
-            drive its next update.
-          */}
-          <Field
-            label="Tracking"
-            value={
-              detail.imageLineage?.state === "tracked"
-                ? (detail.imageLineage.trackingFamiliar ??
-                  detail.imageLineage.trackingReference)
-                : "not tracked — updates are not followed for this container"
-            }
-            mono={detail.imageLineage?.state === "tracked"}
-            span
-          />
-          <Field label="Created" value={formatTimestamp(overview.createdAt)} />
-          <Field label="Started" value={formatTimestamp(overview.startedAt)} />
-          <Field label="Finished" value={formatTimestamp(overview.finishedAt)} />
-        </FieldList>
-      </DetailSection>
-
-      <DetailSection title="State">
-        <FieldList>
-          <Field label="State" value={state.state} />
-          <Field label="Raw state" value={state.rawState} />
-          <Field label="Status" value={state.status} />
-          <Field label="Health" value={state.health} />
-          <Field
-            label="Exit code"
-            value={state.exitCode === undefined ? undefined : String(state.exitCode)}
-          />
-          <Field label="Restart count" value={String(state.restartCount)} />
-          <Field label="Restart policy" value={overview.restartPolicy.name} />
-          <Field label="Error" value={state.error} span />
-          <BoolField label="Running" value={state.running} />
-          <BoolField label="Paused" value={state.paused} />
-          <BoolField label="Restarting" value={state.restarting} />
-          <BoolField label="Dead" value={state.dead} />
-          <BoolField label="OOM killed" value={state.oomKilled} />
-          <Field
-            label="Health failing streak"
-            value={state.healthFailingStreak ? String(state.healthFailingStreak) : undefined}
-          />
-        </FieldList>
-      </DetailSection>
-
-      {detail.image ? (
-        <DetailSection title="Image">
+      <details className="rounded-xl border border-border-subtle bg-surface-raised">
+        <summary className="flex min-h-11 cursor-pointer items-center px-4 py-3 text-sm font-medium">
+          Docker state
+          <span className="ml-2 font-normal text-content-muted">
+            identity, timestamps, exit code, restart policy
+          </span>
+        </summary>
+        <div className="border-t border-border-subtle p-4">
           <FieldList>
-            <Field label="ID" value={detail.image.id} mono span />
-            <Field label="Repository tags" value={detail.image.repoTags.join(", ")} span />
-            <Field label="Repository digests" value={detail.image.repoDigests.join(", ")} mono span />
-            <Field label="Created" value={formatTimestamp(detail.image.createdAt)} />
-            <Field label="Size" value={formatBytes(detail.image.size)} />
-            <Field label="Architecture" value={detail.image.architecture} />
-            <Field label="OS" value={detail.image.os} />
+            <Field label="Container ID" value={overview.id} mono span />
+            <Field label="Short ID" value={overview.shortId} mono />
+            <Field label="Host" value={overview.hostId} />
+            <Field label="Image ID" value={overview.imageId} mono />
+            <Field label="Created" value={formatTimestamp(overview.createdAt)} />
+            <Field label="Started" value={formatTimestamp(overview.startedAt)} />
+            <Field label="Finished" value={formatTimestamp(overview.finishedAt)} />
+            <Field label="Raw state" value={state.rawState} />
+            <Field label="Status" value={state.status} />
+            <Field
+              label="Exit code"
+              value={state.exitCode === undefined ? undefined : String(state.exitCode)}
+            />
+            <Field label="Restart count" value={String(state.restartCount)} />
+            <Field label="Restart policy" value={overview.restartPolicy.name} />
+            <Field label="Error" value={state.error} span />
+            <BoolField label="Running" value={state.running} />
+            <BoolField label="Paused" value={state.paused} />
+            <BoolField label="Restarting" value={state.restarting} />
+            <BoolField label="Dead" value={state.dead} />
+            <BoolField label="OOM killed" value={state.oomKilled} />
+            <Field
+              label="Health failing streak"
+              value={
+                state.healthFailingStreak ? String(state.healthFailingStreak) : undefined
+              }
+            />
+            <Field label="Inventory generation" value={String(overview.generation)} />
           </FieldList>
-        </DetailSection>
-      ) : null}
+
+          {detail.image ? (
+            <div className="mt-4">
+              <h4 className="text-sm font-medium">Local image</h4>
+              <FieldList>
+                <Field label="ID" value={detail.image.id} mono span />
+                <Field label="Repository tags" value={detail.image.repoTags.join(", ")} span />
+                <Field
+                  label="Repository digests"
+                  value={detail.image.repoDigests.join(", ")}
+                  mono
+                  span
+                />
+                <Field label="Created" value={formatTimestamp(detail.image.createdAt)} />
+                <Field label="Size" value={formatBytes(detail.image.size)} />
+                <Field label="Architecture" value={detail.image.architecture} />
+                <Field label="OS" value={detail.image.os} />
+              </FieldList>
+            </div>
+          ) : null}
+        </div>
+      </details>
     </div>
+  );
+}
+
+/**
+ * Is it running and healthy, and does HarborMaster want anything?
+ *
+ * The verdict is the same one the container's list row showed, computed by the
+ * same server-side rules -- so an operator who clicked a row saying "approval
+ * required" cannot land on a page that says something else.
+ */
+function HeadlineSection({
+  detail,
+  attention,
+}: {
+  detail: ContainerDetailData;
+  attention: ContainerAttention;
+}) {
+  const { overview, state } = detail;
+
+  return (
+    <DetailSection title="What HarborMaster makes of this container">
+      <div className="flex flex-wrap items-center gap-2">
+        <ContainerStateBadge state={overview.state} />
+        <ContainerHealthBadge health={overview.health} />
+        <AttentionBadge state={attention.state} />
+      </div>
+
+      <p className="mt-3 text-sm">{ATTENTION_MEANINGS[attention.state] ?? ""}</p>
+
+      {attention.preserved ? (
+        <p className="mt-2 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm">
+          {preservedMeaning(attention.preserved)}
+          {attention.preservedFor ? (
+            <>
+              {" It was kept for "}
+              <span className="font-medium">{attention.preservedFor}</span>.
+            </>
+          ) : null}
+        </p>
+      ) : null}
+
+      {attention.awaitingApproval ? (
+        <p className="mt-2 text-sm">
+          <Link to="/automation/approvals" className="text-accent hover:underline">
+            Review and approve the held update
+          </Link>
+        </p>
+      ) : null}
+      {attention.automationPaused ? (
+        <p className="mt-2 text-sm">
+          <Link to="/automation/paused" className="text-accent hover:underline">
+            See why automation stopped for this container
+          </Link>
+        </p>
+      ) : null}
+
+      {state.error ? (
+        <p className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-sm">
+          Docker reported: {state.error}
+        </p>
+      ) : null}
+    </DetailSection>
+  );
+}
+
+/**
+ * What it RUNS, and what HarborMaster FOLLOWS.
+ *
+ * Two different things, and conflating them is the mistake that makes an
+ * actively managed container read as deliberately pinned: a container
+ * HarborMaster has updated is created from an immutable digest reference, so
+ * its image field shows a digest and says nothing about what drives its next
+ * update.
+ */
+function ImageSection({
+  detail,
+  attention,
+}: {
+  detail: ContainerDetailData;
+  attention: ContainerAttention;
+}) {
+  const tracked = detail.imageLineage?.state === "tracked";
+
+  return (
+    <DetailSection title="Image">
+      <FieldList>
+        <Field label="Running" value={detail.overview.image.raw} mono span />
+        <Field
+          label="Follows"
+          value={
+            attention.trackingKnown
+              ? tracked
+                ? (detail.imageLineage?.trackingFamiliar ??
+                  detail.imageLineage?.trackingReference ??
+                  attention.tracking)
+                : "nothing - HarborMaster cannot attribute this image to a tag, so it will never find an update for this container"
+              : "not yet established"
+          }
+          mono={tracked}
+          span
+        />
+      </FieldList>
+
+      <div className="mt-3 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm">
+        <p className="font-medium">Update</p>
+        <p className="mt-1">
+          <UpdateCell attention={attention} />
+        </p>
+        <p className="mt-2 text-xs text-content-muted">
+          {ATTENTION_MEANINGS[attention.state] ?? ""}
+        </p>
+        <p className="mt-2 text-sm">
+          <Link
+            to={"/plans/container/" + detail.overview.id}
+            className="inline-flex min-h-6 items-center text-accent hover:underline"
+          >
+            Read the full assessment
+          </Link>
+        </p>
+      </div>
+    </DetailSection>
+  );
+}
+
+/**
+ * What HarborMaster has DONE to this container.
+ *
+ * The absence of a record is stated explicitly. "HarborMaster has never
+ * changed this container" and "the last change succeeded" look identical as an
+ * empty area and are entirely different facts.
+ */
+function HistorySection({ attention }: { attention: ContainerAttention }) {
+  return (
+    <DetailSection title="What HarborMaster has done here">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <OutcomeCard
+          title="Last update"
+          outcome={attention.lastUpdate}
+          none="HarborMaster has never updated this container."
+          to={
+            attention.lastUpdate
+              ? "/executions/" + attention.lastUpdate.id
+              : "/executions"
+          }
+        />
+        <OutcomeCard
+          title="Last rollback"
+          outcome={attention.lastRollback}
+          none="This container has never been rolled back."
+          to={
+            attention.lastRollback
+              ? "/rollbacks/" + attention.lastRollback.id
+              : "/rollbacks"
+          }
+        />
+      </div>
+
+      <p className="mt-3 text-sm">
+        <Link
+          to="/executions"
+          className="inline-flex min-h-6 items-center text-accent hover:underline"
+        >
+          Full update history
+        </Link>
+      </p>
+    </DetailSection>
+  );
+}
+
+function OutcomeCard({
+  title,
+  outcome,
+  none,
+  to,
+}: {
+  title: string;
+  outcome?: ActionOutcome;
+  none: string;
+  to: string;
+}) {
+  if (!outcome) {
+    return (
+      <div className="rounded-lg border border-border-subtle bg-surface-sunken p-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+          {title}
+        </p>
+        <p className="mt-1 text-sm text-content-muted">{none}</p>
+      </div>
+    );
+  }
+
+  const failed = outcome.state === "failed";
+  return (
+    <div
+      className={
+        "rounded-lg border p-3 " +
+        (outcome.needsAttention
+          ? "border-danger/40 bg-danger-soft"
+          : failed
+            ? "border-warn/40 bg-warn-soft"
+            : "border-border-subtle bg-surface-sunken")
+      }
+    >
+      <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+        {title}
+      </p>
+      <p className="mt-1 text-sm font-medium">{outcome.state}</p>
+      {outcome.failure ? (
+        <p className="mt-0.5 text-sm text-content-muted">reason: {outcome.failure}</p>
+      ) : null}
+      {outcome.needsAttention ? (
+        <p className="mt-1 text-sm">
+          This one stopped after it had begun changing the host. The record
+          carries the recovery steps.
+        </p>
+      ) : null}
+      {outcome.at ? (
+        <p className="mt-1 text-xs text-content-muted">
+          {formatTimestamp(outcome.at) ?? outcome.at}
+        </p>
+      ) : null}
+      <p className="mt-2 text-sm">
+        <Link to={to} className="text-accent hover:underline">
+          Open the record
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+/** What HarborMaster has found wrong with it. */
+function FindingsSection({
+  attention,
+  id,
+}: {
+  attention: ContainerAttention;
+  id: string;
+}) {
+  return (
+    <DetailSection
+      title="What HarborMaster has found"
+      description="Observations. Nothing here changes a container; compliance and drift are things HarborMaster reports, not things it fixes."
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Link
+          to={"/policy/container/" + id}
+          className={
+            "rounded-lg border p-3 " +
+            (attention.openViolations > 0 ? "border-danger/40" : "border-border-subtle")
+          }
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Policy findings
+          </p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">
+            {attention.openViolations}
+          </p>
+          <p className="mt-1 text-xs text-content-muted">
+            {attention.openViolations === 0
+              ? "See the Policy tab for whether this container has been evaluated at all."
+              : "Worst open finding: " + (attention.highestSeverity ?? "unknown") + "."}
+          </p>
+        </Link>
+
+        <Link
+          to={"/drift/container/" + id}
+          className={
+            "rounded-lg border p-3 " +
+            (attention.openDrift > 0 ? "border-warn/40" : "border-border-subtle")
+          }
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
+            Configuration drift
+          </p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">{attention.openDrift}</p>
+          <p className="mt-1 text-xs text-content-muted">
+            {attention.openDrift === 0
+              ? "Drift is measured against a snapshot; with no snapshot there is nothing to compare."
+              : "Settings that have moved from the baseline snapshot."}
+          </p>
+        </Link>
+      </div>
+    </DetailSection>
   );
 }
 

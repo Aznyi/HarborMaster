@@ -49,7 +49,10 @@ export function SnapshotSummary() {
         <h2 id="snapshot-summary-heading" className="text-lg font-semibold">
           Configuration snapshots
         </h2>
-        <Link to="/snapshots" className="text-sm text-accent hover:underline">
+        <Link
+          to="/snapshots"
+          className="inline-flex min-h-11 items-center text-sm text-accent hover:underline"
+        >
           View all
         </Link>
       </div>
@@ -85,7 +88,7 @@ export function SnapshotSummary() {
           <span className="text-content-muted">Most recent:</span>
           <Link
             to={`/snapshots/${newest.id}`}
-            className="font-medium text-accent hover:underline"
+            className="inline-flex min-h-6 items-center font-medium text-accent hover:underline"
           >
             {newest.containerName || newest.containerId}
           </Link>

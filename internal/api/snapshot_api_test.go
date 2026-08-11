@@ -172,6 +172,11 @@ type fakeContainerReader struct {
 func (f *fakeContainerReader) List(context.Context, store.ContainerFilter) ([]domain.ContainerSummary, int, error) {
 	return nil, 0, nil
 }
+func (f *fakeContainerReader) Attention(
+	context.Context, []store.ContainerKey,
+) (map[string]domain.ContainerEvidence, error) {
+	return map[string]domain.ContainerEvidence{}, nil
+}
 func (f *fakeContainerReader) Get(context.Context, string) (*domain.ContainerDetail, error) {
 	return f.detail, f.err
 }

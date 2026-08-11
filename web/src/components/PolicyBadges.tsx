@@ -88,7 +88,7 @@ export function PolicyStateBadge({ policy }: { policy: PolicyDefinition }) {
     return (
       <StatusBadge
         tone="neutral"
-        label="withdrawn"
+        label="archived"
         title="Archived. It is no longer evaluated, and the violations it found are kept as history"
       />
     );

@@ -50,10 +50,10 @@ export const UPDATE_STRATEGY_ORDER: UpdateStrategy[] = [
 ];
 
 export const UPDATE_STRATEGY_LABELS: Record<UpdateStrategy, string> = {
-  digestOnly: "Digest only",
-  patch: "Up to patch",
-  minor: "Up to minor",
-  major: "Up to major",
+  digestOnly: "Same tag only, when it is republished",
+  patch: "Up to a patch version",
+  minor: "Up to a minor version",
+  major: "Up to a major version",
 };
 
 export const UPDATE_STRATEGY_DESCRIPTIONS: Record<UpdateStrategy, string> = {
@@ -80,9 +80,9 @@ export const AUTOMATION_MODE_ORDER: AutomationMode[] = [
 ];
 
 export const AUTOMATION_MODE_LABELS: Record<AutomationMode, string> = {
-  observe: "Observe",
-  dryRun: "Dry run",
-  approvalRequired: "Approval required",
+  observe: "Observe only",
+  dryRun: "Dry run (decide, change nothing)",
+  approvalRequired: "Require approval",
   automatic: "Automatic",
 };
 

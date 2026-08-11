@@ -186,7 +186,7 @@ export function PolicyEditor({
       <label className="flex items-center gap-2 text-sm text-content">
         <input
           type="checkbox"
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
           checked={enabled}
           onChange={(event) => setEnabled(event.target.checked)}
         />
@@ -382,7 +382,7 @@ function RuleValues({
             <label key={policyName} className="flex items-center gap-1.5 text-sm text-content">
               <input
                 type="checkbox"
-                className="size-4 rounded border-border-subtle"
+                className="h-6 w-6 shrink-0 rounded border-border-subtle"
                 checked={values.includes(policyName)}
                 onChange={(event) =>
                   onChange({

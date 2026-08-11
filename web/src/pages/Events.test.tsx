@@ -452,7 +452,7 @@ describe("Events live stream", () => {
 
 // -------------------------------------------------------------- dashboard --
 
-describe("Dashboard event engine panel", () => {
+describe("Dashboard event engine reporting", () => {
   function renderApp(path = "/") {
     return render(
       <MemoryRouter initialEntries={[path]}>
@@ -463,37 +463,67 @@ describe("Dashboard event engine panel", () => {
     );
   }
 
-  it("shows connection state and counters", async () => {
+  /** Opens the collapsed technical section. */
+  async function openTechnicalDetails() {
+    const user = userEvent.setup();
+    await user.click(await screen.findByText(/technical details/i));
+  }
+
+  it("shows the connection state on the first screen", async () => {
+    // The STATE stays visible without expanding anything: whether the
+    // inventory is being kept current by live events decides how much to
+    // trust every other number on the page.
     stubApi();
     renderApp();
 
-    const panel = await screen.findByRole("region", { name: /docker events/i });
-
-    expect(within(panel).getByText("connected")).toBeInTheDocument();
-    expect(within(panel).getByText(/last event/i)).toBeInTheDocument();
-    expect(within(panel).getByText(/last reconciliation/i)).toBeInTheDocument();
-    expect(within(panel).getByText("0 / 1024")).toBeInTheDocument();
+    const panel = await screen.findByRole("region", { name: /harbormaster/i });
+    expect(await within(panel).findByText("connected")).toBeInTheDocument();
+    expect(
+      await within(panel).findByText(/kept current by live events/i),
+    ).toBeInTheDocument();
   });
 
-  it("warns that polling is carrying the inventory when events are disconnected", async () => {
+  it("keeps the counters, one disclosure away", async () => {
+    // Queue depth and reconnect count are telemetry, not problems. They moved
+    // below the fold rather than out of the product.
+    stubApi();
+    renderApp();
+    await screen.findByRole("region", { name: /harbormaster/i });
+    await openTechnicalDetails();
+
+    const counters = await screen.findByRole("region", { name: /event engine counters/i });
+    expect(within(counters).getByText(/last event/i)).toBeInTheDocument();
+    expect(within(counters).getByText(/last reconciliation/i)).toBeInTheDocument();
+    expect(within(counters).getByText("0 / 1024")).toBeInTheDocument();
+  });
+
+  it("raises a disconnected stream to the top of the page", async () => {
+    // Not merely a badge somewhere: a degraded dependency is an ATTENTION
+    // item, because it makes the rest of the dashboard possibly stale.
     stubApi({ eventEngine: eventEngineStatus({ state: "reconnecting" }) });
     renderApp();
 
-    const panel = await screen.findByRole("region", { name: /docker events/i });
-
-    expect(within(panel).getByRole("alert")).toHaveTextContent(
-      /relying on periodic reconciliation/i,
-    );
+    expect(
+      await screen.findByText(/docker event stream is disconnected/i),
+    ).toBeInTheDocument();
+    // Said in both places on purpose: once at the top as work, once in the
+    // HarborMaster panel as the state of a dependency.
+    expect((await screen.findAllByText(/periodic reconciliation/i)).length)
+      .toBeGreaterThan(0);
   });
 
   it("presents a disabled engine as a supported mode, not a fault", async () => {
     stubApi({ eventEngine: eventEngineStatus({ enabled: false, state: "disabled" }) });
     renderApp();
 
-    const panel = await screen.findByRole("region", { name: /docker events/i });
+    const panel = await screen.findByRole("region", { name: /harbormaster/i });
+    expect(await within(panel).findByText(/refreshes on a schedule/i)).toBeInTheDocument();
 
-    expect(within(panel).getByText(/supported mode/i)).toBeInTheDocument();
-    expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
+    // And it raises nothing: a configured mode is not something needing a
+    // person.
+    expect(
+      screen.queryByText(/event stream is disconnected/i),
+    ).not.toBeInTheDocument();
   });
 });
 

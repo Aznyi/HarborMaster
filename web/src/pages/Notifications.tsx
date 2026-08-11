@@ -726,7 +726,10 @@ function DeliveryList({
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-border-subtle">
+    <div
+        className="overflow-x-auto rounded-xl border border-border-subtle"
+        tabIndex={0}
+      >
       <table className="w-full min-w-[52rem] text-left text-sm">
         <thead className="bg-surface-sunken text-xs uppercase tracking-wide text-content-muted">
           <tr>

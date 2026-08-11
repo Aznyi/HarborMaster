@@ -84,6 +84,18 @@ type ContainerFilter struct {
 	// IncludeAbsent includes containers the most recent refresh did not see.
 	IncludeAbsent bool
 
+	// ExcludePreserved drops the containers HarborMaster itself parked aside
+	// as evidence -- an original held during an update, a replacement that
+	// failed verification, a replacement a rollback moved aside.
+	//
+	// The default view of a host is its WORKLOADS. Those three are none of
+	// them: they are stopped on purpose, they run a deliberately older image,
+	// and listing them beside real services was the audit finding this
+	// answers. They remain one checkbox away, and nothing deletes them.
+	//
+	// Exclusion is by RECORD, never by the shape of a name.
+	ExcludePreserved bool
+
 	Sort      string
 	Direction SortDirection
 	Page      Page
@@ -155,6 +167,10 @@ func buildContainerWhere(filter ContainerFilter) (string, []any) {
 
 	if !filter.IncludeAbsent {
 		clauses = append(clauses, "c.present = 1")
+	}
+
+	if filter.ExcludePreserved {
+		clauses = append(clauses, "c.name NOT IN ("+preservedNameSet+")")
 	}
 
 	if search := strings.TrimSpace(filter.Search); search != "" {

@@ -61,7 +61,7 @@ export function Executions() {
   return (
     <div className="space-y-6">
       <PageIntro
-        title="Container recreations"
+        title="Update history"
         description={
           "Containers HarborMaster has stopped and replaced, and what happened " +
           "to each attempt. Every one was requested by an operator."
@@ -205,7 +205,7 @@ function Filters({
       <label className="flex items-center gap-2 pb-1.5 text-sm text-content">
         <input
           type="checkbox"
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
           checked={attentionOnly}
           onChange={(event) => onAttentionOnly(event.target.checked)}
         />
@@ -236,7 +236,7 @@ function ExecutionList({
   if (items.length === 0) {
     return (
       <EmptyState
-        title="No recreations match these filters"
+        title="No updates match these filters"
         description={
           "A recreation is requested from an acquisition that succeeded. Nothing " +
           "here happens on a schedule — HarborMaster never replaces a container " +
@@ -293,7 +293,7 @@ function ExecutionRow({ execution }: { execution: Execution }) {
 
           <Link
             to={`/executions/${encodeURIComponent(execution.executionId)}`}
-            className="block text-sm font-medium text-content hover:underline"
+            className="flex min-h-6 items-center text-sm font-medium text-content hover:underline"
           >
             {execution.containerName}
           </Link>

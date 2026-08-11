@@ -1,11 +1,19 @@
-﻿import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 
-import type { ContainerQuery, ContainerSummary } from "../api/inventoryTypes";
+import type { ContainerListRow, ContainerQuery } from "../api/inventoryTypes";
 import { useContainerPage, useFilterOptions } from "../hooks/useContainers";
 import { PageIntro } from "../components/PageIntro";
 import { Pagination } from "../components/Pagination";
 import { ScrollArea } from "../components/DetailSection";
+import {
+  AttentionBadge,
+  AttentionMarkers,
+  PreservedNote,
+  UpdateCell,
+  needsOperator,
+  rowAttention,
+} from "../components/AttentionBadges";
 import {
   ContainerHealthBadge,
   ContainerStateBadge,
@@ -19,15 +27,43 @@ import {
 
 const PAGE_SIZE = 25;
 
-/** Columns the API can sort on, paired with their headings. */
-const SORTABLE_COLUMNS: { field: string; label: string }[] = [
-  { field: "name", label: "Name" },
-  { field: "state", label: "State" },
-  { field: "health", label: "Health" },
-  { field: "image", label: "Image" },
-  { field: "project", label: "Compose" },
-  { field: "restartCount", label: "Restarts" },
-  { field: "lastSeen", label: "Last seen" },
+/**
+ * The columns, and which server-side sort each one drives.
+ *
+ * Two of the previous eight became row context: compose project moved into the
+ * name cell and restart count under the state it explains. Neither is
+ * something anybody scans a column for, and the space they were using now
+ * carries the two things an operator was previously opening every row to find.
+ *
+ * "Needs attention" and "Update" have no `sort` because the server does not
+ * order on them. A header that looked sortable and silently was not would be
+ * worse than one that plainly is not.
+ */
+const COLUMNS: { key: string; label: string; sort?: string }[] = [
+  { key: "name", label: "Name", sort: "name" },
+  { key: "state", label: "State", sort: "state" },
+  { key: "health", label: "Health", sort: "health" },
+  { key: "attention", label: "Needs attention" },
+  { key: "image", label: "Image", sort: "image" },
+  { key: "update", label: "Update" },
+  { key: "ports", label: "Ports" },
+];
+
+/**
+ * Sort fields with no column of their own.
+ *
+ * Offered in the filter bar so nothing that was sortable before this page was
+ * reorganised stopped being sortable. The select and the column headers write
+ * the same state, so they can never disagree.
+ */
+const SORT_OPTIONS: { value: string; label: string }[] = [
+  { value: "name", label: "Name" },
+  { value: "state", label: "State" },
+  { value: "health", label: "Health" },
+  { value: "image", label: "Image" },
+  { value: "project", label: "Compose project" },
+  { value: "restartCount", label: "Restart count" },
+  { value: "lastSeen", label: "Last seen" },
 ];
 
 /**
@@ -36,6 +72,12 @@ const SORTABLE_COLUMNS: { field: string; label: string }[] = [
  * Filtering, sorting, and paging all happen on the server. The browser never
  * holds more than one page, which is what keeps a thousand-container host
  * usable without virtualisation.
+ *
+ * Each row now carries what HarborMaster KNOWS about the container -- whether
+ * an update exists, whether an approval is held, whether automation gave up,
+ * whether findings are open -- computed server-side in one batched lookup for
+ * the whole page. Before this, telling a healthy workload from one holding an
+ * unapproved major update meant opening every row.
  */
 export function Containers() {
   const [query, setQuery] = useState<ContainerQuery>({
@@ -67,12 +109,13 @@ export function Containers() {
     <div className="flex flex-col gap-6">
       <PageIntro
         title="Containers"
-        description="A read-only inventory of the containers the Docker Engine reports. HarborMaster observes them; it never starts, stops, recreates, or removes one."
+        description="Every container on this host, and what HarborMaster knows about each one. HarborMaster observes them; it never starts, stops, or removes a container on its own."
       />
 
       <FilterBar
         query={query}
         onChange={update}
+        onSort={onSort}
         projects={filters.data?.projects ?? []}
         images={filters.data?.images ?? []}
       />
@@ -90,11 +133,13 @@ export function Containers() {
 function FilterBar({
   query,
   onChange,
+  onSort,
   projects,
   images,
 }: {
   query: ContainerQuery;
   onChange: (patch: Partial<ContainerQuery>) => void;
+  onSort: (field: string) => void;
   projects: string[];
   images: string[];
 }) {
@@ -110,7 +155,7 @@ function FilterBar({
           value={query.search ?? ""}
           onChange={(event) => onChange({ search: event.target.value })}
           placeholder="Name, image, or ID"
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
         />
       </label>
 
@@ -121,7 +166,7 @@ function FilterBar({
           onChange={(event) =>
             onChange({ state: event.target.value ? [event.target.value] : [] })
           }
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
         >
           <option value="">All states</option>
           {["running", "exited", "paused", "restarting", "created", "dead", "removing", "unknown"].map(
@@ -141,7 +186,7 @@ function FilterBar({
           onChange={(event) =>
             onChange({ health: event.target.value ? [event.target.value] : [] })
           }
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
         >
           <option value="">Any health</option>
           {["healthy", "unhealthy", "starting", "none"].map((health) => (
@@ -157,7 +202,7 @@ function FilterBar({
         <select
           value={query.project ?? ""}
           onChange={(event) => onChange({ project: event.target.value })}
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
         >
           <option value="">All projects</option>
           {projects.map((project) => (
@@ -173,7 +218,7 @@ function FilterBar({
         <select
           value={query.image ?? ""}
           onChange={(event) => onChange({ image: event.target.value })}
-          className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
         >
           <option value="">All images</option>
           {images.map((image) => (
@@ -184,14 +229,57 @@ function FilterBar({
         </select>
       </label>
 
-      <label className="flex items-center gap-2 self-end text-sm lg:col-span-2">
+      {/*
+        The same sort state the column headers drive. It exists because two of
+        the previous columns became row context, and because at phone width the
+        headers are off to the side of a scrolling table where nobody will find
+        them.
+      */}
+      <label className="flex flex-col gap-1 text-sm lg:col-span-2">
+        <span className="text-content-muted">Sort by</span>
+        <select
+          value={query.sort ?? "name"}
+          onChange={(event) => onSort(event.target.value)}
+          className="min-h-11 rounded-lg border border-border-subtle bg-surface px-3 py-2"
+        >
+          {SORT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="flex min-h-11 items-center gap-2 self-end text-sm lg:col-span-2">
         <input
           type="checkbox"
           checked={query.includeAbsent ?? false}
           onChange={(event) => onChange({ includeAbsent: event.target.checked })}
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
         />
         <span>Include containers that are no longer present</span>
+      </label>
+
+      {/*
+        The containers HarborMaster parked aside are not workloads: they are
+        stopped on purpose and run a deliberately older image. They are out of
+        the default view and one click back into it -- and nothing anywhere
+        removes them.
+      */}
+      <label className="flex min-h-11 items-center gap-2 self-end text-sm lg:col-span-2">
+        <input
+          type="checkbox"
+          checked={query.includePreserved ?? false}
+          onChange={(event) => onChange({ includePreserved: event.target.checked })}
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
+        />
+        <span>
+          Show containers HarborMaster kept
+          <span className="block text-xs text-content-muted">
+            Originals held during an update, failed replacements, and rollback
+            evidence. Hidden by default; never deleted.
+          </span>
+        </span>
       </label>
     </section>
   );
@@ -243,17 +331,40 @@ function ContainerTable({
     );
   }
 
+  const needing = rows.filter((row) =>
+    needsOperator(rowAttention(row.attention).state),
+  ).length;
+
   return (
     <div className="rounded-xl border border-border-subtle bg-surface-raised">
+      {/*
+        The count first, so the answer to "is anything wrong on this page" does
+        not require reading every row. Silent when nothing is.
+      */}
+      {needing > 0 ? (
+        <p
+          role="status"
+          className="border-b border-border-subtle px-4 py-3 text-sm"
+        >
+          <span className="font-medium">
+            {needing} of {rows.length} container{rows.length === 1 ? "" : "s"} on
+            this page need{needing === 1 ? "s" : ""} attention.
+          </span>{" "}
+          <span className="text-content-muted">
+            Look at the Needs attention column.
+          </span>
+        </p>
+      ) : null}
+
       <ScrollArea>
-        <table className="w-full min-w-[56rem] text-left text-sm">
+        <table className="w-full min-w-[64rem] text-left text-sm">
           <caption className="sr-only">
             Containers, page {page.data.pagination.page} of {page.data.pagination.totalPages}
           </caption>
           <thead className="border-b border-border-subtle text-xs uppercase tracking-wide text-content-muted">
             <tr>
-              {SORTABLE_COLUMNS.map((column) => {
-                const active = query.sort === column.field;
+              {COLUMNS.map((column) => {
+                const active = Boolean(column.sort) && query.sort === column.sort;
                 const ascending = active && query.direction === "asc";
                 return (
                   /*
@@ -264,47 +375,57 @@ function ContainerTable({
                     state from the header it is actually reading.
                   */
                   <th
-                    key={column.field}
+                    key={column.key}
                     scope="col"
-                    aria-sort={active ? (ascending ? "ascending" : "descending") : "none"}
+                    aria-sort={
+                      column.sort
+                        ? active
+                          ? ascending
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                        : undefined
+                    }
                     className="px-4 py-3 font-medium"
                   >
-                    <button
-                      type="button"
-                      onClick={() => onSort(column.field)}
-                      /*
-                        The name says what the control DOES. The current state is
-                        the header's job, above, so saying it here as well would
-                        have a screen reader announce the sort twice.
-                      */
-                      aria-label={`Sort by ${column.label}`}
-                      className="inline-flex items-center gap-1 hover:text-content"
-                    >
-                      {column.label}
-                      {/*
-                        Escapes rather than the literal triangle characters. Those
-                        were once written into this file as UTF-8 and read back as
-                        CP1252, which baked a corrupted sequence into the source and showed it
-                        on every sortable column. An escape cannot be corrupted by
-                        a re-encode.
+                    {column.sort ? (
+                      <button
+                        type="button"
+                        onClick={() => onSort(column.sort!)}
+                        /*
+                          The name says what the control DOES. The current state
+                          is the header's job, above, so saying it here as well
+                          would have a screen reader announce the sort twice.
+                        */
+                        aria-label={`Sort by ${column.label}`}
+                        className="inline-flex min-h-6 items-center gap-1 hover:text-content"
+                      >
+                        {column.label}
+                        {/*
+                          Escapes rather than the literal triangle characters.
+                          Those were once written into this file as UTF-8 and
+                          read back as CP1252, which baked a corrupted sequence
+                          into the source and showed it on every sortable
+                          column. An escape cannot be corrupted by a re-encode.
 
-                        Rendered only for the ACTIVE column: the previous markup
-                        drew the active column's direction on every header and
-                        merely hid it with opacity, so an inactive column carried
-                        an arrow that contradicted its own state.
-                      */}
-                      {active ? (
-                        <span aria-hidden="true">
-                          {ascending ? "\u25B2" : "\u25BC"}
-                        </span>
-                      ) : null}
-                    </button>
+                          Rendered only for the ACTIVE column: the previous
+                          markup drew the active column's direction on every
+                          header and merely hid it with opacity, so an inactive
+                          column carried an arrow that contradicted its own
+                          state.
+                        */}
+                        {active ? (
+                          <span aria-hidden="true">
+                            {ascending ? "▲" : "▼"}
+                          </span>
+                        ) : null}
+                      </button>
+                    ) : (
+                      column.label
+                    )}
                   </th>
                 );
               })}
-              <th scope="col" className="px-4 py-3 font-medium">
-                Ports
-              </th>
             </tr>
           </thead>
           <tbody>
@@ -324,52 +445,89 @@ function ContainerTable({
   );
 }
 
-function ContainerRow({ container }: { container: ContainerSummary }) {
+function ContainerRow({ container }: { container: ContainerListRow }) {
+  const attention = rowAttention(container.attention);
+
   return (
-    <tr className="border-b border-border-subtle last:border-0 hover:bg-surface-sunken">
+    <tr className="border-b border-border-subtle last:border-0 align-top hover:bg-surface-sunken">
       <td className="px-4 py-3">
+        {/*
+          `min-h-11` and the block display give the name link a touch target
+          rather than the 19px line box a bare inline link has. It is the most
+          used control on the page.
+        */}
         <Link
           to={`/containers/${container.id}`}
-          className="font-medium text-accent hover:underline"
+          className="inline-flex min-h-11 items-center font-medium text-accent hover:underline"
         >
           {container.name || container.shortId}
         </Link>
         <p className="font-mono text-xs text-content-muted">{container.shortId}</p>
+        {container.compose.managed ? (
+          <p className="text-xs text-content-muted">
+            {container.compose.project}
+            {container.compose.service ? ` / ${container.compose.service}` : ""}
+          </p>
+        ) : null}
         {!container.present ? (
           <p className="mt-1 text-xs text-warn">no longer present</p>
         ) : null}
       </td>
+
       <td className="px-4 py-3">
         <ContainerStateBadge state={container.state} />
+        {/*
+          Restart count sits under the state it explains rather than in a
+          column of its own. A number nobody scans a column for, and one that
+          means nothing without the state beside it.
+        */}
+        {container.restartCount > 0 ? (
+          <p className="mt-1 text-xs text-content-muted">
+            {container.restartCount} restart{container.restartCount === 1 ? "" : "s"}
+          </p>
+        ) : null}
       </td>
+
       <td className="px-4 py-3">
         <ContainerHealthBadge health={container.health} />
       </td>
+
       <td className="px-4 py-3">
-        <span className="break-all">{container.image.repository ?? container.image.raw}</span>
-        {container.image.tag ? (
-          <span className="text-content-muted">:{container.image.tag}</span>
+        <AttentionBadge state={attention.state} />
+        {attention.preserved ? (
+          <p className="mt-1">
+            <PreservedNote
+              kind={attention.preserved}
+              workload={attention.preservedFor}
+            />
+          </p>
         ) : null}
+        <AttentionMarkers attention={attention} containerId={container.id} />
       </td>
+
       <td className="px-4 py-3">
-        {container.compose.managed ? (
-          <>
-            <span className="block">{container.compose.project}</span>
-            <span className="text-xs text-content-muted">{container.compose.service}</span>
-          </>
-        ) : (
-          <span className="text-xs text-content-muted">standalone</span>
-        )}
-      </td>
-      <td className="px-4 py-3 tabular-nums">
-        {container.restartCount}
-        <span className="block text-xs text-content-muted">
-          {container.restartPolicy.name}
+        <span className="block break-all font-mono text-xs">
+          {container.image.raw}
+        </span>
+        {/*
+          What the container FOLLOWS, under what it RUNS. A container
+          HarborMaster has updated runs an immutable digest, so without this an
+          actively automated workload reads as deliberately pinned -- exactly
+          backwards.
+        */}
+        <span className="mt-0.5 block text-xs text-content-muted">
+          {attention.trackingKnown
+            ? attention.tracking
+              ? `follows ${attention.tracking}`
+              : "follows no tag"
+            : "not yet established"}
         </span>
       </td>
-      <td className="px-4 py-3 text-xs text-content-muted">
-        {formatRelative(container.lastSeenAt)}
+
+      <td className="px-4 py-3">
+        <UpdateCell attention={attention} />
       </td>
+
       <td className="px-4 py-3">
         <PortList ports={container.ports} />
       </td>
@@ -377,7 +535,7 @@ function ContainerRow({ container }: { container: ContainerSummary }) {
   );
 }
 
-function PortList({ ports }: { ports: ContainerSummary["ports"] }) {
+function PortList({ ports }: { ports: ContainerListRow["ports"] }) {
   const published = ports.filter((port) => port.published);
   if (published.length === 0) {
     return <span className="text-xs text-content-muted">none published</span>;
@@ -395,15 +553,4 @@ function PortList({ ports }: { ports: ContainerSummary["ports"] }) {
       ) : null}
     </ul>
   );
-}
-
-function formatRelative(iso: string): string {
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime())) return iso;
-
-  const seconds = Math.round((Date.now() - parsed.getTime()) / 1000);
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return parsed.toLocaleDateString();
 }

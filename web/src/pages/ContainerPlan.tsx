@@ -153,7 +153,7 @@ function PlanEvidence({ plan }: { plan: ChangePlan }) {
         ) : (
           "none recorded"
         )}
-        {plan.snapshotAvailable && ` · restore readiness ${plan.restoreReadiness}`}
+        {plan.snapshotAvailable && ` · snapshot completeness ${plan.restoreReadiness}`}
       </dd>
 
       <dt className="text-content-muted">Drift</dt>

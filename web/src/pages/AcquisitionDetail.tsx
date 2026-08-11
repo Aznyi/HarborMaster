@@ -82,7 +82,7 @@ export function AcquisitionDetail() {
   return (
     <div className="space-y-6">
       <PageIntro
-        title="Image acquisition"
+        title="Image download"
         description={
           "What HarborMaster downloaded, what it checked before doing so, and " +
           "how the transfer went. No container was changed by any of it."

@@ -152,7 +152,10 @@ function DecisionList({
   return (
     <section className="space-y-3">
       <h3 className="text-sm font-semibold">Decisions, in execution order</h3>
-      <div className="overflow-x-auto rounded-xl border border-border-subtle">
+      <div
+        className="overflow-x-auto rounded-xl border border-border-subtle"
+        tabIndex={0}
+      >
         <table className="min-w-full text-sm">
           <thead className="bg-surface-sunken text-left text-xs uppercase tracking-wide text-content-muted">
             <tr>

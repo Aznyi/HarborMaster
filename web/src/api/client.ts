@@ -30,7 +30,7 @@ import type {
 import type {
   ContainerDetail,
   ContainerQuery,
-  ContainerSummary,
+  ContainerListRow,
   FilterOptions,
   ImageUsage,
   InventoryStatus,
@@ -418,6 +418,7 @@ export function buildContainerQuery(query: ContainerQuery): string {
   setIf("labelValue", query.labelValue);
   setIf("harbormasterEnabled", query.harbormasterEnabled);
   setIf("includeAbsent", query.includeAbsent);
+  setIf("includePreserved", query.includePreserved);
   setIf("sort", query.sort);
   setIf("direction", query.direction);
 
@@ -434,8 +435,8 @@ export function buildContainerQuery(query: ContainerQuery): string {
 export function listContainers(
   query: ContainerQuery = {},
   options?: RequestOptions,
-): Promise<ListResponse<ContainerSummary>> {
-  return request<ListResponse<ContainerSummary>>(
+): Promise<ListResponse<ContainerListRow>> {
+  return request<ListResponse<ContainerListRow>>(
     `/containers${buildContainerQuery(query)}`,
     options,
   );

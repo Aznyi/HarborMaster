@@ -56,7 +56,7 @@ export function SnapshotReadinessPage() {
   return (
     <div className="flex flex-col gap-6">
       <PageIntro
-        title="Restore readiness"
+        title="Snapshot completeness"
         description="Whether restoring this snapshot would succeed, evaluated against the current host."
       />
 

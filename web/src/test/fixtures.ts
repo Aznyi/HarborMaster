@@ -2,6 +2,8 @@ import { vi } from "vitest";
 
 import type {
   ContainerDetail,
+  ContainerAttention,
+  ContainerListRow,
   ContainerSummary,
   FilterOptions,
   ImageUsage,
@@ -123,12 +125,49 @@ export function containerSummary(overrides: Partial<ContainerSummary> = {}): Con
   };
 }
 
-export function containerPage(
-  items: ContainerSummary[] = [containerSummary()],
-  totalItems = items.length,
-): ListResponse<ContainerSummary> {
+/**
+ * The attention block the server attaches to every list row.
+ *
+ * Defaults to the honest baseline -- assessed, following a tag, nothing to do
+ * -- so a test that cares about a particular verdict says so and every other
+ * test gets a row that is not accidentally alarming.
+ */
+export function containerAttention(
+  overrides: Partial<ContainerAttention> = {},
+): ContainerAttention {
   return {
-    items,
+    state: "upToDate",
+    updateType: "none",
+    recommendation: "proceed",
+    tracking: "nginx:1.27",
+    trackingKnown: true,
+    awaitingApproval: false,
+    automationPaused: false,
+    openViolations: 0,
+    openDrift: 0,
+    ...overrides,
+  };
+}
+
+/** A list row: a summary with its attention block. */
+export function containerRow(
+  summary: Partial<ContainerSummary> = {},
+  attention: Partial<ContainerAttention> = {},
+): ContainerListRow {
+  return {
+    ...containerSummary(summary),
+    attention: containerAttention(attention),
+  };
+}
+
+export function containerPage(
+  items: (ContainerSummary | ContainerListRow)[] = [containerRow()],
+  totalItems = items.length,
+): ListResponse<ContainerListRow> {
+  return {
+    items: items.map((item) =>
+      "attention" in item ? item : { ...item, attention: containerAttention() },
+    ),
     pagination: {
       page: 1,
       pageSize: 25,

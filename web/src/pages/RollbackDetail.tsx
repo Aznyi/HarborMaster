@@ -139,7 +139,7 @@ export function RollbackDetail() {
       </DetailSection>
 
       {rollback.verification.preservationReport && (
-        <DetailSection title="Configuration preservation">
+        <DetailSection title="Configuration match">
           <PreservationDetail report={rollback.verification.preservationReport} />
         </DetailSection>
       )}

@@ -92,7 +92,7 @@ export function ChangePlans() {
   return (
     <div className="space-y-6">
       <PageIntro
-        title="Change plans"
+        title="Update reviews"
         description={
           "What HarborMaster thinks of each proposed image change: how risky it " +
           "looks, why, and what to do about it. Plans are analysis — nothing " +
@@ -381,7 +381,7 @@ function PlanList({
   if (items.length === 0) {
     return (
       <EmptyState
-        title="No plans match these filters"
+        title="No update reviews match these filters"
         description={
           "A container with no plan has no change proposed for it — which is " +
           "not the same as a change that was assessed and found safe. Plans " +
@@ -424,7 +424,7 @@ function PlanRow({ plan }: { plan: ChangePlan }) {
 
           <Link
             to={`/plans/container/${encodeURIComponent(plan.containerId)}`}
-            className="text-sm font-medium text-content hover:underline"
+            className="inline-flex min-h-6 items-center text-sm font-medium text-content hover:underline"
           >
             {plan.containerName}
           </Link>
@@ -445,7 +445,7 @@ function PlanRow({ plan }: { plan: ChangePlan }) {
       {/* Collapsed by default: the reasoning is the point, but twenty of them
           expanded at once would drown the list. */}
       <details className="mt-3">
-        <summary className="cursor-pointer text-xs font-medium text-content-muted">
+        <summary className="flex min-h-6 cursor-pointer items-center text-xs font-medium text-content-muted">
           Why this verdict ({plan.risk.factors?.length ?? 0}{" "}
           {plan.risk.factors?.length === 1 ? "factor" : "factors"})
         </summary>

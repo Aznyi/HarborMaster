@@ -176,10 +176,12 @@ describe("App shell", () => {
     stubApi(healthyReport);
     renderApp();
 
-    await waitFor(() => expect(screen.getByText("Docker Engine")).toBeInTheDocument());
+    // The dependency panel is named "HarborMaster" and its cards are the
+    // three things everything else is read through.
+    await waitFor(() => expect(screen.getByText("Docker")).toBeInTheDocument());
     expect(screen.getByText("Database")).toBeInTheDocument();
     // The Engine API version comes from the response, not from a constant.
-    expect(screen.getByText("1.51")).toBeInTheDocument();
+    expect(screen.getByText(/API 1\.51/)).toBeInTheDocument();
   });
 
   it("navigates between sections", async () => {
@@ -260,7 +262,10 @@ describe("App shell", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /^inventory$/i }),
+        // The dashboard now leads with the attention list rather than the
+        // inventory panel, so this is what "landed on the dashboard" looks
+        // like.
+        screen.getByRole("heading", { name: /your containers/i }),
       ).toBeInTheDocument(),
     );
   });

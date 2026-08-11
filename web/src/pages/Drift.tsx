@@ -262,7 +262,7 @@ function Filters({
       <label className="flex items-center gap-2 pb-1.5 text-sm text-content">
         <input
           type="checkbox"
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
           checked={showResolved}
           onChange={(event) => onShowResolved(event.target.checked)}
         />

@@ -7,6 +7,9 @@
  */
 
 import type { HealthComponent } from "./types";
+import type { UpdateType } from "./imageTypes";
+import type { Recommendation } from "./planTypes";
+import type { PolicySeverity } from "./policyTypes";
 
 // ---------------------------------------------------------------- shared --
 
@@ -162,6 +165,73 @@ export interface HarborMasterMetadata {
   labels?: Record<string, string>;
 }
 
+/**
+ * The single headline verdict for one container.
+ *
+ * A closed vocabulary decided by the server. `notChecked` and `upToDate` are
+ * different facts and must not be rendered alike: the first says HarborMaster
+ * has not looked, the second that it looked and found nothing to do.
+ */
+export type AttentionState =
+  | "preserved"
+  | "unhealthy"
+  | "approvalRequired"
+  | "paused"
+  | "needsReview"
+  | "cannotAdvise"
+  | "updateAvailable"
+  | "notTracked"
+  | "notChecked"
+  | "upToDate";
+
+/** Why HarborMaster is keeping a container that is not a workload. */
+export type PreservedKind = "original" | "failed" | "rolledBack" | "suspected";
+
+/**
+ * The last thing HarborMaster did to a container.
+ *
+ * Absent when there has never been one. That must render as "HarborMaster has
+ * not changed this container", never as a success.
+ */
+export interface ActionOutcome {
+  id: string;
+  state: string;
+  /** The closed-vocabulary reason, empty unless it failed. */
+  failure?: string;
+  at?: string;
+  /** A failure that left containers on the host for somebody to settle. */
+  needsAttention: boolean;
+}
+
+/**
+ * What HarborMaster knows about one container, for the list row.
+ *
+ * Computed server-side from a batched lookup over the whole page. Nothing here
+ * is derived in the browser, so a row cannot disagree with the container's own
+ * detail page about whether an update exists.
+ */
+export interface ContainerAttention {
+  state: AttentionState;
+  /** Absent when no assessment exists. Never defaulted to "none". */
+  updateType?: UpdateType;
+  recommendation?: Recommendation;
+  proposedImage?: string;
+  /** The tag update discovery follows, when there is one. */
+  tracking?: string;
+  /** False when HarborMaster has not yet established what this follows. */
+  trackingKnown: boolean;
+  awaitingApproval: boolean;
+  automationPaused: boolean;
+  openViolations: number;
+  highestSeverity?: PolicySeverity;
+  openDrift: number;
+  preserved?: PreservedKind;
+  /** The workload a preserved container belongs to. */
+  preservedFor?: string;
+  lastUpdate?: ActionOutcome;
+  lastRollback?: ActionOutcome;
+}
+
 export interface ContainerSummary {
   hostId: string;
   id: string;
@@ -187,6 +257,16 @@ export interface ContainerSummary {
   lastSeenAt: string;
   generation: number;
   warningCount: number;
+}
+
+/**
+ * A container list row: the summary plus what HarborMaster knows about it.
+ *
+ * The server embeds the summary, so every field a row carried before is in the
+ * same place and `attention` is the addition.
+ */
+export interface ContainerListRow extends ContainerSummary {
+  attention: ContainerAttention;
 }
 
 export interface HealthLogEntry {
@@ -392,6 +472,11 @@ export interface ImageLineage {
 
 export interface ContainerDetail {
   overview: ContainerSummary;
+  /**
+   * What HarborMaster knows about this container: the same projection its list
+   * row carries, so the two can never disagree about whether an update exists.
+   */
+  attention?: ContainerAttention;
   state: StateDetail;
   image?: Image;
   /** What this container follows for updates. Absent when nothing is tracked. */
@@ -463,6 +548,13 @@ export interface ContainerQuery {
   labelValue?: string;
   harbormasterEnabled?: boolean;
   includeAbsent?: boolean;
+  /**
+   * Include the containers HarborMaster parked aside as evidence.
+   *
+   * Excluded by default. Note the polarity: the narrow list is the default and
+   * this opts IN to the fuller one, so a caller that omits it sees workloads.
+   */
+  includePreserved?: boolean;
   sort?: string;
   direction?: "asc" | "desc";
 }

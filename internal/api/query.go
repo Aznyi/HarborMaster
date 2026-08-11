@@ -135,6 +135,19 @@ func parseContainerFilter(query url.Values) (store.ContainerFilter, error) {
 		filter.IncludeAbsent = parsed
 	}
 
+	// The default view of a host is its WORKLOADS, so the containers
+	// HarborMaster parked aside as evidence are excluded unless asked for.
+	// Note the polarity: the DEFAULT is the exclusion, and a caller opts IN to
+	// the fuller list. Nothing is deleted and nothing is unreachable.
+	filter.ExcludePreserved = true
+	if raw := strings.TrimSpace(query.Get("includePreserved")); raw != "" {
+		parsed, convErr := strconv.ParseBool(raw)
+		if convErr != nil {
+			return store.ContainerFilter{}, invalidParam("includePreserved", "true or false")
+		}
+		filter.ExcludePreserved = !parsed
+	}
+
 	// A label value without a key would silently match nothing, which reads as
 	// "no results" rather than "your query was wrong".
 	if filter.LabelValue != "" && filter.LabelKey == "" {

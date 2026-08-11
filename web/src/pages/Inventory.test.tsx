@@ -50,6 +50,19 @@ function renderDetail(id = "abcdef0123456789") {
   );
 }
 
+/**
+ * Opens the dashboard's collapsed technical section.
+ *
+ * The inventory generation, checksum and manual refresh moved below a
+ * disclosure: they are how HarborMaster works, not what an operator needs on
+ * the first screen. They are all still there, which is what these tests keep
+ * true.
+ */
+async function openTechnicalDetails() {
+  const user = userEvent.setup();
+  await user.click(await screen.findByText(/technical details/i));
+}
+
 beforeEach(() => {
   vi.unstubAllGlobals();
 });
@@ -72,22 +85,23 @@ describe("Dashboard", () => {
     stubApi();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: /^inventory$/i })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /your containers/i })).toBeInTheDocument(),
+    );
 
-    const containers = screen.getByRole("region", { name: /containers/i });
-    expect(within(containers).getByText("Total").nextSibling).toHaveTextContent("3");
+    // The four an operator scans for. "Total" was dropped: it is the sum of
+    // the others and told nobody anything they could act on.
+    const containers = screen.getByRole("region", { name: /your containers/i });
     expect(within(containers).getByText("Running").nextSibling).toHaveTextContent("2");
     expect(within(containers).getByText("Stopped").nextSibling).toHaveTextContent("1");
     expect(within(containers).getByText("Unhealthy").nextSibling).toHaveTextContent("1");
 
+    // The catalog is telemetry and moved below the disclosure. Still there.
+    await openTechnicalDetails();
     const catalog = screen.getByRole("region", { name: /catalog/i });
     expect(within(catalog).getByText("Images").nextSibling).toHaveTextContent("2");
     expect(within(catalog).getByText("Networks").nextSibling).toHaveTextContent("1");
     expect(within(catalog).getByText("Volumes").nextSibling).toHaveTextContent("1");
-
-    // Generation and duration come from the API, not from the client clock.
-    expect(screen.getByText("4")).toBeInTheDocument();
-    expect(screen.getByText("2.0 s")).toBeInTheDocument();
   });
 
   it("shows a disconnected state when the backend is unreachable", async () => {
@@ -148,9 +162,13 @@ describe("Dashboard", () => {
     renderApp();
 
     await waitFor(() =>
-      expect(screen.getByText(/inventory engine is disabled by configuration/i)).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /your containers/i })).toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: /refresh inventory/i })).toBeDisabled();
+    await openTechnicalDetails();
+    expect(
+      screen.getByText(/inventory engine is disabled by configuration/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /refresh now/i })).toBeDisabled();
   });
 });
 
@@ -162,8 +180,9 @@ describe("manual refresh", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /refresh inventory/i })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: /refresh inventory/i }));
+    await openTechnicalDetails();
+    await waitFor(() => expect(screen.getByRole("button", { name: /refresh now/i })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /refresh now/i }));
 
     await waitFor(() => {
       const refresh = requests.find((request) => request.url.includes("/inventory/refresh"));
@@ -194,8 +213,9 @@ describe("manual refresh", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /refresh inventory/i })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: /refresh inventory/i }));
+    await openTechnicalDetails();
+    await waitFor(() => expect(screen.getByRole("button", { name: /refresh now/i })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /refresh now/i }));
 
     await waitFor(() =>
       expect(screen.getByRole("status", { name: /refresh status/i })).toHaveTextContent(/already running/i),
@@ -214,8 +234,9 @@ describe("manual refresh", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /refresh inventory/i })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: /refresh inventory/i }));
+    await openTechnicalDetails();
+    await waitFor(() => expect(screen.getByRole("button", { name: /refresh now/i })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /refresh now/i }));
 
     await waitFor(() =>
       expect(screen.getByRole("status", { name: /refresh status/i })).toHaveTextContent(/docker is unreachable/i),
@@ -227,10 +248,11 @@ describe("manual refresh", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /refresh inventory/i })).toBeEnabled());
+    await openTechnicalDetails();
+    await waitFor(() => expect(screen.getByRole("button", { name: /refresh now/i })).toBeEnabled());
     const before = requests.filter((request) => request.url.endsWith("/inventory")).length;
 
-    await user.click(screen.getByRole("button", { name: /refresh inventory/i }));
+    await user.click(screen.getByRole("button", { name: /refresh now/i }));
 
     await waitFor(() => {
       const after = requests.filter((request) => request.url.endsWith("/inventory")).length;
@@ -424,8 +446,44 @@ describe("Container detail", () => {
     renderDetail();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "web" })).toBeInTheDocument());
-    expect(screen.getByRole("region", { name: /identity/i })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: /^state$/i })).toBeInTheDocument();
+
+    // The overview now leads with what HarborMaster makes of the container
+    // rather than with twenty-eight Docker fields. Those are still here, one
+    // disclosure down, which the next assertion holds.
+    expect(
+      screen.getByRole("region", { name: /what harbormaster makes of this container/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /^image$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: /what harbormaster has done here/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps every Docker-level field, one disclosure down", async () => {
+    // The rework moved the low-level state; it removed none of it. An operator
+    // who came here for the exit code or the restart policy still finds them.
+    const user = userEvent.setup();
+    stubApi();
+    renderDetail();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "web" })).toBeInTheDocument());
+    await user.click(screen.getByText(/docker state/i));
+
+    // Scoped to the disclosure: "Running" is also the container's state badge
+    // above, and the claim under test is about what the disclosure contains.
+    const advanced = screen.getByText(/docker state/i).closest("details");
+    if (!advanced) throw new Error("the Docker state disclosure is missing");
+
+    for (const label of [
+      // Fields whose value is always present. A `Field` renders nothing at
+      // all when its value is undefined, which is itself deliberate: an empty
+      // label with no value tells nobody anything.
+      "Container ID", "Short ID", "Host", "Image ID", "Created",
+      "Restart count", "Restart policy", "Running", "Paused", "Dead",
+      "OOM killed", "Inventory generation",
+    ]) {
+      expect(within(advanced).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("offers a tab for every documented section", async () => {
@@ -591,7 +649,9 @@ describe("navigation", () => {
     );
     expect(within(nav).getByRole("link", { name: "Images" })).toBeInTheDocument();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: /^inventory$/i })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /your containers/i })).toBeInTheDocument(),
+    );
   });
 
   it("navigates from a container row to its detail page", async () => {

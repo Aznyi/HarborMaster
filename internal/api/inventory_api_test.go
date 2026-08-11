@@ -51,6 +51,13 @@ type fakeContainers struct {
 	getErr     error
 	listErr    error
 	lastFilter store.ContainerFilter
+
+	// What the handler asked about, and what to answer. Recorded because the
+	// property under test is that ONE lookup covers the whole page.
+	evidence          map[string]domain.ContainerEvidence
+	attentionCalls    int
+	attentionKeyCount int
+	attentionErr      error
 }
 
 func (f *fakeContainers) List(_ context.Context, filter store.ContainerFilter) ([]domain.ContainerSummary, int, error) {
@@ -59,6 +66,20 @@ func (f *fakeContainers) List(_ context.Context, filter store.ContainerFilter) (
 		return nil, 0, f.listErr
 	}
 	return f.summaries, f.total, nil
+}
+
+func (f *fakeContainers) Attention(
+	_ context.Context, keys []store.ContainerKey,
+) (map[string]domain.ContainerEvidence, error) {
+	f.attentionCalls++
+	f.attentionKeyCount += len(keys)
+	if f.attentionErr != nil {
+		return nil, f.attentionErr
+	}
+	if f.evidence != nil {
+		return f.evidence, nil
+	}
+	return map[string]domain.ContainerEvidence{}, nil
 }
 
 func (f *fakeContainers) Get(context.Context, string) (*domain.ContainerDetail, error) {

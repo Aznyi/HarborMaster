@@ -106,8 +106,24 @@ describe("sortable column headers", () => {
     renderTable();
     await waitFor(() => expect(screen.getByRole("button", { name: "Sort by State" })).toBeInTheDocument());
 
-    for (const label of ["State", "Health", "Image", "Compose", "Restarts", "Last seen"]) {
+    for (const label of ["State", "Health", "Image"]) {
       expect(headerFor(label)).toHaveAttribute("aria-sort", "none");
+    }
+  });
+
+  it("gives a column the server cannot order on no sort state at all", async () => {
+    // "Needs attention" and "Update" are computed per row, not ordered by the
+    // database. `aria-sort="none"` on them would announce a sortable column
+    // that is not currently sorted, and there is no way to sort it -- so the
+    // attribute is absent rather than dishonest, and the header carries no
+    // control to press.
+    renderTable();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sort by Name" })).toBeInTheDocument());
+
+    for (const label of ["Needs attention", "Update", "Ports"]) {
+      const header = screen.getByRole("columnheader", { name: label });
+      expect(header).not.toHaveAttribute("aria-sort");
+      expect(within(header).queryByRole("button")).not.toBeInTheDocument();
     }
   });
 

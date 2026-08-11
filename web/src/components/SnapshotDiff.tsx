@@ -90,7 +90,7 @@ function DiffGroupTable({ group }: { group: DiffGroup }) {
         </p>
       ) : null}
 
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" tabIndex={0}>
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border-subtle text-xs uppercase tracking-wide text-content-muted">
             <tr>

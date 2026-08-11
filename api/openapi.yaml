@@ -763,6 +763,23 @@ paths:
             one did not. Absent containers are retained rather than deleted, so
             their history survives.
           schema: { type: boolean, default: false }
+        - name: includePreserved
+          in: query
+          description: |
+            Include the containers HarborMaster itself parked aside as
+            evidence: an original held during an update, a replacement that
+            failed verification, and a replacement a rollback moved aside.
+
+            They are excluded by DEFAULT because the default view of a host is
+            its workloads, and these three are stopped on purpose and run a
+            deliberately older image. Nothing is deleted; this parameter is the
+            whole of the difference.
+
+            Exclusion is by RECORD, never by the shape of a name. A container
+            an operator named to look like one of HarborMaster's is always
+            listed, and is reported with a `suspected` classification rather
+            than hidden.
+          schema: { type: boolean, default: false }
         - name: sort
           in: query
           schema:
@@ -7053,13 +7070,138 @@ components:
         generation: { type: integer, format: int64 }
         warningCount: { type: integer, minimum: 0 }
 
+    AttentionState:
+      type: string
+      description: |
+        The single headline verdict for one container, most urgent first.
+
+        `notChecked` and `upToDate` are DIFFERENT and must not be rendered
+        alike: the first says HarborMaster has not looked, the second that it
+        looked and found nothing to do. `cannotAdvise` is the absence of a
+        judgement, not a mild one.
+      enum:
+        - preserved
+        - unhealthy
+        - approvalRequired
+        - paused
+        - needsReview
+        - cannotAdvise
+        - updateAvailable
+        - notTracked
+        - notChecked
+        - upToDate
+
+    PreservedKind:
+      type: string
+      description: |
+        Why HarborMaster is keeping a container that is not a workload.
+
+        The first three come from a record HarborMaster wrote itself and are
+        the only ones the default listing acts on. `suspected` is a name-shape
+        match with no record behind it: reported, never hidden.
+      enum: [original, failed, rolledBack, suspected]
+
+    ContainerAttention:
+      type: object
+      description: |
+        What HarborMaster knows about one container, assembled for the list row
+        so an operator can tell which workloads need them without opening each
+        one.
+
+        Assembled by a fixed number of batched queries per PAGE. It is not a
+        per-container lookup and must not become one.
+      required: [state, trackingKnown, awaitingApproval, automationPaused, openViolations, openDrift]
+      properties:
+        state: { $ref: "#/components/schemas/AttentionState" }
+        updateType:
+          allOf: [{ $ref: "#/components/schemas/UpdateType" }]
+          description: |
+            Absent when no assessment exists. NOT defaulted to `none`, which
+            would claim the planner had compared something.
+        recommendation:
+          allOf: [{ $ref: "#/components/schemas/Recommendation" }]
+          description: Absent when no assessment exists.
+        proposedImage:
+          type: string
+          description: The reference the current assessment proposes, if any.
+        tracking:
+          type: string
+          description: The tag update discovery follows, when there is one.
+        trackingKnown:
+          type: boolean
+          description: |
+            False when HarborMaster has not yet established whether this
+            container follows anything -- which is different from having
+            established that it follows nothing.
+        awaitingApproval: { type: boolean }
+        automationPaused: { type: boolean }
+        openViolations: { type: integer, minimum: 0 }
+        highestSeverity:
+          allOf: [{ $ref: "#/components/schemas/PolicySeverity" }]
+          description: The worst open violation, absent when there are none.
+        openDrift: { type: integer, minimum: 0 }
+        preserved: { $ref: "#/components/schemas/PreservedKind" }
+        preservedFor:
+          type: string
+          description: |
+            The workload a preserved container belongs to. Present only for a
+            kind backed by a HarborMaster record.
+        lastUpdate:
+          allOf: [{ $ref: "#/components/schemas/ActionOutcome" }]
+          description: |
+            The most recent recreation of this container. ABSENT when there has
+            never been one, which must be rendered as "HarborMaster has not
+            changed this container" rather than as a success.
+        lastRollback:
+          allOf: [{ $ref: "#/components/schemas/ActionOutcome" }]
+          description: The most recent rollback. Absent when there has never been one.
+
+    ActionOutcome:
+      type: object
+      description: |
+        The last thing HarborMaster did to a container.
+
+        Deliberately thin: an identifier to open the full record, the state it
+        finished in, and when. Everything explaining WHY lives on the record
+        itself; duplicating any of it here would create a second place to keep
+        correct.
+      required: [id, state, needsAttention]
+      properties:
+        id:
+          type: string
+          description: The execution or rollback id, for opening the record.
+        state: { type: string }
+        failure:
+          type: string
+          description: A closed-vocabulary reason. Empty unless it failed.
+        at: { type: string }
+        needsAttention:
+          type: boolean
+          description: |
+            A failure that left containers on the host for somebody to settle,
+            as distinct from one that refused before changing anything.
+
+    ContainerListItem:
+      description: |
+        A container row plus what HarborMaster knows about it.
+
+        The summary fields are unchanged and in the same place; `attention` is
+        an addition, so a client reading this endpoint today keeps working.
+      allOf:
+        - $ref: "#/components/schemas/ContainerSummary"
+        - type: object
+          required: [attention]
+          properties:
+            attention:
+              $ref: "#/components/schemas/ContainerAttention"
+
     ContainerList:
       type: object
       required: [items, pagination]
       properties:
         items:
           type: array
-          items: { $ref: "#/components/schemas/ContainerSummary" }
+          items: { $ref: "#/components/schemas/ContainerListItem" }
         pagination:
           $ref: "#/components/schemas/Pagination"
 
@@ -7311,8 +7453,15 @@ components:
         timestamps live in `overview`, where the list view also needs them,
         while `hostname` and `domainname` live in `process` because they are
         container configuration.
-      required: [overview, state, process, environment, labels, ports, mounts, networks, resources, security, logging, compose, harbormaster, warnings]
+      required: [overview, attention, state, process, environment, labels, ports, mounts, networks, resources, security, logging, compose, harbormaster, warnings]
       properties:
+        attention:
+          allOf: [{ $ref: "#/components/schemas/ContainerAttention" }]
+          description: |
+            What HarborMaster knows about this container. The SAME projection
+            its list row carries, computed by the same code path, so the row an
+            operator clicked and the page they land on cannot disagree about
+            whether an update exists.
         overview:
           $ref: "#/components/schemas/ContainerSummary"
         state:

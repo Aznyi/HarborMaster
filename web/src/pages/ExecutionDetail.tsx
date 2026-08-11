@@ -173,7 +173,7 @@ export function ExecutionDetail() {
       </DetailSection>
 
       {execution.verification.preservationReport && (
-        <DetailSection title="Configuration preservation">
+        <DetailSection title="Configuration match">
           <PreservationDetail report={execution.verification.preservationReport} />
         </DetailSection>
       )}

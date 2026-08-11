@@ -104,6 +104,7 @@ export function UpdatePolicies() {
         <label className="flex items-center gap-2 text-sm text-content-muted">
           <input
             type="checkbox"
+            className="h-6 w-6 shrink-0 rounded border-border-subtle"
             checked={includeArchived}
             onChange={(event) => setIncludeArchived(event.target.checked)}
           />
@@ -457,15 +458,18 @@ function PolicyEditor({
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Name">
           <input
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={name}
             onChange={(event) => setName(event.target.value)}
             maxLength={120}
           />
         </Field>
-        <Field label="Priority" hint="Higher wins when several policies match.">
+        <Field
+          label="Priority"
+          hint="Only matters when two policies select the same container; the higher number wins. Leave it at 0 otherwise."
+        >
           <input
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={priority}
             onChange={(event) => setPriority(event.target.value)}
             inputMode="numeric"
@@ -475,7 +479,7 @@ function PolicyEditor({
 
       <Field label="Description">
         <input
-          className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+          className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
           value={description}
           onChange={(event) => setDescription(event.target.value)}
           maxLength={1000}
@@ -492,7 +496,7 @@ function PolicyEditor({
         </p>
         <Field label="Container names" hint="Comma separated.">
           <input
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={include}
             onChange={(event) => setInclude(event.target.value)}
             placeholder="web, api"
@@ -500,15 +504,18 @@ function PolicyEditor({
         </Field>
         <Field label="Image patterns" hint="Glob, not regex. A bare * is refused.">
           <input
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={images}
             onChange={(event) => setImages(event.target.value)}
             placeholder="ghcr.io/acme/*"
           />
         </Field>
-        <Field label="Never touch">
+        <Field
+          label="Exclude containers"
+          hint="Matched by the patterns above, but never updated by this policy."
+        >
           <input
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={exclude}
             onChange={(event) => setExclude(event.target.value)}
             placeholder="database"
@@ -523,7 +530,7 @@ function PolicyEditor({
 
         <Field label="Mode" hint={AUTOMATION_MODE_DESCRIPTIONS[mode]}>
           <select
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={mode}
             onChange={(event) => setMode(event.target.value as AutomationMode)}
           >
@@ -535,9 +542,15 @@ function PolicyEditor({
           </select>
         </Field>
 
-        <Field label="Ceiling" hint={UPDATE_STRATEGY_DESCRIPTIONS[strategy]}>
+        <Field
+          label="Allowed updates"
+          hint={
+            "How far may a version move? " +
+            UPDATE_STRATEGY_DESCRIPTIONS[strategy]
+          }
+        >
           <select
-            className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={strategy}
             onChange={(event) => setStrategy(event.target.value as UpdateStrategy)}
           >
@@ -558,17 +571,23 @@ function PolicyEditor({
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
+            className="h-6 w-6 shrink-0 rounded border-border-subtle"
             checked={alwaysOpen}
             onChange={(event) => setAlwaysOpen(event.target.checked)}
           />
           At any time, with no maintenance window
         </label>
+        <p className="text-sm text-content-muted">
+          {alwaysOpen
+            ? "This policy may act whenever a pass runs. There is no window to set."
+            : "Updates happen only inside the window below, in the timezone you give."}
+        </p>
 
         {!alwaysOpen ? (
           <div className="grid gap-3 sm:grid-cols-3">
             <Field label="Timezone" hint="An IANA name. Comparisons happen in it.">
               <input
-                className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+                className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
                 value={timezone}
                 onChange={(event) => setTimezone(event.target.value)}
                 placeholder="Europe/London"
@@ -577,7 +596,7 @@ function PolicyEditor({
             <Field label="From">
               <input
                 type="time"
-                className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+                className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
                 value={start}
                 onChange={(event) => setStart(event.target.value)}
               />
@@ -585,7 +604,7 @@ function PolicyEditor({
             <Field label="Until" hint="Earlier than “from” means it crosses midnight.">
               <input
                 type="time"
-                className="w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+                className="min-h-11 w-full rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
                 value={end}
                 onChange={(event) => setEnd(event.target.value)}
               />
@@ -596,12 +615,13 @@ function PolicyEditor({
 
       <fieldset className="space-y-3 rounded-lg border border-border-subtle px-3 py-3">
         <legend className="px-1 text-xs uppercase tracking-wide text-content-muted">
-          When it goes wrong
+          Failure handling
         </legend>
 
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
+            className="h-6 w-6 shrink-0 rounded border-border-subtle"
             checked={autoRollback}
             onChange={(event) => setAutoRollback(event.target.checked)}
           />
@@ -617,7 +637,7 @@ function PolicyEditor({
           hint="Zero never pauses, which is not recommended."
         >
           <input
-            className="w-32 rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
+            className="min-h-11 w-32 rounded-lg border border-border-subtle bg-surface px-2 py-1 text-sm"
             value={pauseAfter}
             onChange={(event) => setPauseAfter(event.target.value)}
             inputMode="numeric"

@@ -73,7 +73,7 @@ export function Policies() {
       setActionError(
         caught instanceof ApiError
           ? caught.message
-          : "The policy could not be withdrawn.",
+          : "The policy could not be archived.",
       );
     }
   };
@@ -114,7 +114,7 @@ export function Policies() {
           <label className="flex items-center gap-2 pb-1.5 text-sm text-content">
             <input
               type="checkbox"
-              className="size-4 rounded border-border-subtle"
+              className="h-6 w-6 shrink-0 rounded border-border-subtle"
               checked={includeArchived}
               onChange={(event) => {
                 setIncludeArchived(event.target.checked);

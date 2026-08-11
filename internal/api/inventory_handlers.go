@@ -35,6 +35,11 @@ type ContainerReader interface {
 	RawInspection(ctx context.Context, id string) ([]byte, error)
 	DistinctComposeProjects(ctx context.Context) ([]string, error)
 	DistinctImages(ctx context.Context) ([]string, error)
+	// Attention gathers, for one PAGE of containers, what HarborMaster knows
+	// about each of them. A fixed number of batched queries whatever the page
+	// size -- see internal/store/attention_repository.go for why that bound
+	// is the point of the method existing at all.
+	Attention(ctx context.Context, keys []store.ContainerKey) (map[string]domain.ContainerEvidence, error)
 }
 
 // LineageReader reports what a container FOLLOWS, as distinct from the
@@ -192,10 +197,74 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, r, s.logger, http.StatusOK, listResponse[domain.ContainerSummary]{
-		Items:      summaries,
+	items, err := s.withAttention(r.Context(), summaries)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "container attention lookup failed",
+			slog.String("error", err.Error()))
+		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+
+	writeJSON(w, r, s.logger, http.StatusOK, listResponse[containerListItem]{
+		Items:      items,
 		Pagination: newPagination(pageFromFilter(filter), filter.Page.Limit, total),
 	})
+}
+
+// containerListItem is a container row plus what HarborMaster knows about it.
+//
+// The summary is EMBEDDED, so the wire shape gains a field and changes none:
+// an existing client reading `name` or `state` sees exactly what it saw
+// before. The addition is one object under `attention`.
+type containerListItem struct {
+	domain.ContainerSummary
+	Attention domain.ContainerAttention `json:"attention"`
+}
+
+// withAttention decorates a page of containers.
+//
+// ONE call to the store for the whole page, then a pure assessment per row.
+// The alternative -- asking about each container in turn -- is the shape the
+// Phase 10 rollback-eligibility defect had, and a container list is the most
+// frequently rendered page in the product.
+//
+// A container with no evidence gets the zero value, which the assessment reads
+// as "not checked". That is deliberate and it is the reason this cannot fall
+// back to a default: an evidence lookup that quietly returned nothing would
+// paint a whole page as unexamined.
+func (s *Server) withAttention(
+	ctx context.Context,
+	summaries []domain.ContainerSummary,
+) ([]containerListItem, error) {
+	items := make([]containerListItem, 0, len(summaries))
+	if len(summaries) == 0 {
+		return items, nil
+	}
+
+	keys := make([]store.ContainerKey, 0, len(summaries))
+	for _, summary := range summaries {
+		keys = append(keys, store.ContainerKey{ID: summary.ID, Name: summary.Name})
+	}
+
+	evidence, err := s.containers.Attention(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, summary := range summaries {
+		row := evidence[summary.ID]
+		// The inventory row is the authority on its own state; the store fills
+		// only what the other subsystems know.
+		row.Health = summary.Health
+		row.State = summary.State
+		row.Present = summary.Present
+
+		items = append(items, containerListItem{
+			ContainerSummary: summary,
+			Attention:        domain.AssessContainer(row),
+		})
+	}
+	return items, nil
 }
 
 // handleContainerFilters reports the distinct filter values present, so the UI
@@ -268,7 +337,35 @@ func (s *Server) handleContainerDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, r, s.logger, http.StatusOK, detail)
+	// The same projection the list row carries, so the container's own page and
+	// the row that led to it can never disagree about whether an update exists.
+	// One batched lookup for one container: the identical code path the list
+	// uses, which is what keeps the two definitions from drifting apart.
+	response := containerDetailResponse{ContainerDetail: *detail}
+	evidence, attentionErr := s.containers.Attention(r.Context(),
+		[]store.ContainerKey{{ID: detail.Overview.ID, Name: detail.Overview.Name}})
+	if attentionErr != nil {
+		s.logger.ErrorContext(r.Context(), "container attention lookup failed",
+			slog.String("error", attentionErr.Error()))
+		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+	row := evidence[detail.Overview.ID]
+	row.Health = detail.Overview.Health
+	row.State = detail.Overview.State
+	row.Present = detail.Overview.Present
+	response.Attention = domain.AssessContainer(row)
+
+	writeJSON(w, r, s.logger, http.StatusOK, response)
+}
+
+// containerDetailResponse is the container detail plus its attention block.
+//
+// The detail is EMBEDDED, so every field the page read before is in the same
+// place and `attention` is the addition.
+type containerDetailResponse struct {
+	domain.ContainerDetail
+	Attention domain.ContainerAttention `json:"attention"`
 }
 
 // handleContainerRaw returns the redacted raw inspection payload.

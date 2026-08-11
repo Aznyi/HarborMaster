@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
 import { ApiError, refreshInventory } from "../api/client";
@@ -7,6 +7,9 @@ import type { HealthReport } from "../api/types";
 import type { ResourceState } from "../hooks/useApiResource";
 import { useInventory } from "../hooks/useContainers";
 import { useEventEngine } from "../hooks/useDockerEvents";
+import { useExecutions } from "../hooks/useExecutions";
+import { usePlans } from "../hooks/usePlans";
+import { useRollbacks } from "../hooks/useRollbacks";
 import { useVersion } from "../hooks/useHealth";
 import { ConnectionStateBadge } from "../components/EventBadges";
 import {
@@ -20,6 +23,13 @@ import { useDriftSummary } from "../hooks/useDrift";
 import { usePolicySummary } from "../hooks/usePolicies";
 import { useSession } from "../hooks/useSession";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
+import {
+  atLevel,
+  buildAttention,
+  evidenceComplete,
+  type AttentionItem,
+  type AttentionInputs,
+} from "../components/attentionModel";
 
 /** Outcome of a manual refresh, shown until the next attempt. */
 type RefreshFeedback =
@@ -30,9 +40,48 @@ type RefreshFeedback =
   | { kind: "completed"; message: string };
 
 /**
- * The dashboard renders only data the API returned. There is no sample
- * content: an operations view showing invented numbers is worse than one
- * showing nothing.
+ * One row is enough to get a summary.
+ *
+ * The plan, recreation and rollback list endpoints return their aggregate
+ * beside the page, so the dashboard asks for the smallest page that exists
+ * rather than a dedicated endpoint. Three bounded reads, not three new
+ * surfaces to authorise and document.
+ */
+const SUMMARY_ONLY = { page: 1, pageSize: 1 } as const;
+
+/**
+ * The dashboard.
+ *
+ * # What changed and why
+ *
+ * It used to be nine panels of subsystem telemetry in the order the subsystems
+ * were built. The first screen carried the inventory generation, the inventory
+ * checksum, the event queue depth, the reconnect count and the number of
+ * volumes -- and an operator could read all of it without learning that a
+ * container was unhealthy or that an update was waiting for their approval.
+ *
+ * It now answers, in order:
+ *
+ *   1. Does anything need me?          -- the attention list
+ *   2. What is the state of my estate? -- containers, updates, automation
+ *   3. Is HarborMaster itself working? -- Docker, database, events
+ *   4. Everything else                 -- collapsed, and still all there
+ *
+ * # What is deliberately NOT hidden
+ *
+ * A degraded Docker connection, a failing database, a disconnected event
+ * stream and a failed refresh all appear in the attention list at the top,
+ * whatever else is collapsed below. The advanced section holds telemetry, not
+ * problems.
+ *
+ * # Why the composition happens in the browser
+ *
+ * Every number here comes from an aggregate HarborMaster already computes and
+ * already serves: they are `COUNT`s and `GROUP BY`s over indexed columns, one
+ * query each, not per-container reads. Composing them server-side would mean a
+ * new endpoint with its own authorisation surface, deciding centrally what a
+ * viewer without `automation:read` may see -- which the per-panel hooks
+ * already decide correctly, one permission at a time.
  */
 export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
   const inventory = useInventory();
@@ -52,326 +101,457 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <InventoryHeader inventory={inventory} />
-      <ConnectionCards status={inventory.data} health={health} />
-      <EventEnginePanel />
+      <AttentionPanel health={health} inventory={inventory.data} />
+      <EstatePanel inventory={inventory.data} />
+      <SystemPanel status={inventory.data} health={health} />
       <SnapshotSummary />
-      <EstateHealthPanel />
-      <AutomationPanel />
-      <ContainerMetrics status={inventory.data} />
-      <CatalogMetrics status={inventory.data} />
-      <WarningsPanel status={inventory.data} />
+      <AdvancedPanel inventory={inventory} />
     </div>
   );
 }
 
+// ------------------------------------------------------------ attention --
+
 /**
- * Compliance and drift, side by side.
+ * The first thing on the page: what needs a person.
  *
- * # Why this is on the dashboard
- *
- * It was not, and that was the gap: an estate with open policy violations and
- * open configuration drift showed a dashboard reporting inventory, events,
- * snapshots, and container counts, and nothing at all about either. The two
- * "something is wrong" signals were the only ones an operator had to go
- * looking for.
- *
- * Both numbers link to the page that explains them, because a count with no
- * route to the detail is a number nobody can act on.
+ * Three groups, because they call for different responses. "Needs you" is work.
+ * "Worth watching" is context. "Nothing established" is the honest report of
+ * what HarborMaster has not looked at -- an estate with no policies and no
+ * plans is unexamined, not healthy, and this is where that gets said.
  */
-function EstateHealthPanel() {
+function AttentionPanel({
+  health,
+  inventory,
+}: {
+  health: ResourceState<HealthReport>;
+  inventory: InventoryStatus;
+}) {
+  const session = useSession();
+  const canReadAutomation = Boolean(
+    session.user?.permissions.includes("automation:read"),
+  );
+
+  const events = useEventEngine();
+  const automation = useAutomationStatus();
   const policy = usePolicySummary();
   const drift = useDriftSummary();
+  const plans = usePlans(SUMMARY_ONLY);
+  const executions = useExecutions(SUMMARY_ONLY);
+  const rollbacks = useRollbacks(SUMMARY_ONLY);
 
-  const violations = policy.data?.open ?? 0;
-  const evaluated = policy.data?.containersEvaluated ?? 0;
-  const drifted = drift.data?.open ?? 0;
-  const driftedContainers = drift.data?.containersWithDrift ?? 0;
+  const inputs: AttentionInputs = useMemo(
+    () => ({
+      health: health.data,
+      inventory,
+      events: events.data,
+      // A 503 from a subsystem that is switched off is not an error to report;
+      // it is a feature that is not there, and the model reads its absence as
+      // "no evidence" rather than as "nothing wrong".
+      automation: automation.error ? null : (automation.data?.status ?? null),
+      plans: plans.data?.summary ?? null,
+      executions: executions.data?.summary ?? null,
+      rollbacks: rollbacks.data?.summary ?? null,
+      policy: policy.data,
+      drift: drift.data,
+      canReadAutomation,
+    }),
+    [
+      health.data,
+      inventory,
+      events.data,
+      automation.data,
+      automation.error,
+      plans.data,
+      executions.data,
+      rollbacks.data,
+      policy.data,
+      drift.data,
+      canReadAutomation,
+    ],
+  );
+
+  const items = useMemo(() => buildAttention(inputs), [inputs]);
+  const complete = evidenceComplete(inputs);
+
+  const action = atLevel(items, "action");
+  const watch = atLevel(items, "watch");
+  const info = atLevel(items, "info");
 
   return (
     <section
-      aria-labelledby="estate-health-heading"
+      aria-labelledby="attention-heading"
       className="rounded-xl border border-border-subtle bg-surface-raised p-5"
     >
-      <h2 id="estate-health-heading" className="text-lg font-semibold">
-        Compliance and drift
+      <h2 id="attention-heading" className="text-lg font-semibold">
+        {action.length > 0
+          ? `${action.length} thing${action.length === 1 ? "" : "s"} need${
+              action.length === 1 ? "s" : ""
+            } you`
+          : "Nothing needs you right now"}
       </h2>
-      <p className="mt-1 text-sm text-content-muted">
-        What HarborMaster has found wrong with the estate. Both are
-        observations — nothing here changes a container.
-      </p>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <Link
-          to="/compliance"
-          className={`rounded-lg border p-4 ${
-            violations > 0 ? "border-danger/40" : "border-border-subtle"
-          }`}
-        >
-          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
-            Open policy violations
-          </p>
-          <p className="mt-1 text-2xl font-semibold text-content">{violations}</p>
-          <p className="mt-1 text-xs text-content-muted">
-            {evaluated === 0
-              ? "No container has been evaluated yet"
-              : `Across ${evaluated} evaluated container${evaluated === 1 ? "" : "s"}`}
-          </p>
-        </Link>
+      {action.length === 0 ? (
+        <p className="mt-1 text-sm text-content-muted">
+          {complete
+            ? "HarborMaster has checked everything it can and found nothing " +
+              "that requires a person."
+            : "Some of what HarborMaster reports has not loaded, so this is " +
+              "not a complete answer."}
+        </p>
+      ) : null}
 
+      {action.length > 0 ? <ItemList items={action} /> : null}
+
+      {watch.length > 0 ? (
+        <>
+          <h3 className="mt-5 text-sm font-semibold uppercase tracking-wide text-content-muted">
+            Worth watching
+          </h3>
+          <ItemList items={watch} />
+        </>
+      ) : null}
+
+      {info.length > 0 ? (
+        <>
+          <h3 className="mt-5 text-sm font-semibold uppercase tracking-wide text-content-muted">
+            What HarborMaster has not established
+          </h3>
+          <ItemList items={info} />
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+const LEVEL_BORDERS: Record<AttentionItem["level"], string> = {
+  action: "border-danger/40 bg-danger-soft",
+  watch: "border-warn/40 bg-warn-soft",
+  info: "border-border-subtle bg-surface-sunken",
+};
+
+function ItemList({ items }: { items: AttentionItem[] }) {
+  return (
+    <ul className="mt-3 flex flex-col gap-2">
+      {items.map((item) => (
+        <li key={item.id}>
+          {/*
+            The whole card is the link. An operator reading "3 updates left
+            containers behind" should not then have to find a separate control
+            to go and look at them.
+          */}
+          <Link
+            to={item.to}
+            className={`flex min-h-11 flex-col rounded-lg border px-4 py-3 transition-colors hover:brightness-110 ${
+              LEVEL_BORDERS[item.level]
+            }`}
+          >
+            <span className="font-medium text-content">{item.title}</span>
+            <span className="mt-0.5 text-sm text-content-muted">{item.detail}</span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// --------------------------------------------------------------- estate --
+
+/** Zeroed counts, so a malformed payload renders zeros rather than crashing. */
+const EMPTY_COUNTS: InventoryStatus["counts"] = {
+  containers: 0,
+  absent: 0,
+  running: 0,
+  stopped: 0,
+  paused: 0,
+  restarting: 0,
+  healthy: 0,
+  unhealthy: 0,
+  images: 0,
+  networks: 0,
+  volumes: 0,
+  warnings: 0,
+  byState: {},
+};
+
+/**
+ * The estate at a glance: what is running, and whether HarborMaster is
+ * allowed to change any of it.
+ *
+ * The automation line is here rather than in its own panel because "is
+ * automatic updating on" is a question about the ESTATE, and answering it
+ * three panels below a container count made it look like a subsystem detail
+ * rather than the standing permission it is.
+ */
+function EstatePanel({ inventory }: { inventory: InventoryStatus }) {
+  const counts = inventory.counts ?? EMPTY_COUNTS;
+  const session = useSession();
+  const automation = useAutomationStatus();
+  const canReadAutomation = session.user?.permissions.includes("automation:read");
+  const engine = automation.error ? null : automation.data?.status;
+
+  return (
+    <section
+      aria-labelledby="estate-heading"
+      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="estate-heading" className="text-lg font-semibold">
+          Your containers
+        </h2>
         <Link
-          to="/drift"
-          className={`rounded-lg border p-4 ${
-            drifted > 0 ? "border-warn/40" : "border-border-subtle"
-          }`}
+          to="/containers"
+          className="inline-flex min-h-11 items-center text-sm font-medium text-accent hover:underline"
         >
-          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
-            Open configuration drift
-          </p>
-          <p className="mt-1 text-2xl font-semibold text-content">{drifted}</p>
-          <p className="mt-1 text-xs text-content-muted">
-            {driftedContainers === 0
-              ? "No container has moved from its baseline"
-              : `Across ${driftedContainers} container${driftedContainers === 1 ? "" : "s"}`}
-          </p>
+          View all
         </Link>
       </div>
 
-      {policy.data && policy.data.policiesTotal === 0 ? (
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Tile label="Running" value={counts.running} tone="ok" />
+        <Tile label="Stopped" value={counts.stopped} />
+        <Tile
+          label="Unhealthy"
+          value={counts.unhealthy}
+          tone={counts.unhealthy > 0 ? "danger" : "neutral"}
+        />
+        <Tile
+          label="Paused"
+          value={counts.paused}
+          tone={counts.paused > 0 ? "warn" : "neutral"}
+        />
+      </div>
+
+      {counts.absent > 0 ? (
         <p className="mt-3 text-sm text-content-muted">
-          No policies are defined, so nothing has been checked. An empty
-          compliance page is not a clean bill of health —{" "}
-          <Link to="/policies" className="underline underline-offset-2">
-            define a policy
-          </Link>{" "}
-          to start evaluating.
+          {counts.absent} container{counts.absent === 1 ? "" : "s"} seen previously
+          {counts.absent === 1 ? " is" : " are"} no longer present.{" "}
+          {counts.absent === 1 ? "Its record is" : "Their records are"} retained.
+        </p>
+      ) : null}
+
+      {canReadAutomation && engine ? (
+        <p className="mt-4 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-sm">
+          <span className="font-medium">
+            {engine.enabled
+              ? "Automatic updating is on."
+              : "Automatic updating is off."}
+          </span>{" "}
+          <span className="text-content-muted">
+            {engine.enabled
+              ? `${engine.enabledPolicies ?? 0} of ${
+                  engine.policies ?? 0
+                } update policies are in force. A policy in Automatic mode will ` +
+                "replace matching containers inside its maintenance window."
+              : "Policies can be written and reviewed; nothing will act on them."}
+          </span>{" "}
+          <Link
+            to="/automation"
+            className="inline-flex min-h-6 items-center text-accent underline underline-offset-2"
+          >
+            Automatic updates
+          </Link>
         </p>
       ) : null}
     </section>
   );
 }
 
+// --------------------------------------------------------------- system --
+
 /**
- * The update engine.
+ * Is HarborMaster itself working.
  *
- * # Why this is on the dashboard at all
- *
- * Everything else here reports what HarborMaster OBSERVED. This reports what it
- * is about to DO, and it is the only panel on the page describing something
- * that will happen without anybody pressing anything.
- *
- * So the panel leads with whether the engine can act, and says the next thing
- * an operator needs: when. A dashboard that showed "3 policies" and nothing
- * about whether they were in observe mode or automatic would be reporting a
- * number that means two entirely different things.
- *
- * Renders nothing at all when the account cannot read automation, rather than
- * an empty box — a panel that says nothing is worse than no panel.
+ * Kept as its own panel and NOT collapsed. A degraded dependency also raises an
+ * attention item above, and this is where an operator confirms the detail
+ * without expanding anything.
  */
-function AutomationPanel() {
-  const session = useSession();
-  const automation = useAutomationStatus();
-
-  if (!session.user?.permissions.includes("automation:read")) return null;
-  // A deployment without the subsystem answers 503; that is not a dashboard
-  // error, it is a feature that is not there. A malformed payload is treated
-  // the same way rather than thrown: one panel must never take the page down.
-  const engine = automation.data?.status;
-  if (automation.error || !engine) return null;
-
-  const paused = engine.pausedContainers ?? 0;
-  const waiting = engine.awaitingApproval ?? 0;
+function SystemPanel({
+  status,
+  health,
+}: {
+  status: InventoryStatus;
+  health: ResourceState<HealthReport>;
+}) {
+  const engine = useEventEngine();
+  // Defensive: the API always sends `docker` (it is required by the schema),
+  // but this reads from the network, and a malformed payload should degrade
+  // one card rather than blank the whole dashboard with a render crash.
+  const docker = status.docker ?? { status: "down" as const, detail: "status unavailable" };
 
   return (
     <section
-      aria-labelledby="automation-heading"
+      aria-labelledby="system-heading"
       className="rounded-xl border border-border-subtle bg-surface-raised p-5"
     >
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="automation-heading" className="text-lg font-semibold">
-          Automatic updates
-        </h2>
-        <Link to="/automation" className="text-sm font-medium text-accent hover:underline">
-          Open automation
-        </Link>
-      </div>
+      <h2 id="system-heading" className="text-lg font-semibold">
+        HarborMaster
+      </h2>
       <p className="mt-1 text-sm text-content-muted">
-        {engine.enabled
-          ? "The update engine is on. A policy in Automatic mode will stop and " +
-            "replace matching containers inside its maintenance window."
-          : "The update engine is off. Policies can be written and reviewed; " +
-            "nothing will act on them."}
+        Everything above is read through these. If one is degraded, treat the
+        rest of this page as possibly out of date.
       </p>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <Link
-          to="/update-policies"
-          className="rounded-lg border border-border-subtle p-4"
-        >
-          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
-            Policies in force
+        <div className="rounded-lg border border-border-subtle bg-surface-sunken p-4">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-medium">Docker</h3>
+            <StatusBadge tone={componentTone(docker.status)} label={docker.status} />
+          </div>
+          <p className="mt-2 text-xs text-content-muted">
+            Read-only connection to the Docker socket
+            {docker.version ? ` — API ${docker.version}` : ""}
           </p>
-          <p className="mt-1 text-2xl font-semibold text-content">
-            {engine.enabledPolicies ?? 0}
-          </p>
-          <p className="mt-1 text-xs text-content-muted">
-            of {engine.policies ?? 0} defined
-          </p>
-        </Link>
+          {docker.detail ? (
+            <p className="mt-1 text-xs text-content-muted">{docker.detail}</p>
+          ) : null}
+        </div>
 
-        {/* The queue itself, not the automation landing page. A counter that
-            says something needs a person has to lead to the thing they can
-            act on; this one used to lead to a page with no approve control. */}
-        <Link
-          to="/automation/approvals"
-          className={`rounded-lg border p-4 ${
-            waiting > 0 ? "border-warn/40" : "border-border-subtle"
-          }`}
-        >
-          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
-            Waiting for approval
+        <div className="rounded-lg border border-border-subtle bg-surface-sunken p-4">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-medium">Database</h3>
+            {health.data ? (
+              <StatusBadge
+                tone={componentTone(health.data.database.status)}
+                label={health.data.database.status}
+              />
+            ) : (
+              <StatusBadge tone="neutral" label="unknown" />
+            )}
+          </div>
+          <p className="mt-2 text-xs text-content-muted">
+            Everything HarborMaster knows is stored here.
           </p>
-          <p className="mt-1 text-2xl font-semibold text-content">{waiting}</p>
-          <p className="mt-1 text-xs text-content-muted">
-            {engine.windowOpen
-              ? "a maintenance window is open now"
-              : engine.nextWindowOpensAt
-                ? `next window ${formatTimestamp(engine.nextWindowOpensAt)}`
-                : "no policy has an open window"}
-          </p>
-        </Link>
+        </div>
 
-        <Link
-          to="/automation/paused"
-          className={`rounded-lg border p-4 ${
-            paused > 0 ? "border-danger/40" : "border-border-subtle"
-          }`}
-        >
-          <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
-            Paused containers
+        <div className="rounded-lg border border-border-subtle bg-surface-sunken p-4">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-medium">Docker events</h3>
+            {engine.data ? (
+              <ConnectionStateBadge state={engine.data.state} />
+            ) : (
+              <StatusBadge tone="neutral" label="unknown" />
+            )}
+          </div>
+          <p className="mt-2 text-xs text-content-muted">
+            {engine.data
+              ? engine.data.enabled
+                ? engine.data.state === "connected"
+                  ? "Container state is kept current by live events."
+                  : "Falling back to periodic reconciliation; state may lag."
+                : "Disabled by configuration. The inventory refreshes on a schedule."
+              : "Event engine status is unavailable."}
           </p>
-          <p className="mt-1 text-2xl font-semibold text-content">{paused}</p>
-          <p className="mt-1 text-xs text-content-muted">
-            {paused === 0
-              ? "automation is not refusing to touch anything"
-              : "automation stopped trying; a person has to look"}
-          </p>
-        </Link>
+          <Link
+            to="/events"
+            className="mt-2 inline-flex min-h-6 items-center text-xs text-accent hover:underline"
+          >
+            Event log
+          </Link>
+        </div>
       </div>
     </section>
   );
 }
 
+// ------------------------------------------------------------- advanced --
+
 /**
- * Event-engine status.
+ * Everything an operator does not need on the first screen.
  *
- * The one thing this panel must communicate clearly: whether the inventory is
- * being kept current by live events or has fallen back to periodic polling. An
- * operator seeing a stale container state needs to know which, because the two
- * have very different expected latencies.
+ * Collapsed, not removed. Inventory generation, checksum, event counters, the
+ * catalog counts and the refresh control all live here, and a `<details>`
+ * element is used rather than a custom disclosure so it is keyboard-operable
+ * and announced correctly without any code of ours.
  */
-function EventEnginePanel() {
+function AdvancedPanel({
+  inventory,
+}: {
+  inventory: ResourceState<InventoryStatus>;
+}) {
+  const status = inventory.data!;
   const engine = useEventEngine();
-
-  if (!engine.data) {
-    return (
-      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h2 className="text-lg font-semibold">Docker events</h2>
-        <p className="mt-2 text-sm text-content-muted">
-          Event engine status is unavailable.
-        </p>
-      </section>
-    );
-  }
-
-  const status = engine.data;
-
-  if (!status.enabled) {
-    return (
-      <section
-        aria-labelledby="events-heading"
-        className="rounded-xl border border-border-subtle bg-surface-raised p-5"
-      >
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h2 id="events-heading" className="text-lg font-semibold">
-              Docker events
-            </h2>
-            <p className="mt-1 text-sm text-content-muted">
-              Disabled by configuration. The inventory refreshes on its own
-              schedule, which is a supported mode.
-            </p>
-          </div>
-          <ConnectionStateBadge state={status.state} />
-        </div>
-      </section>
-    );
-  }
-
-  const disconnected = status.state !== "connected";
-  const degraded = disconnected || status.overflowPending;
+  const build = useVersion();
 
   return (
-    <section
-      aria-labelledby="events-heading"
-      className={`rounded-xl border p-5 ${
-        degraded ? "border-warn/40 bg-warn-soft" : "border-border-subtle bg-surface-raised"
-      }`}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 id="events-heading" className="text-lg font-semibold">
-            Docker events
-          </h2>
-          <p className="mt-1 text-sm text-content-muted">
-            Live synchronisation with the Docker daemon
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <ConnectionStateBadge state={status.state} />
-          <Link to="/events" className="text-sm font-medium text-accent hover:underline">
-            View all
-          </Link>
-        </div>
+    <details className="rounded-xl border border-border-subtle bg-surface-raised">
+      <summary className="flex min-h-11 cursor-pointer items-center px-5 py-3 text-sm font-medium">
+        Technical details
+        <span className="ml-2 font-normal text-content-muted">
+          inventory, event engine, catalog, build
+        </span>
+      </summary>
+
+      <div className="flex flex-col gap-5 border-t border-border-subtle p-5">
+        <InventorySection inventory={inventory} />
+
+        {engine.data && engine.data.enabled ? (
+          <section aria-labelledby="event-counters-heading">
+            <h3 id="event-counters-heading" className="font-medium">
+              Event engine counters
+            </h3>
+            <dl className="mt-2 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <Metric label="Last event" value={formatTimestamp(engine.data.lastEventAt)} />
+              <Metric
+                label="Last reconciliation"
+                value={formatTimestamp(engine.data.lastReconciliationAt)}
+              />
+              <Metric label="Reconnects" value={String(engine.data.counters.reconnectCount)} />
+              <Metric
+                label="Queue"
+                value={`${engine.data.queueDepth} / ${engine.data.queueCapacity}`}
+              />
+              <Metric label="Recorded events" value={String(engine.data.storedEvents)} />
+              <Metric label="Received" value={String(engine.data.counters.eventsReceived)} />
+              <Metric label="Dropped" value={String(engine.data.counters.eventsDropped)} />
+              <Metric
+                label="Targeted refreshes"
+                value={String(engine.data.counters.targetedRefreshes)}
+              />
+            </dl>
+            {engine.data.overflowPending ? (
+              <p role="alert" className="mt-3 rounded-lg border border-warn/40 px-3 py-2 text-sm">
+                The event queue overflowed. A full reconciliation is running to
+                restore the inventory.
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+
+        <section aria-labelledby="catalog-heading">
+          <h3 id="catalog-heading" className="font-medium">
+            Catalog
+          </h3>
+          <div className="mt-2 grid gap-3 sm:grid-cols-3">
+            <Tile label="Images" value={status.counts?.images ?? 0} />
+            <Tile label="Networks" value={status.counts?.networks ?? 0} />
+            <Tile label="Volumes" value={status.counts?.volumes ?? 0} />
+          </div>
+        </section>
+
+        <section aria-labelledby="build-heading">
+          <h3 id="build-heading" className="font-medium">
+            Build
+          </h3>
+          {/*
+            Version and platform only. The database's status is reported in the
+            HarborMaster panel above, where it belongs -- repeating it here
+            would give an operator two places to read one fact.
+          */}
+          <dl className="mt-2 grid gap-3 text-sm sm:grid-cols-2">
+            <Metric label="Version" value={build.data?.version ?? "unavailable"} />
+            <Metric label="Platform" value={build.data?.platform ?? "unavailable"} />
+          </dl>
+        </section>
+
+        <WarningsSection status={status} />
       </div>
-
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Last event" value={formatTimestamp(status.lastEventAt)} />
-        <Metric
-          label="Last reconciliation"
-          value={formatTimestamp(status.lastReconciliationAt)}
-        />
-        <Metric label="Reconnects" value={String(status.counters.reconnectCount)} />
-        <Metric label="Queue" value={`${status.queueDepth} / ${status.queueCapacity}`} />
-        <Metric label="Recorded events" value={String(status.storedEvents)} />
-        <Metric label="Received" value={String(status.counters.eventsReceived)} />
-        <Metric label="Dropped" value={String(status.counters.eventsDropped)} />
-        <Metric
-          label="Targeted refreshes"
-          value={String(status.counters.targetedRefreshes)}
-        />
-      </dl>
-
-      {disconnected ? (
-        <p role="alert" className="mt-4 rounded-lg border border-warn/40 px-3 py-2 text-sm">
-          The Docker event stream is disconnected, so HarborMaster is relying on
-          periodic reconciliation. Container state may lag by up to one
-          reconciliation interval until the stream is back.
-        </p>
-      ) : null}
-
-      {status.overflowPending ? (
-        <p role="alert" className="mt-4 rounded-lg border border-warn/40 px-3 py-2 text-sm">
-          The event queue overflowed. A full reconciliation is running to restore
-          the inventory.
-        </p>
-      ) : null}
-    </section>
+    </details>
   );
 }
 
 /** Refresh state, timings, and the manual refresh control. */
-function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStatus> }) {
+function InventorySection({ inventory }: { inventory: ResourceState<InventoryStatus> }) {
   const status = inventory.data!;
   const [feedback, setFeedback] = useState<RefreshFeedback>({ kind: "idle" });
   const [submitting, setSubmitting] = useState(false);
@@ -441,18 +621,13 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
   const busy = submitting || status.inProgress;
 
   return (
-    <section
-      aria-labelledby="inventory-heading"
-      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
-    >
+    <section aria-labelledby="inventory-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 id="inventory-heading" className="text-lg font-semibold">
-            Inventory
-          </h2>
-          <p className="mt-1 text-sm text-content-muted">
-            {describeInventory(status)}
-          </p>
+          <h3 id="inventory-heading" className="font-medium">
+            Inventory refresh
+          </h3>
+          <p className="mt-1 text-sm text-content-muted">{describeInventory(status)}</p>
         </div>
 
         <div className="flex flex-col items-end gap-2">
@@ -462,18 +637,25 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
             onClick={onRefresh}
             disabled={busy || !status.enabled}
             aria-busy={busy}
-            className="rounded-lg border border-border-subtle bg-surface-raised px-4 py-2 text-sm font-medium transition-colors hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-50"
+            className="min-h-11 rounded-lg border border-border-subtle bg-surface-raised px-4 py-2 text-sm font-medium transition-colors hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? "Refreshingâ€¦" : "Refresh inventory"}
+            {busy ? "Refreshing…" : "Refresh now"}
           </button>
         </div>
       </div>
 
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Generation" value={status.generation === 0 ? "none yet" : String(status.generation)} />
+      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <Metric
+          label="Generation"
+          value={status.generation === 0 ? "none yet" : String(status.generation)}
+        />
         <Metric label="Last success" value={formatTimestamp(status.lastSuccess?.finishedAt)} />
         <Metric label="Duration" value={formatDuration(status.lastSuccess?.durationMs)} />
-        <Metric label="Checksum" value={status.checksum ? status.checksum.slice(0, 12) : "â€”"} mono />
+        <Metric
+          label="Checksum"
+          value={status.checksum ? status.checksum.slice(0, 12) : "—"}
+          mono
+        />
       </dl>
 
       {feedback.kind !== "idle" ? (
@@ -484,15 +666,15 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
           // region: without a label the two are indistinguishable to a screen
           // reader moving between them.
           aria-label="Refresh status"
-          className={`mt-4 rounded-lg border px-3 py-2 text-sm ${feedbackClasses(feedback.kind)}`}
+          className={`mt-3 rounded-lg border px-3 py-2 text-sm ${feedbackClasses(feedback.kind)}`}
         >
           {feedback.message}
         </p>
       ) : null}
 
       {!status.enabled ? (
-        <p className="mt-4 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-sm">
-          The inventory engine is disabled by configuration. The figures below
+        <p className="mt-3 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-sm">
+          The inventory engine is disabled by configuration. The figures here
           describe the last inventory that was stored.
         </p>
       ) : null}
@@ -500,200 +682,42 @@ function InventoryHeader({ inventory }: { inventory: ResourceState<InventoryStat
   );
 }
 
-function ConnectionCards({
-  status,
-  health,
-}: {
-  status: InventoryStatus;
-  health: ResourceState<HealthReport>;
-}) {
-  // Defensive: the API always sends `docker` (it is required by the schema),
-  // but this reads from the network, and a malformed payload should degrade
-  // one card rather than blank the whole dashboard with a render crash.
-  const docker = status.docker ?? { status: "down" as const, detail: "status unavailable" };
-
-  return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="font-semibold">Docker Engine</h3>
-            <p className="mt-1 text-sm text-content-muted">
-              Read-only connection to the Docker socket
-            </p>
-          </div>
-          <StatusBadge tone={componentTone(docker.status)} label={docker.status} />
-        </div>
-        <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-          <Metric label="API version" value={docker.version ?? "â€”"} />
-          <Metric label="Runtime" value={status.runtime ?? "docker"} />
-          {docker.detail ? (
-            <div className="col-span-2">
-              <dt className="text-content-muted">Detail</dt>
-              <dd className="mt-0.5">{docker.detail}</dd>
-            </div>
-          ) : null}
-        </dl>
-      </section>
-
-      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="font-semibold">Database</h3>
-            <p className="mt-1 text-sm text-content-muted">
-              SQLite store for the inventory
-            </p>
-          </div>
-          {health.data ? (
-            <StatusBadge
-              tone={componentTone(health.data.database.status)}
-              label={health.data.database.status}
-            />
-          ) : (
-            <StatusBadge tone="neutral" label="unknown" />
-          )}
-        </div>
-        <BuildRow />
-      </section>
-    </div>
-  );
-}
-
-function BuildRow() {
-  const build = useVersion();
-
-  if (!build.data) {
-    return (
-      <p className="mt-4 text-sm text-content-muted">Build information is unavailable.</p>
-    );
-  }
-  return (
-    <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-      <Metric label="Version" value={build.data.version} />
-      <Metric label="Platform" value={build.data.platform} />
-    </dl>
-  );
-}
-
-/** Zeroed counts, so a malformed payload renders zeros rather than crashing. */
-const EMPTY_COUNTS: InventoryStatus["counts"] = {
-  containers: 0,
-  absent: 0,
-  running: 0,
-  stopped: 0,
-  paused: 0,
-  restarting: 0,
-  healthy: 0,
-  unhealthy: 0,
-  images: 0,
-  networks: 0,
-  volumes: 0,
-  warnings: 0,
-  byState: {},
-};
-
-function ContainerMetrics({ status }: { status: InventoryStatus }) {
-  const counts = status.counts ?? EMPTY_COUNTS;
-
-  return (
-    <section
-      aria-labelledby="containers-heading"
-      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id="containers-heading" className="text-lg font-semibold">
-          Containers
-        </h2>
-        <Link to="/containers" className="text-sm font-medium text-accent hover:underline">
-          View all
-        </Link>
-      </div>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <Tile label="Total" value={counts.containers} />
-        <Tile label="Running" value={counts.running} tone="ok" />
-        <Tile label="Stopped" value={counts.stopped} />
-        <Tile label="Paused" value={counts.paused} tone={counts.paused > 0 ? "warn" : "neutral"} />
-        <Tile
-          label="Unhealthy"
-          value={counts.unhealthy}
-          tone={counts.unhealthy > 0 ? "danger" : "neutral"}
-        />
-      </div>
-
-      {counts.absent > 0 ? (
-        <p className="mt-3 text-sm text-content-muted">
-          {counts.absent} container{counts.absent === 1 ? "" : "s"} seen previously
-          {counts.absent === 1 ? " is" : " are"} no longer present.{" "}
-          {counts.absent === 1 ? "Its record is" : "Their records are"} retained.
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
-function CatalogMetrics({ status }: { status: InventoryStatus }) {
-  const counts = status.counts ?? EMPTY_COUNTS;
-
-  return (
-    <section
-      aria-labelledby="catalog-heading"
-      className="rounded-xl border border-border-subtle bg-surface-raised p-5"
-    >
-      <h2 id="catalog-heading" className="text-lg font-semibold">
-        Catalog
-      </h2>
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <Tile label="Images" value={counts.images} />
-        <Tile label="Networks" value={counts.networks} />
-        <Tile label="Volumes" value={counts.volumes} />
-      </div>
-    </section>
-  );
-}
-
-function WarningsPanel({ status }: { status: InventoryStatus }) {
+function WarningsSection({ status }: { status: InventoryStatus }) {
   const warnings = status.warnings ?? [];
 
-  if (warnings.length === 0) {
-    return (
-      <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h2 className="text-lg font-semibold">Warnings</h2>
-        <p className="mt-2 text-sm text-content-muted">
+  return (
+    <section aria-labelledby="warnings-heading">
+      <h3 id="warnings-heading" className="font-medium">
+        Refresh warnings {warnings.length > 0 ? `(${warnings.length})` : ""}
+      </h3>
+      {warnings.length === 0 ? (
+        <p className="mt-1 text-sm text-content-muted">
           The last refresh completed without warnings.
         </p>
-      </section>
-    );
-  }
-
-  return (
-    <section
-      aria-labelledby="warnings-heading"
-      className="rounded-xl border border-warn/40 bg-warn-soft p-5"
-    >
-      <h2 id="warnings-heading" className="text-lg font-semibold">
-        Warnings ({warnings.length})
-      </h2>
-      <p className="mt-1 text-sm text-content-muted">
-        Non-fatal problems from the last refresh. A vanished container is
-        expected churn, not a fault.
-      </p>
-      <ul className="mt-4 flex flex-col gap-2 text-sm">
-        {warnings.slice(0, 10).map((warning, index) => (
-          <li
-            key={warning.id ?? `${warning.code}-${index}`}
-            className="rounded-lg border border-border-subtle bg-surface-raised px-3 py-2"
-          >
-            <span className="font-mono text-xs text-content-muted">{warning.code}</span>
-            <p className="mt-0.5">
-              {warning.containerName ? (
-                <strong className="font-medium">{warning.containerName}: </strong>
-              ) : null}
-              {warning.message}
-            </p>
-          </li>
-        ))}
-      </ul>
+      ) : (
+        <>
+          <p className="mt-1 text-sm text-content-muted">
+            Non-fatal problems from the last refresh. A vanished container is
+            expected churn, not a fault.
+          </p>
+          <ul className="mt-3 flex flex-col gap-2 text-sm">
+            {warnings.slice(0, 10).map((warning, index) => (
+              <li
+                key={warning.id ?? `${warning.code}-${index}`}
+                className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2"
+              >
+                <span className="font-mono text-xs text-content-muted">{warning.code}</span>
+                <p className="mt-0.5">
+                  {warning.containerName ? (
+                    <strong className="font-medium">{warning.containerName}: </strong>
+                  ) : null}
+                  {warning.message}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </section>
   );
 }
@@ -735,11 +759,9 @@ function describeInventory(status: InventoryStatus): string {
   if (status.inProgress) return "A refresh is running.";
   if (status.generation === 0) return "No inventory has been collected yet.";
   if (status.state === "failed") {
-    return "The last refresh failed. The figures below describe the previous inventory.";
+    return "The last refresh failed. The figures here describe the previous inventory.";
   }
-  return `Read-only inventory of the local Docker host, last refreshed ${formatTimestamp(
-    status.lastSuccess?.finishedAt,
-  )}.`;
+  return `Last refreshed ${formatTimestamp(status.lastSuccess?.finishedAt)}.`;
 }
 
 function refreshTone(status: InventoryStatus): "ok" | "warn" | "danger" | "neutral" {
@@ -774,7 +796,7 @@ function formatTimestamp(iso: string | undefined): string {
 }
 
 function formatDuration(ms: number | undefined): string {
-  if (ms === undefined) return "â€”";
+  if (ms === undefined) return "—";
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
 }

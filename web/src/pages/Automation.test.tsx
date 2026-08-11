@@ -479,7 +479,7 @@ it("marks an automatic policy differently from one that only watches", async () 
   await screen.findByText("Nightly patches");
 
   // Both labels are present as text, so the distinction is not colour-only.
-  expect(screen.getAllByText("Observe").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Observe only").length).toBeGreaterThan(0);
   expect(screen.getAllByText("Automatic").length).toBeGreaterThan(0);
   expect(
     screen.getByTitle(/stops and replaces containers without asking/i),
@@ -511,11 +511,11 @@ it("defaults a new policy to the safe settings", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "New policy" }));
 
-  // Observe and digest-only: the two settings that change the least.
+  // Observe and same-tag-only: the two settings that change the least.
   const mode = screen.getByLabelText(/Mode/i) as HTMLSelectElement;
-  const ceiling = screen.getByLabelText(/Ceiling/i) as HTMLSelectElement;
+  const allowed = screen.getByLabelText(/Allowed updates/i) as HTMLSelectElement;
   expect(mode.value).toBe("observe");
-  expect(ceiling.value).toBe("digestOnly");
+  expect(allowed.value).toBe("digestOnly");
 });
 
 it("renders a policy name as text rather than markup", async () => {

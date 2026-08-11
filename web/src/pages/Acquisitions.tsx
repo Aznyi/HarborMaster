@@ -62,7 +62,7 @@ export function Acquisitions() {
   return (
     <div className="space-y-6">
       <PageIntro
-        title="Image acquisitions"
+        title="Image downloads"
         description={
           "Images HarborMaster has downloaded to this host, and what happened " +
           "to each attempt. Downloading an image never changes a container."
@@ -203,7 +203,7 @@ function Filters({
       <label className="flex items-center gap-2 pb-1.5 text-sm text-content">
         <input
           type="checkbox"
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
           checked={activeOnly}
           onChange={(event) => onActiveOnly(event.target.checked)}
         />
@@ -234,7 +234,7 @@ function AcquisitionList({
   if (items.length === 0) {
     return (
       <EmptyState
-        title="No acquisitions match these filters"
+        title="No image downloads match these filters"
         description={
           "An acquisition is requested from a change plan that recommends the " +
           "change. Nothing here happens on a schedule — HarborMaster never " +
@@ -277,7 +277,7 @@ function AcquisitionRow({ acquisition }: { acquisition: Acquisition }) {
 
           <Link
             to={`/acquisitions/${encodeURIComponent(acquisition.acquisitionId)}`}
-            className="block text-sm font-medium text-content hover:underline"
+            className="flex min-h-6 items-center text-sm font-medium text-content hover:underline"
           >
             {acquisition.target.reference || acquisition.target.repository}
           </Link>

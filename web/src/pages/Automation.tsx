@@ -338,7 +338,10 @@ function UpcomingPanel({ state }: { state: ReturnType<typeof useAutomationUpcomi
 /** The decision table, shared by the preview and the run detail. */
 export function DecisionTable({ decisions }: { decisions: AutomationDecision[] }) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-border-subtle">
+    <div
+        className="overflow-x-auto rounded-xl border border-border-subtle"
+        tabIndex={0}
+      >
       <table className="min-w-full text-sm">
         <thead className="bg-surface-sunken text-left text-xs uppercase tracking-wide text-content-muted">
           <tr>
@@ -401,7 +404,10 @@ function RecentRuns({ state }: { state: ReturnType<typeof useAutomationRuns> }) 
   return (
     <section className="space-y-3">
       <h3 className="text-sm font-semibold">Recent passes</h3>
-      <div className="overflow-x-auto rounded-xl border border-border-subtle">
+      <div
+        className="overflow-x-auto rounded-xl border border-border-subtle"
+        tabIndex={0}
+      >
         <table className="min-w-full text-sm">
           <thead className="bg-surface-sunken text-left text-xs uppercase tracking-wide text-content-muted">
             <tr>

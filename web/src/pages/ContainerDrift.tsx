@@ -71,7 +71,7 @@ export function ContainerDrift() {
       <label className="flex items-center gap-2 text-sm text-content">
         <input
           type="checkbox"
-          className="size-4 rounded border-border-subtle"
+          className="h-6 w-6 shrink-0 rounded border-border-subtle"
           checked={showResolved}
           onChange={(event) => setShowResolved(event.target.checked)}
         />
