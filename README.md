@@ -80,10 +80,18 @@ by the time HarborMaster can change a container it can already undo it.
 ### Docker Compose
 
 ```sh
-cp .env.example .env
-# Set HARBORMASTER_DOCKER_GID to the host's docker group so the unprivileged
-# container can read the socket:
+# Note the destination: deployments/, NOT the repository root.
+#
+# `-f deployments/compose.yaml` makes deployments/ the Compose PROJECT
+# DIRECTORY, and that is the only place Compose looks for `.env`. A copy left
+# at the root is silently ignored — every setting falls back to its default,
+# including the socket group, with no error to say so.
+cp .env.example deployments/.env
+
+# Set HARBORMASTER_DOCKER_GID in that file to the host's docker group, so the
+# unprivileged container can read the socket:
 #   stat -c '%g' /var/run/docker.sock
+# On Docker Desktop it is 0 — see "Docker socket group" in the compose file.
 docker compose -f deployments/compose.yaml up -d
 ```
 

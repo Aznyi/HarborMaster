@@ -8,9 +8,17 @@
 #
 #   docker compose -f deployments/compose.yaml -f deployments/compose.build.yaml up --build
 #
-# Copy .env.example to .env first and set HARBORMASTER_DOCKER_GID for your host
-# — see "Docker socket group" below, which differs between native Linux and
-# Docker Desktop.
+# Copy the repository's .env.example to deployments/.env first, and set
+# HARBORMASTER_DOCKER_GID for your host — see "Docker socket group" below,
+# which differs between native Linux and Docker Desktop.
+#
+# THE LOCATION MATTERS. `-f deployments/compose.yaml` makes this directory the
+# Compose project directory, and that is the only place Compose looks for
+# `.env`. A copy left in the repository root is read by nothing: every
+# `${VAR:-default}` below quietly takes its default, so the socket group falls
+# back to 999 and HarborMaster starts unable to see Docker with no error
+# explaining why. `--env-file <path>` overrides the location if you need it
+# somewhere else.
 #
 # ---------------------------------------------------------------------------
 # Docker socket access is privileged
