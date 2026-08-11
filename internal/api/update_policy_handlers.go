@@ -53,6 +53,10 @@ type updatePolicyRequest struct {
 	Enabled     *bool   `json:"enabled,omitempty"`
 	Priority    *int    `json:"priority,omitempty"`
 
+	// Scope is what the policy is pointed at. Absent means `selector`, which is
+	// what every client written before this field existed meant, and what every
+	// stored policy already was.
+	Scope                 *string                `json:"scope,omitempty"`
 	Selector              *domain.UpdateSelector `json:"selector,omitempty"`
 	Strategy              *string                `json:"strategy,omitempty"`
 	MinimumRecommendation *string                `json:"minimumRecommendation,omitempty"`
@@ -134,15 +138,32 @@ func (s *Server) handleUpdatePolicyCreate(w http.ResponseWriter, r *http.Request
 	// omitted mode or strategy on a create is a caller mistake, and defaulting
 	// either would mean HarborMaster choosing how far an unattended change may
 	// go on somebody's behalf.
-	if body.Name == nil || body.Selector == nil || body.Strategy == nil || body.Mode == nil {
+	if body.Name == nil || body.Strategy == nil || body.Mode == nil {
 		writeError(w, r, s.logger, http.StatusBadRequest, CodeInvalidRequest,
-			"name, selector, strategy and mode are required")
+			"name, strategy and mode are required")
+		return
+	}
+	// The selector is required for every scope that is DECIDED by one. A policy
+	// scoped to all eligible containers has nothing to put in it -- the scope
+	// already said what it reaches -- and validation refuses one that does.
+	//
+	// Read from the body rather than from the assembled policy, so "the caller
+	// did not send a scope" and "the caller sent selector" stay distinguishable
+	// here. Absent scope means `selector`, which keeps every existing client
+	// working unchanged.
+	scope := domain.ScopeSelector
+	if body.Scope != nil {
+		scope = domain.UpdateScope(strings.TrimSpace(*body.Scope))
+	}
+	if scope != domain.ScopeAllEligible && body.Selector == nil {
+		writeError(w, r, s.logger, http.StatusBadRequest, CodeInvalidRequest,
+			"selector is required unless scope is allEligible")
 		return
 	}
 
 	policy := domain.UpdatePolicy{
 		Name:     *body.Name,
-		Selector: *body.Selector,
+		Scope:    scope,
 		Strategy: domain.UpdateStrategy(*body.Strategy),
 		Mode:     domain.AutomationMode(*body.Mode),
 		// A rule an administrator just wrote is one they want in force.
@@ -157,6 +178,9 @@ func (s *Server) handleUpdatePolicyCreate(w http.ResponseWriter, r *http.Request
 		Window: domain.MaintenanceWindow{AlwaysOpen: true},
 	}
 
+	if body.Selector != nil {
+		policy.Selector = *body.Selector
+	}
 	if body.Description != nil {
 		policy.Description = *body.Description
 	}
@@ -220,12 +244,17 @@ func (s *Server) handleUpdatePolicyUpdate(w http.ResponseWriter, r *http.Request
 		Enabled:     body.Enabled,
 		Priority:    body.Priority,
 		Selector:    body.Selector,
-		Window:      body.Window,
-		Limits:      body.Limits,
-		Failure:     body.Failure,
+		// Scope is set below, with the other enums.
+		Window:  body.Window,
+		Limits:  body.Limits,
+		Failure: body.Failure,
 	}
-	// The three enums arrive as strings so an unknown value is a validation
+	// The four enums arrive as strings so an unknown value is a validation
 	// error rather than an unmarshalling one, and are converted here.
+	if body.Scope != nil {
+		scope := domain.UpdateScope(strings.TrimSpace(*body.Scope))
+		change.Scope = &scope
+	}
 	if body.Strategy != nil {
 		strategy := domain.UpdateStrategy(*body.Strategy)
 		change.Strategy = &strategy

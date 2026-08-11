@@ -4422,9 +4422,17 @@ paths:
         decided by the planner from registry evidence, and re-verified by the
         acquisition preflight. There is no field here that reaches Docker.
 
-        **An empty selector governs nothing, and a bare `*` image pattern is
-        refused by name.** A policy that accidentally covers the whole estate
-        is the failure mode this validation exists for.
+        **Under `scope: selector`, an empty selector governs nothing and a bare
+        `*` image pattern is refused by name.** A policy that ACCIDENTALLY
+        covers the whole estate is the failure mode that validation exists for.
+
+        Covering the whole estate DELIBERATELY is `scope: allEligible`, which is
+        a field an operator sets rather than a pattern they type. It reaches
+        every container HarborMaster may legitimately consider — never its own
+        container, never the parked and quarantined containers it keeps as
+        evidence, never one carrying `io.harbormaster.enabled=false`, and never
+        anything in this policy's `exclude` list — and it changes no other check
+        in the pipeline.
 
         `minimumRecommendation` is constrained to `proceed` and
         `proceedWithCaution`. The other three planner verdicts mean a person has
@@ -4447,6 +4455,40 @@ paths:
                   selector: { labels: { tier: front } }
                   strategy: patch
                   mode: observe
+              watchEverything:
+                summary: Every eligible container, changing nothing
+                description: |
+                  The broad scope in the mode that cannot act. This is what
+                  "show me what you would keep updated" looks like, and it is
+                  the recommended way to meet `allEligible` for the first time:
+                  the next pass records a decision for every container without
+                  touching one.
+
+                  Note there is no `selector`. Under this scope there is nothing
+                  to put in one, and a body that supplied `include`, `images`,
+                  or `labels` alongside it would be refused.
+                value:
+                  name: Watch everything
+                  scope: allEligible
+                  strategy: patch
+                  mode: observe
+              keepEverythingCurrent:
+                summary: Every eligible container except the database, unattended
+                description: |
+                  The `exclude` list is the only selector clause `allEligible`
+                  accepts, and it is checked BEFORE the scope, so it wins.
+                value:
+                  name: Keep everything current
+                  scope: allEligible
+                  selector: { exclude: [postgres, redis] }
+                  strategy: minor
+                  mode: automatic
+                  window:
+                    alwaysOpen: false
+                    timezone: America/Chicago
+                    start: "02:00"
+                    end: "04:00"
+                  failure: { autoRollback: true, pauseAfterFailures: 2 }
               nightlyPatches:
                 summary: Unattended patch updates in a maintenance window
                 value:
@@ -10584,6 +10626,47 @@ components:
         which the engine may change the host.
       enum: [observe, dryRun, approvalRequired, automatic]
 
+    UpdateScope:
+      type: string
+      description: |
+        What a policy is POINTED AT. Its own field, with its own closed
+        vocabulary, rather than a value hidden inside the selector.
+
+        `selector` governs the containers the selector names. The original
+        behaviour, the default, and what an absent `scope` means — so a client
+        written before this field existed keeps working unchanged, and no stored
+        policy changed breadth when the field was added.
+
+        `allEligible` governs every container HarborMaster may legitimately
+        consider, minus the policy's own `exclude` list.
+
+        **Broad SELECTION is not broad AUTHORISATION.** `allEligible` widens
+        what a policy may look at and widens nothing else. Every container it
+        selects still passes, in order: the pause, the container's own opt-out
+        labels, the strategy ceiling, the deployment's major-version rule, the
+        planner's recommendation, the maintenance window, the in-flight check,
+        the mode, the run and concurrency budgets, the acquisition preflight,
+        the digest verification, the recreation preflight, the preservation
+        comparison, and the health proof. A policy in this scope in `observe`
+        mode changes nothing, exactly like any other policy in `observe`.
+
+        **It is also not "every container that exists".** A container being
+        present is not evidence HarborMaster may consider it. These are never
+        enrolled by `allEligible`, and an explicit `include` is the only way to
+        aim a policy at one:
+
+        - HarborMaster's own container, which it cannot update at all.
+        - The parked originals and quarantined replacements HarborMaster
+          creates during a recreation. Those are evidence.
+        - A container carrying `io.harbormaster.enabled=false`.
+        - A workload HarborMaster could not have recreated anyway, because its
+          name could not survive the parking step.
+
+        Each of those is a refusal derived from a fact HarborMaster established
+        from its own records. A label can only ever move a container OUT of this
+        scope, never into it.
+      enum: [selector, allEligible]
+
     UpdateSelector:
       type: object
       description: |
@@ -10599,7 +10682,16 @@ components:
         **An entirely empty selector matches NOTHING.** A policy that
         accidentally governs the whole estate is the failure mode worth
         designing against, so the empty case is the safe one rather than the
-        convenient one — and validation refuses an empty selector outright.
+        convenient one — and under `scope: selector` validation refuses an empty
+        selector outright.
+
+        **Under `scope: allEligible` the reverse applies:** `labels`, `images`,
+        and `include` are refused, because the scope already decided what the
+        policy reaches and a rule carrying both would mean different things
+        depending on which field a reader looked at first. `exclude` survives
+        into both scopes, because it is the one clause that means the same thing
+        under either — never this container — and it is checked BEFORE the
+        scope, so it wins in both.
 
         Containers are named by NAME, never by id: an id changes on every
         recreation, and a policy pinned to one would stop governing the
@@ -10751,7 +10843,7 @@ components:
         "is this container configured acceptably" and produces a violation; an
         update policy answers "may HarborMaster change this container, when, and
         how far" and produces an action.
-      required: [policyId, name, enabled, priority, selector, strategy, mode, window]
+      required: [policyId, name, enabled, priority, scope, selector, strategy, mode, window]
       properties:
         policyId:
           type: string
@@ -10767,9 +10859,14 @@ components:
           minimum: 0
           maximum: 1000
           description: |
-            Orders policies when several match one container. HIGHER wins, and a
-            tie is broken by the policy id so the winner is deterministic across
-            passes.
+            Orders policies when several match one container.
+
+            HIGHER wins. At equal priority the NARROWER SCOPE wins, so adding a
+            policy covering all eligible containers cannot silently take
+            containers away from the specific rules an operator wrote for them.
+            At equal priority and equal scope the lower policy id wins, so the
+            winner is deterministic across passes.
+        scope: { $ref: "#/components/schemas/UpdateScope" }
         selector: { $ref: "#/components/schemas/UpdateSelector" }
         strategy: { $ref: "#/components/schemas/UpdateStrategy" }
         minimumRecommendation:
@@ -10792,17 +10889,27 @@ components:
     UpdatePolicyRequest:
       type: object
       description: |
-        A create or edit body. On a create, `name`, `selector`, `strategy` and
-        `mode` are required — defaulting the mode or the strategy would mean
+        A create or edit body. On a create, `name`, `strategy` and `mode` are
+        always required — defaulting the mode or the strategy would mean
         HarborMaster choosing how far an unattended change may go on somebody's
-        behalf.
+        behalf. `selector` is required too, UNLESS `scope` is `allEligible`,
+        which has nothing to put in one.
 
-        On an edit, every field is optional and an omitted one is left alone.
+        `scope` may be omitted and means `selector`, so a client written before
+        the field existed sends exactly what it always did and gets exactly what
+        it always got.
+
+        On an edit, every field is optional and an omitted one is left alone —
+        including `scope`, so a partial edit can never change how wide a policy
+        reaches. Switching an existing policy TO `allEligible` therefore has to
+        clear the selector in the same request; a body that sets the scope and
+        leaves inclusion clauses in place is refused rather than reconciled.
       properties:
         name: { type: string, maxLength: 120 }
         description: { type: string, maxLength: 1000 }
         enabled: { type: boolean }
         priority: { type: integer, minimum: 0, maximum: 1000 }
+        scope: { $ref: "#/components/schemas/UpdateScope" }
         selector: { $ref: "#/components/schemas/UpdateSelector" }
         strategy: { $ref: "#/components/schemas/UpdateStrategy" }
         minimumRecommendation: { type: string, enum: [proceed, proceedWithCaution] }

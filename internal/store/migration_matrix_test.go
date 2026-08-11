@@ -71,6 +71,30 @@ var legacyRows = []struct {
 		count: `SELECT COUNT(*) FROM policy_definitions WHERE name = 'legacy policy'`,
 	},
 	{
+		// An update policy written before the scope column existed.
+		//
+		// The row that 0023 has to carry forward WITHOUT changing what it
+		// governs. It names one container; after the upgrade it must still name
+		// that one container and nothing else, which the scope's DEFAULT
+		// 'selector' is what guarantees. See
+		// TestUpgradePreservesUpdatePolicyBreadth for the behavioural half.
+		after: "0016_automation.sql",
+		statement: `INSERT INTO update_policies
+			(policy_id, name, enabled, priority, strategy, mode,
+			 minimum_recommendation, selector_json, window_json, limits_json,
+			 failure_json, created_at, updated_at)
+			VALUES ('upd_00112233445566778899', 'legacy update policy', 1, 10,
+			        'patch', 'observe', 'proceed',
+			        '{"include":["legacy-web"]}', '{"alwaysOpen":true}',
+			        '{"maxConcurrent":1,"maxPerRegistry":1,"maxPerRun":10,' ||
+			        '"acquisitionTimeoutSeconds":600,"recreateTimeoutSeconds":300,' ||
+			        '"healthTimeoutSeconds":120}',
+			        '{"autoRollback":true,"pauseAfterFailures":2,"pauseWindowHours":24}',
+			        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		count: `SELECT COUNT(*) FROM update_policies
+		          WHERE name = 'legacy update policy' AND scope = 'selector'`,
+	},
+	{
 		after: "0004_snapshots.sql",
 		statement: `INSERT INTO snapshots
 			(container_id, container_name, spec_version, spec_json, checksum,

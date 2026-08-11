@@ -166,6 +166,19 @@ func (p *UpdatePolicy) Normalise() {
 	p.Mode = AutomationMode(strings.TrimSpace(string(p.Mode)))
 	p.MinimumRecommendation = Recommendation(strings.TrimSpace(string(p.MinimumRecommendation)))
 
+	// An absent scope is the NARROW one. This is the whole backward-compatibility
+	// story for the field: a policy stored before it existed, and a client that
+	// does not send it, both land on exactly the behaviour they already had.
+	//
+	// Only the empty string is defaulted. A scope that was supplied and is not
+	// recognised is left alone for Validate to refuse by name, because silently
+	// treating an unknown breadth as the narrow one would tell an operator their
+	// policy was stored as something other than what they asked for.
+	p.Scope = UpdateScope(strings.TrimSpace(string(p.Scope)))
+	if p.Scope == "" {
+		p.Scope = ScopeSelector
+	}
+
 	p.Selector.Images = normaliseSelectorList(p.Selector.Images)
 	p.Selector.Include = normaliseSelectorList(p.Selector.Include)
 	p.Selector.Exclude = normaliseSelectorList(p.Selector.Exclude)
@@ -278,6 +291,12 @@ func (p UpdatePolicy) Validate(limits UpdatePolicyLimits) error {
 	if err := validatePolicyText("description", p.Description, limits.MaxDescriptionBytes, false); err != nil {
 		return err
 	}
+	if !ValidUpdateScope(string(p.Scope)) {
+		return PolicyValidationError{
+			Field:   "scope",
+			Message: "must be one of selector, allEligible",
+		}
+	}
 	if !ValidUpdateStrategy(string(p.Strategy)) {
 		return PolicyValidationError{
 			Field:   "strategy",
@@ -300,7 +319,7 @@ func (p UpdatePolicy) Validate(limits UpdatePolicyLimits) error {
 		return PolicyValidationError{Field: "priority", Message: "must be between 0 and 1000"}
 	}
 
-	if err := validateUpdateSelector(p.Selector, limits); err != nil {
+	if err := validateUpdateSelector(p.Scope, p.Selector, limits); err != nil {
 		return err
 	}
 	if err := validateUpdateWindow(p.Window, limits); err != nil {
@@ -311,11 +330,38 @@ func (p UpdatePolicy) Validate(limits UpdatePolicyLimits) error {
 
 // validateUpdateSelector bounds every clause and refuses a match-everything
 // policy.
-func validateUpdateSelector(selector UpdateSelector, limits UpdatePolicyLimits) error {
-	if selector.Empty() {
-		return PolicyValidationError{
-			Field:   "selector",
-			Message: "must name at least one of labels, images or include; an empty selector governs nothing",
+//
+// # The two scopes have opposite requirements, and both are refusals
+//
+// Under ScopeSelector an empty selector is refused: a policy that names nothing
+// governs nothing, and storing one would be storing a rule that silently does
+// not work.
+//
+// Under ScopeAllEligible an inclusion clause is refused. Breadth is already
+// decided by the scope, so `include`, `images`, and `labels` have nothing left
+// to say -- a policy carrying both would be one whose meaning depends on which
+// field a reader looks at first. That ambiguity is exactly what the scope field
+// was introduced to remove, so it is rejected rather than resolved.
+//
+// `exclude` survives into both, because it is the one clause that means the
+// same thing under either: never this container.
+func validateUpdateSelector(scope UpdateScope, selector UpdateSelector, limits UpdatePolicyLimits) error {
+	switch scope {
+	case ScopeAllEligible:
+		if !selector.Empty() {
+			return PolicyValidationError{
+				Field: "selector",
+				Message: "must not name labels, images or include when the scope is " +
+					"allEligible; the scope already decides what the policy reaches, " +
+					"and exclusions are the only selector clause that applies to it",
+			}
+		}
+	default:
+		if selector.Empty() {
+			return PolicyValidationError{
+				Field:   "selector",
+				Message: "must name at least one of labels, images or include; an empty selector governs nothing",
+			}
 		}
 	}
 
@@ -478,6 +524,21 @@ func validateUpdateLimits(values UpdateLimits, failure UpdateFailureHandling, li
 // hour. They should just have to see HarborMaster say so first.
 func (p UpdatePolicy) Warnings() []string {
 	var warnings []string
+
+	// Breadth first, because it is the setting that decides how many containers
+	// every other warning below applies to.
+	if p.Scope == ScopeAllEligible && p.Mode == ModeAutomatic {
+		warnings = append(warnings,
+			"this policy may update every eligible container on this host without asking; "+
+				"HarborMaster's own container, the parked and quarantined containers it "+
+				"keeps as evidence, and anything you exclude are still refused")
+	}
+	if p.Scope == ScopeAllEligible && len(p.Selector.Exclude) == 0 {
+		warnings = append(warnings,
+			"this policy covers all eligible containers and excludes none; a container "+
+				"you would not want restarted has to be excluded here or opted out by label")
+	}
+
 	if p.Mode == ModeAutomatic && p.Strategy == StrategyMajor {
 		warnings = append(warnings,
 			"this policy applies major version updates without asking; major versions are where publishers put breaking changes")

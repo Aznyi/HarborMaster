@@ -45,10 +45,14 @@ const MaxAutomationTargets = 2000
 //
 // Labels are attacker-influenced in the sense that anyone who can run
 // `docker run` writes them. Ten per container across the whole estate is
-// generous; past the bound the remaining labels are dropped, which can only
-// make a selector match LESS. Failing towards "not selected" is the safe
-// direction: a container that should have been automated and was not is a
-// missed update, while the converse would be an unintended one.
+// generous.
+//
+// Past the bound the remaining labels are dropped. For a SELECTOR that can only
+// ever match LESS, which is the safe direction: a container that should have
+// been automated and was not is a missed update, while the converse would be an
+// unintended one. For the ELIGIBILITY SCREENING it is not, because one of the
+// facts is an opt-out — so the containers that may be missing labels are marked
+// unscreened instead, and the broad scope declines them. See AutomationTargets.
 const maxAutomationLabels = MaxAutomationTargets * 10
 
 // AutomationTargets returns every present container with its labels.
@@ -108,11 +112,18 @@ func (r *ContainerRepository) AutomationTargets(
 	}
 	defer func() { _ = labelRows.Close() }()
 
+	var (
+		labelsRead int
+		lastID     string
+	)
 	for labelRows.Next() {
 		var containerID, key, value string
 		if err := labelRows.Scan(&containerID, &key, &value); err != nil {
 			return nil, false, fmt.Errorf("scan automation target label: %w", AsError(err))
 		}
+		labelsRead++
+		lastID = containerID
+
 		index, ok := byID[containerID]
 		if !ok {
 			// A label for a container past the target bound. Nothing to attach
@@ -125,5 +136,54 @@ func (r *ContainerRepository) AutomationTargets(
 		}
 		targets[index].Selection.Labels[key] = value
 	}
-	return targets, truncated, labelRows.Err()
+	if err := labelRows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	// Which containers, if any, may be missing labels.
+	//
+	// # Why this is now load-bearing
+	//
+	// Dropping labels past the bound used to be safe in one direction only, and
+	// that was enough: a selector matches on labels, so a missing label could
+	// only ever make it match LESS.
+	//
+	// It is not enough now. One of the eligibility facts is an OPT-OUT read off
+	// a label, and a dropped opt-out would make a container MORE eligible, not
+	// less -- the exact inversion the old bound relied on not happening.
+	//
+	// So the truncation point is computed rather than assumed. The rows arrive
+	// ordered by container id, so a truncated read is complete for every id
+	// BELOW the last one seen, possibly partial for that one, and absent for
+	// every id above it. Those are marked unscreened, which leaves them with the
+	// zero TargetEligibility: an explicit selector still reaches them by name,
+	// and the broad scope does not enrol them. Fails closed, per container,
+	// rather than blanking an estate that read fine.
+	unscreenedFrom := ""
+	if labelsRead >= maxAutomationLabels {
+		unscreenedFrom = lastID
+		truncated = true
+	}
+
+	// Screen every target once the labels are attached.
+	//
+	// Here rather than in the scan loop above because one of the facts is read
+	// off a label, and a target screened before its labels arrived would carry
+	// an answer derived from half its evidence. One pass over a slice already in
+	// memory: no query, and no allocation per container.
+	//
+	// This is the ONLY place the facts are established. A caller that builds an
+	// AutomationTarget by hand gets the zero TargetEligibility, which the broad
+	// scope refuses -- see domain.TargetEligibility.
+	for index := range targets {
+		if unscreenedFrom != "" && targets[index].ContainerID >= unscreenedFrom {
+			continue
+		}
+		targets[index].Selection.Eligibility = domain.ScreenTarget(
+			targets[index].Selection.Name,
+			targets[index].Selection.Image,
+			targets[index].Selection.Labels,
+		)
+	}
+	return targets, truncated, nil
 }

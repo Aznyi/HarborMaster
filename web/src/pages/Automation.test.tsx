@@ -491,7 +491,11 @@ it("says plainly when a policy governs nothing", async () => {
   renderPage(<UpdatePolicies />);
 
   await screen.findByText("Nightly patches");
-  expect(screen.getByText(/nothing \(the selector is empty\)/i)).toBeInTheDocument();
+  // The summary and the Scope row both say it. An empty selector governs
+  // nothing, and a card that left that to be inferred from a blank field would
+  // read as "everything" to somebody scanning.
+  expect(screen.getByText(/will observe no containers/i)).toBeInTheDocument();
+  expect(screen.getByText("No containers")).toBeInTheDocument();
 });
 
 it("offers no editor to an operator", async () => {
@@ -512,10 +516,18 @@ it("defaults a new policy to the safe settings", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "New policy" }));
 
   // Observe and same-tag-only: the two settings that change the least.
-  const mode = screen.getByLabelText(/Mode/i) as HTMLSelectElement;
-  const allowed = screen.getByLabelText(/Allowed updates/i) as HTMLSelectElement;
-  expect(mode.value).toBe("observe");
-  expect(allowed.value).toBe("digestOnly");
+  expect(screen.getByRole("radio", { name: /Observe only/ })).toBeChecked();
+  expect(
+    screen.getByRole("radio", { name: /Same tag only, when it is republished/ }),
+  ).toBeChecked();
+
+  // And the breadth defaults to a choice that governs nothing until the
+  // operator picks a container. "All eligible containers" must never be what a
+  // form arrives at by itself.
+  expect(
+    screen.getByRole("radio", { name: /All eligible containers/ }),
+  ).not.toBeChecked();
+  expect(screen.getByRole("radio", { name: /Selected containers/ })).toBeChecked();
 });
 
 it("renders a policy name as text rather than markup", async () => {

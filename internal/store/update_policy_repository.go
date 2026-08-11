@@ -88,7 +88,7 @@ type UpdatePolicyFilter struct {
 
 const selectUpdatePolicyColumns = `
 	SELECT id, policy_id, name, description, enabled, archived, priority,
-	       strategy, mode, minimum_recommendation,
+	       scope, strategy, mode, minimum_recommendation,
 	       selector_json, window_json, limits_json, failure_json,
 	       created_at, updated_at
 	FROM update_policies`
@@ -120,12 +120,12 @@ func (r *UpdatePolicyRepository) CreateUpdatePolicy(
 	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO update_policies
 			(policy_id, name, description, enabled, archived, priority,
-			 strategy, mode, minimum_recommendation,
+			 scope, strategy, mode, minimum_recommendation,
 			 selector_json, window_json, limits_json, failure_json,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		policy.PolicyID, policy.Name, policy.Description, boolToInt(policy.Enabled),
-		policy.Priority, string(policy.Strategy), string(policy.Mode),
+		policy.Priority, string(policy.Scope), string(policy.Strategy), string(policy.Mode),
 		string(policy.MinimumRecommendation),
 		documents.selector, documents.window, documents.limits, documents.failure,
 		stamp, stamp)
@@ -154,6 +154,7 @@ type UpdatePolicyChange struct {
 	Description           *string
 	Enabled               *bool
 	Priority              *int
+	Scope                 *domain.UpdateScope
 	Selector              *domain.UpdateSelector
 	Strategy              *domain.UpdateStrategy
 	MinimumRecommendation *domain.Recommendation
@@ -203,6 +204,12 @@ func (r *UpdatePolicyRepository) ApplyUpdatePolicy(
 	if change.Priority != nil {
 		merged.Priority = *change.Priority
 	}
+	// Scope before selector, so the two are merged in the order the validator
+	// reads them. An edit that supplies neither leaves both alone, which is what
+	// makes a partial edit unable to change how wide a policy reaches.
+	if change.Scope != nil {
+		merged.Scope = *change.Scope
+	}
 	if change.Selector != nil {
 		merged.Selector = *change.Selector
 	}
@@ -244,12 +251,13 @@ func (r *UpdatePolicyRepository) ApplyUpdatePolicy(
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE update_policies
 		   SET name = ?, description = ?, enabled = ?, priority = ?,
-		       strategy = ?, mode = ?, minimum_recommendation = ?,
+		       scope = ?, strategy = ?, mode = ?, minimum_recommendation = ?,
 		       selector_json = ?, window_json = ?, limits_json = ?, failure_json = ?,
 		       updated_at = ?
 		 WHERE policy_id = ? AND archived = 0`,
 		merged.Name, merged.Description, boolToInt(merged.Enabled), merged.Priority,
-		string(merged.Strategy), string(merged.Mode), string(merged.MinimumRecommendation),
+		string(merged.Scope), string(merged.Strategy), string(merged.Mode),
+		string(merged.MinimumRecommendation),
 		documents.selector, documents.window, documents.limits, documents.failure,
 		stamp, policyID); err != nil {
 		return domain.UpdatePolicy{}, fmt.Errorf("update policy: %w", AsError(err))
@@ -477,7 +485,7 @@ func scanUpdatePolicy(scanner rowScanner) (domain.UpdatePolicy, error) {
 	err := scanner.Scan(
 		&policy.ID, &policy.PolicyID, &policy.Name, &policy.Description,
 		&enabled, &archived, &policy.Priority,
-		&policy.Strategy, &policy.Mode, &policy.MinimumRecommendation,
+		&policy.Scope, &policy.Strategy, &policy.Mode, &policy.MinimumRecommendation,
 		&selector, &windowDoc, &limitsDoc, &failureDoc,
 		&policy.CreatedAt, &policy.UpdatedAt)
 	if err != nil {

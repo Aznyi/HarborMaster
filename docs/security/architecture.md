@@ -613,6 +613,69 @@ The runtime image is distroless and carries no system zoneinfo, so
 `cmd/harbormaster` imports `time/tzdata`. Without it every named zone would fail
 to load and every window would correctly-but-uselessly fail closed.
 
+### Policy scope: broad selection is not broad authorisation
+
+A policy says what it is pointed at in a field of its own, `scope`, with a
+closed vocabulary of two values and a database CHECK behind it.
+
+`selector` governs the containers the selector names, and is what an absent
+scope means — so every policy written before the field existed, and every client
+that does not send it, keeps exactly the breadth it already had.
+
+`allEligible` governs every container HarborMaster may legitimately consider,
+minus that policy's own exclusions.
+
+**Breadth is a field because every stringly-typed alternative was wrong.** The
+image pattern `*` is refused by name. An empty selector means the OPPOSITE — it
+governs nothing, which is the safe reading of "the operator has not said yet". A
+magic name in `include` collides with real container names. All three would have
+made the breadth of a rule a property of a string, discovered by parsing, rather
+than a property somebody chose.
+
+**The scope widens selection and nothing else.** Every container `allEligible`
+selects still passes, in this order: the pause, the container's own opt-out
+labels, the strategy ceiling, the deployment's major-version rule, the planner's
+recommendation, the maintenance window, the in-flight check, the mode, the run
+and concurrency budgets, the acquisition preflight, the digest verification, the
+recreation preflight, the preservation comparison, and the health proof. A
+policy in this scope in `observe` mode changes nothing, exactly like any other
+policy in `observe`. Two architecture tests hold this: one fails the build if
+any file that decides whether the host changes so much as mentions the scope,
+and one walks the containers that must never be enrolled through a broad policy
+and fails if one comes out selected.
+
+**"Eligible" is not "present".** A container existing is not evidence
+HarborMaster may consider it. `domain.TargetEligibility` carries POSITIVE facts,
+established once by `domain.ScreenTarget` from the inventory row and its labels,
+and the broad scope requires them — so the ZERO VALUE selects nothing. That
+polarity is the design: a caller that built a target without screening it, or a
+repository that could not read the labels, produces a target the broad scope
+declines rather than one it waves through. Four things are never enrolled:
+
+- HarborMaster's own container, which it cannot update at all.
+- The parked originals and quarantined replacements a recreation leaves behind.
+  Those are evidence; enrolling the wreckage of a failed update into the
+  automation that produced it is how one bad image becomes two.
+- A container carrying `io.harbormaster.enabled=false`.
+- A workload whose name could not survive the parking step, which the execution
+  preflight would refuse anyway.
+
+Only an explicit `include` reaches any of those, which is an operator pointing
+at one container by name rather than a rule that swept it up.
+
+**Exclusion outranks the scope.** `exclude` is checked before the scope is
+consulted and is final in both, which is what makes "everything except the
+database" a rule an operator can write once. It is also the only selector clause
+`allEligible` accepts: an inclusion clause alongside it is REFUSED rather than
+reconciled, because a policy carrying both would mean different things depending
+on which field a reader looked at first.
+
+**A catch-all cannot take containers from the rules written for them.** Policy
+selection breaks a priority tie by preferring the NARROWER scope before falling
+back to the policy id. Without that, whether a specific rule or a catch-all
+governed a container would be decided by a generated identifier — effectively at
+random, and re-rolled every time a policy was added.
+
 ### Labels may only ever make automation safer
 
 Precedence is `container label → policy → built-in default`, implemented in one

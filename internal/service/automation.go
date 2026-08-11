@@ -752,7 +752,7 @@ func (s *AutomationService) loadContainerEvidence(
 	if overrides.Disabled || overrides.Paused {
 		return
 	}
-	if _, governed := domain.SelectUpdatePolicy(policies, input.Target); !governed {
+	if _, governed := domain.SelectUpdatePolicy(policies, input.Target, input.Self); !governed {
 		return
 	}
 

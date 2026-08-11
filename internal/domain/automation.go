@@ -77,9 +77,18 @@ const (
 	ReasonEligible AutomationReason = "eligible"
 
 	// No work to do.
-	ReasonNoPlan       AutomationReason = "noPlan"
-	ReasonNoUpdate     AutomationReason = "noUpdate"
-	ReasonNotSelected  AutomationReason = "notSelected"
+	ReasonNoPlan      AutomationReason = "noPlan"
+	ReasonNoUpdate    AutomationReason = "noUpdate"
+	ReasonNotSelected AutomationReason = "notSelected"
+	// ReasonNotEligible is a container a BROAD policy passed over.
+	//
+	// Its own reason rather than notSelected, because the two answer different
+	// questions. "No selector names this container" tells an operator to write
+	// one. "A policy covering all eligible containers did not enrol this one"
+	// tells them something about the CONTAINER, and the detail says which fact
+	// decided it -- HarborMaster's own container, evidence from an earlier
+	// update, an opt-out label, or a workload it could not have recreated.
+	ReasonNotEligible  AutomationReason = "notEligible"
 	ReasonNoPolicy     AutomationReason = "noPolicy"
 	ReasonPolicyOff    AutomationReason = "policyDisabled"
 	ReasonLabelOff     AutomationReason = "labelDisabled"
@@ -123,6 +132,8 @@ func (r AutomationReason) Explain() string {
 		return "the plan proposes no change"
 	case ReasonNotSelected:
 		return "no update policy selects this container"
+	case ReasonNotEligible:
+		return "this container is not one a broad policy may enrol"
 	case ReasonNoPolicy:
 		return "no update policy is defined"
 	case ReasonPolicyOff:

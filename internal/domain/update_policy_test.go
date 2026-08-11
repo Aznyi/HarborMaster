@@ -254,7 +254,7 @@ func TestSelectUpdatePolicyPrefersHighestPriority(t *testing.T) {
 		policyFixture("upd_bbbbbbbbbbbbbbbbbbbb", 50),
 		policyFixture("upd_cccccccccccccccccccc", 30),
 	}
-	best, ok := SelectUpdatePolicy(policies, target)
+	best, ok := SelectUpdatePolicy(policies, target, SelfIdentity{})
 	if !ok || best.PolicyID != "upd_bbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("selected %q (%v), want the priority-50 policy", best.PolicyID, ok)
 	}
@@ -270,8 +270,8 @@ func TestSelectUpdatePolicyBreaksTiesDeterministically(t *testing.T) {
 		policyFixture("upd_aaaaaaaaaaaaaaaaaaaa", 10),
 		policyFixture("upd_bbbbbbbbbbbbbbbbbbbb", 10),
 	}
-	first, _ := SelectUpdatePolicy(forward, target)
-	second, _ := SelectUpdatePolicy(reverse, target)
+	first, _ := SelectUpdatePolicy(forward, target, SelfIdentity{})
+	second, _ := SelectUpdatePolicy(reverse, target, SelfIdentity{})
 	if first.PolicyID != second.PolicyID {
 		t.Fatalf("row order changed the winner: %q vs %q", first.PolicyID, second.PolicyID)
 	}
@@ -289,12 +289,12 @@ func TestSelectUpdatePolicySkipsDisabledAndArchived(t *testing.T) {
 	archived.Archived = true
 	live := policyFixture("upd_cccccccccccccccccccc", 1)
 
-	best, ok := SelectUpdatePolicy([]UpdatePolicy{disabled, archived, live}, target)
+	best, ok := SelectUpdatePolicy([]UpdatePolicy{disabled, archived, live}, target, SelfIdentity{})
 	if !ok || best.PolicyID != live.PolicyID {
 		t.Fatalf("selected %q (%v), want the only live policy", best.PolicyID, ok)
 	}
 
-	if _, ok := SelectUpdatePolicy([]UpdatePolicy{disabled, archived}, target); ok {
+	if _, ok := SelectUpdatePolicy([]UpdatePolicy{disabled, archived}, target, SelfIdentity{}); ok {
 		t.Fatal("no live policy governs this container")
 	}
 }

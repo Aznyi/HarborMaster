@@ -156,6 +156,7 @@ export type AutomationReason =
   | "noPlan"
   | "noUpdate"
   | "notSelected"
+  | "notEligible"
   | "noPolicy"
   | "policyDisabled"
   | "labelDisabled"
@@ -180,6 +181,7 @@ export const AUTOMATION_REASON_LABELS: Record<AutomationReason, string> = {
   noPlan: "No change plan",
   noUpdate: "Nothing to update",
   notSelected: "No policy selects it",
+  notEligible: "Not eligible for a broad policy",
   noPolicy: "No policies defined",
   policyDisabled: "Policy is off",
   labelDisabled: "Opted out by label",
@@ -212,11 +214,102 @@ export const PAUSE_REASON_LABELS: Record<PauseReason, string> = {
 // ------------------------------------------------------------- the policy --
 
 /**
+ * What a policy is POINTED AT.
+ *
+ * Its own field with its own vocabulary, not a value hidden in the selector.
+ * The three stringly-typed ways of saying "everything" are all still refused:
+ * a bare `*` by name, an empty selector because it means the opposite, and a
+ * magic name in `include` because a container could be called that.
+ *
+ * `selector` is the default and is what an absent `scope` means, so a stored
+ * policy written before the field existed keeps exactly the breadth it had.
+ *
+ * **Broad selection is not broad authorisation.** `allEligible` widens what a
+ * policy looks at and nothing else — every container it selects still passes
+ * every check in the pipeline, and a policy in this scope in `observe` mode
+ * changes nothing.
+ */
+export type UpdateScope = "selector" | "allEligible";
+
+export const UPDATE_SCOPE_ORDER: UpdateScope[] = ["selector", "allEligible"];
+
+/**
+ * The four choices the editor offers.
+ *
+ * Three of them are the `selector` scope with a different SHAPE of selector,
+ * which is a UI distinction rather than a domain one: an operator picking
+ * containers from a list and an operator typing an image glob are both writing
+ * a selector, and the server sees no difference. The fourth is the real scope.
+ *
+ * Kept apart from `UpdateScope` deliberately. Collapsing them would either put
+ * a UI concept into the request body or force the form to re-derive which of
+ * three selector shapes an operator meant, and the second is how a form starts
+ * disagreeing with the policy it saved.
+ */
+export type ScopeChoice = "allEligible" | "containers" | "images" | "advanced";
+
+export const SCOPE_CHOICE_ORDER: ScopeChoice[] = [
+  "allEligible",
+  "containers",
+  "images",
+  "advanced",
+];
+
+export const SCOPE_CHOICE_LABELS: Record<ScopeChoice, string> = {
+  allEligible: "All eligible containers",
+  containers: "Selected containers",
+  images: "Matching images",
+  advanced: "Advanced selection",
+};
+
+export const SCOPE_CHOICE_DESCRIPTIONS: Record<ScopeChoice, string> = {
+  allEligible:
+    "All discovered workloads that pass HarborMaster's safety rules. Never HarborMaster itself, never the containers it keeps as evidence from an earlier update, and never one you exclude.",
+  containers: "Choose one or more containers from the inventory.",
+  images: "Match containers by image pattern.",
+  advanced:
+    "Container names, image patterns and labels together, with exclusions.",
+};
+
+/** Which domain scope a UI choice submits. */
+export function scopeOfChoice(choice: ScopeChoice): UpdateScope {
+  return choice === "allEligible" ? "allEligible" : "selector";
+}
+
+/**
+ * Which UI choice a stored policy came from.
+ *
+ * A stored policy carries a scope and a selector, not a choice, so the editor
+ * infers one when it opens. Deliberately biased towards `advanced`: showing an
+ * operator MORE of their policy than they need is a smaller harm than showing
+ * them a simple control that silently discards a clause they wrote.
+ */
+export function choiceOfPolicy(policy: {
+  scope?: UpdateScope;
+  selector?: UpdateSelector;
+}): ScopeChoice {
+  if (policy.scope === "allEligible") return "allEligible";
+
+  const selector = policy.selector ?? {};
+  const hasLabels = Object.keys(selector.labels ?? {}).length > 0;
+  const hasImages = (selector.images ?? []).length > 0;
+  const hasInclude = (selector.include ?? []).length > 0;
+
+  // More than one kind of clause, or any labels, is Advanced: no simple
+  // control can round-trip it.
+  if (hasLabels) return "advanced";
+  if (hasImages && hasInclude) return "advanced";
+  if (hasImages) return "images";
+  return "containers";
+}
+
+/**
  * Which containers a policy governs.
  *
- * Exclusion is checked FIRST and cannot be overridden. An empty selector
- * governs NOTHING, which the editor states rather than leaving to be
- * discovered.
+ * Exclusion is checked FIRST and cannot be overridden — in every scope. An
+ * empty selector governs NOTHING under `selector`, which the editor states
+ * rather than leaving to be discovered; under `allEligible` an inclusion clause
+ * is refused, because the scope already said what the policy reaches.
  */
 export interface UpdateSelector {
   labels?: Record<string, string>;
@@ -259,6 +352,8 @@ export interface UpdatePolicy {
   description?: string;
   enabled: boolean;
   priority: number;
+  /** Absent on a policy stored before the field existed; treat as `selector`. */
+  scope?: UpdateScope;
   selector: UpdateSelector;
   strategy: UpdateStrategy;
   minimumRecommendation: Recommendation;
@@ -307,6 +402,7 @@ export interface UpdatePolicyRequest {
   description?: string;
   enabled?: boolean;
   priority?: number;
+  scope?: UpdateScope;
   selector?: UpdateSelector;
   strategy?: UpdateStrategy;
   minimumRecommendation?: Recommendation;

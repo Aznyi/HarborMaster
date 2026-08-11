@@ -121,8 +121,8 @@ func (s *UpdatePolicyService) Create(
 	}
 
 	s.recordAudit(ctx, domain.AuditUpdatePolicyCreated, domain.AuditSucceeded,
-		created, actor, "created an update policy in "+string(created.Mode)+
-			" mode with a "+string(created.Strategy)+" ceiling")
+		created, actor, "created an update policy covering "+created.Scope.Describe()+
+			" in "+string(created.Mode)+" mode with a "+string(created.Strategy)+" ceiling")
 
 	return UpdatePolicyResult{Policy: created, Warnings: created.Warnings()}, nil
 }
@@ -226,6 +226,7 @@ func (s *UpdatePolicyService) Preview(
 	ctx context.Context,
 	policy domain.UpdatePolicy,
 	targets []store.AutomationTarget,
+	self domain.SelfIdentity,
 ) ([]domain.SelectionTarget, error) {
 	policy.Normalise()
 	// A preview does not need a name or an id, but it must not be a way to run
@@ -249,7 +250,7 @@ func (s *UpdatePolicyService) Preview(
 
 	matched := make([]domain.SelectionTarget, 0, 16)
 	for _, target := range targets {
-		if policy.Governs(target.Selection) {
+		if policy.Governs(target.Selection, self) {
 			matched = append(matched, target.Selection)
 		}
 	}
@@ -271,6 +272,9 @@ func applyUpdatePolicyChange(policy domain.UpdatePolicy, change store.UpdatePoli
 	}
 	if change.Priority != nil {
 		policy.Priority = *change.Priority
+	}
+	if change.Scope != nil {
+		policy.Scope = *change.Scope
 	}
 	if change.Selector != nil {
 		policy.Selector = *change.Selector
@@ -312,6 +316,10 @@ func normalisedChange(change store.UpdatePolicyChange, normalised domain.UpdateP
 		description := normalised.Description
 		change.Description = &description
 	}
+	if change.Scope != nil {
+		scope := normalised.Scope
+		change.Scope = &scope
+	}
 	if change.Selector != nil {
 		selector := normalised.Selector
 		change.Selector = &selector
@@ -350,7 +358,13 @@ func normalisedChange(change store.UpdatePolicyChange, normalised domain.UpdateP
 // echoes free text: a description an administrator typed does not belong in the
 // audit log's reason column, where it would be rendered in a security page.
 func describePolicyChange(before, after domain.UpdatePolicy) string {
-	changes := make([]string, 0, 4)
+	changes := make([]string, 0, 5)
+	// Scope first. It is the change that alters how many containers every other
+	// setting on the policy applies to, and an audit reader scanning a list of
+	// edits should meet it before the ceiling or the mode.
+	if before.Scope != after.Scope {
+		changes = append(changes, "scope "+string(before.Scope)+" to "+string(after.Scope))
+	}
 	if before.Mode != after.Mode {
 		changes = append(changes, "mode "+string(before.Mode)+" to "+string(after.Mode))
 	}

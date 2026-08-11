@@ -175,15 +175,14 @@ func DecideAutomation(input AutomationInput) AutomationOutcome {
 	}
 
 	// 3. Nothing governs it.
-	policy, governed := domain.SelectUpdatePolicy(input.Policies, input.Target)
+	//
+	// The identity is passed to the selection, not just consulted in step 0
+	// above. Step 0 is a refusal of a container a policy already selected; this
+	// is the broad scope declining to select it at all. Both hold, and neither
+	// depends on the other having run.
+	policy, governed := domain.SelectUpdatePolicy(input.Policies, input.Target, input.Self)
 	if !governed {
-		if len(input.Policies) == 0 {
-			decision.Reason = domain.ReasonNoPolicy
-			decision.Detail = "no update policy is defined"
-		} else {
-			decision.Reason = domain.ReasonNotSelected
-			decision.Detail = "no update policy's selector matches this container"
-		}
+		decision.Reason, decision.Detail = notGovernedReason(input)
 		return AutomationOutcome{Decision: decision}
 	}
 
@@ -321,6 +320,41 @@ func DecideAutomation(input AutomationInput) AutomationOutcome {
 
 	outcome.Decision = decision
 	return outcome
+}
+
+// notGovernedReason explains why no policy took this container.
+//
+// # Why a broad policy's refusal gets its own answer
+//
+// "No policy's selector matches this container" is the right sentence when
+// every policy names what it governs. It is the WRONG sentence once one of them
+// says "all eligible containers": an operator reading it would go and edit a
+// selector that is not the reason, on a policy that has none.
+//
+// So when a broad policy exists and declined this container, the decision
+// carries the fact that decided it -- and it is HarborMaster's own sentence,
+// from BroadlySelectable, not a rephrasing invented here.
+//
+// The narrowest true answer wins. A container that a broad policy declined AND
+// that no selector names is reported as the former, because that is the one an
+// operator can act on.
+func notGovernedReason(input AutomationInput) (domain.AutomationReason, string) {
+	if len(input.Policies) == 0 {
+		return domain.ReasonNoPolicy, "no update policy is defined"
+	}
+	for _, policy := range input.Policies {
+		if !policy.Scope.Broad() || !policy.Enabled || policy.Archived {
+			continue
+		}
+		if policy.Selector.Excludes(input.Target.Name) {
+			return domain.ReasonNotEligible,
+				"the policy " + policy.Name + " covers all eligible containers and excludes this one"
+		}
+		if selectable, why := input.Target.BroadlySelectable(input.Self); !selectable {
+			return domain.ReasonNotEligible, why
+		}
+	}
+	return domain.ReasonNotSelected, "no update policy's selector matches this container"
 }
 
 // recommendationSatisfies reports whether a plan's verdict meets the policy's
