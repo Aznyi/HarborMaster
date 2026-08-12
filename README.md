@@ -241,34 +241,76 @@ choosing it. See [Container image](#container-image) for the full tag list.
 
 ### 3. Start it
 
+**Substitute the number from step 1 literally.** Write `--group-add 998`, not
+`--group-add "$DOCKER_GID"` — see the warning below the command.
+
 ```sh
 docker run -d \
   --name harbormaster \
   --restart unless-stopped \
   --user 65532:65532 \
-  --group-add "$DOCKER_GID" \
+  --group-add <gid> \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
+  --memory 512m \
+  --pids-limit 256 \
+  --cpus 1.5 \
   -p 127.0.0.1:8080:8080 \
+  -l io.harbormaster.self=true \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v harbormaster-data:/var/lib/harbormaster \
   ghcr.io/aznyi/harbormaster:0.9.0-beta.1
 ```
+
+> **Why the number and not a variable.** `--group-add "$DOCKER_GID"` reads well
+> and fails badly. If the variable is unset — a new shell, a fresh SSH session,
+> a fragment copied without step 1 — **Docker accepts the empty argument without
+> an error**, and you get a HarborMaster that starts, passes its health check,
+> serves the interface, and can see nothing at all. Nothing on the page says
+> why; the only evidence is a `permission denied` line in the log.
+
+Confirm the group actually landed, then confirm the socket is reachable:
+
+```sh
+docker inspect harbormaster -f 'groups={{.HostConfig.GroupAdd}}'   # expect [<gid>]
+docker logs harbormaster 2>&1 | grep -E "docker engine (reachable|unreachable)"
+```
+
+`docker engine reachable apiVersion=…` is the line that means the install
+worked. `groups=[]` means the flag did not take.
 
 What each hardening flag buys you:
 
 | Flag | Effect |
 | --- | --- |
 | `--user 65532:65532` | Runs as the image's non-root user. Also the default; stated explicitly so it survives a base-image change. |
-| `--group-add "$DOCKER_GID"` | The only privilege granted: permission to read the Docker socket. |
+| `--group-add <gid>` | The only privilege granted: permission to read the Docker socket. |
 | `--read-only` | The root filesystem cannot be written, so nothing can drop a binary into the container. |
 | `--tmpfs /tmp:...,size=16m` | The one writable scratch area, capped, `noexec` and `nosuid` so nothing placed there can run. |
 | `--cap-drop ALL` | Removes every Linux capability. HarborMaster needs none. |
 | `--security-opt no-new-privileges:true` | Blocks privilege escalation through setuid binaries. |
 | `-p 127.0.0.1:8080:8080` | Publishes 8080 on loopback only. `-p 8080:8080` would publish on **every** interface — do not use it without TLS in front. |
+| `-l io.harbormaster.self=true` | Tells HarborMaster which container is its own, so it refuses to update itself. One of four signals; the only one you control. |
 | `-v harbormaster-data:/var/lib/harbormaster` | Keeps the SQLite database outside the container, so upgrades preserve history. |
+| `--memory`, `--pids-limit`, `--cpus` | Ceilings that turn a runaway allocation from a host problem into a container problem. |
+
+**If you replace the named volume with a host path**, the directory must be
+owned by UID 65532 — the container is unprivileged and cannot create the
+database in a directory owned by root:
+
+```sh
+mkdir -p /srv/harbormaster
+chown 65532:65532 /srv/harbormaster
+ls -ldn /srv/harbormaster        # expect: ... 65532 65532 ...
+```
+
+Without it HarborMaster restart-loops on `unable to open database file (14)`.
+And if `ls -ldn` still does not show `65532 65532` after the `chown`, the
+filesystem is not carrying Unix ownership — fuse mounts such as mergerfs, shfs,
+and SMB commonly ignore it. Use the named volume there; `harbormaster backup`
+is the supported way to get a copy of the database out.
 
 ### 4. Operate it
 

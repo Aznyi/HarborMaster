@@ -52,6 +52,15 @@ coverage.txt
 /docs/tmp/
 /docs/drafts/
 
+# GitHub Wiki staging.
+#
+# The wiki lives in its own repository (HarborMaster.wiki.git). This directory
+# is where its pages are written and reviewed before being pushed there, and it
+# is deliberately NOT part of this repository: two copies of the same page, one
+# here and one in the wiki, is how they start disagreeing -- and the one people
+# read is the wiki.
+/docs/wiki/
+
 # Editors and OS
 .vscode/
 .idea/

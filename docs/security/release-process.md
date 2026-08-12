@@ -79,11 +79,48 @@ notes with a severity and a tracking issue, and the decision is recorded.
 3. **Update the threat model** if a trust boundary moved.
 4. **Draft release notes** including a Security section: fixes, advisories,
    and any accepted risk.
-5. **Publish a GitHub release** with a semver tag.
-6. `container.yml` then builds multi-arch, pushes to GHCR, and attaches an SBOM,
+5. **Commit everything the tag must carry, and confirm the docs match what will
+   exist.** See [Documentation is part of the artifact](#documentation-is-part-of-the-artifact).
+6. **Publish a GitHub release** with a semver tag, and **tick "Set as a
+   pre-release" for anything that is not stable**. That checkbox is what routes
+   the image tags; see [Tagging policy](#tagging-policy).
+7. `container.yml` then builds multi-arch, pushes to GHCR, and attaches an SBOM,
    in-toto provenance, and a keyless attestation.
-7. **Verify the published artifact yourself** before announcing it, using the
+8. **Verify the published artifact yourself** before announcing it, using the
    commands in §4. A release nobody verified is a release nobody can trust.
+
+### Documentation is part of the artifact
+
+Two failure modes, both of which produce a release that reads as finished and is
+not. Neither is caught by any workflow, because both are about the gap between
+what the documents claim and what the registry holds.
+
+**Do not document a tag before it exists.** Version numbers land in the README,
+the compose default, and the wiki while a release is still being prepared, and
+until the release is published there is no image behind any of them. An operator
+following those instructions gets:
+
+```
+docker: Error response from daemon: manifest unknown.
+```
+
+— which reads as a broken registry rather than as a release that has not
+happened. Either publish before the documentation references the version, or
+say plainly in the text that the tag is not yet available. `edge` is the tag
+that always exists between releases.
+
+**Everything the release body links to must be in the commit the tag captures.**
+A GitHub release is created from a target branch at publication time, and links
+into `blob/<tag>/…` resolve against that commit alone. Release notes written but
+not committed, or committed after publishing, give a release whose own links
+404 or serve a stale revision. Commit first, push, then publish.
+
+Check both before ticking the box:
+
+```sh
+git status --short                                   # nothing uncommitted that the tag needs
+git ls-tree -r --name-only HEAD | grep release-notes # the notes are actually in the commit
+```
 
 ### Tagging policy
 
@@ -91,11 +128,48 @@ notes with a severity and a tracking issue, and the decision is recorded.
 | --- | --- |
 | Pull request | none — build only |
 | Push to `main` | `edge`, `sha-<full-sha>` |
-| Release published | `X.Y.Z`, `X.Y`, `X`, `latest` |
+| Release published, **stable** | `X.Y.Z`, `X.Y`, `X`, `latest`, `sha-<full-sha>` |
+| Release published, **prerelease** | `X.Y.Z-<pre>`, `beta`, `sha-<full-sha>` |
 | Manual dispatch | `dispatch-<sha>`, only if explicitly requested |
 
-`latest` moves on releases and nowhere else, so a push to `main` can never
-replace the tag production is pulling.
+A prerelease writes **no** `latest`, **no** `X.Y`, and **no** `X`. Publishing
+`v0.9.0-beta.1` produces exactly `0.9.0-beta.1`, `beta`, and
+`sha-<full-sha>` — never `latest`, `0.9`, or `0`.
+
+`latest` moves on STABLE releases and nowhere else, so neither a push to `main`
+nor a beta can replace the tag production is pulling.
+
+#### The release must be marked as a prerelease
+
+**This is the operator action the routing depends on.** The rules in
+`container.yml` branch on `github.event.release.prerelease`, which is the
+checkbox on the GitHub release form. A beta published with that box unticked is
+treated as a stable release: it would take `latest`, `X.Y`, and `X`, and every
+deployment following the documented Compose file would be upgraded onto a
+prerelease without asking.
+
+Nothing downstream can correct that afterwards — the tags are already written —
+so the check belongs in the publication steps, not in review.
+
+#### Why the version tags collapse
+
+Two independent mechanisms, both in `container.yml`:
+
+1. **`latest` and `beta` are explicit.** `flavor: latest=false` disables
+   metadata-action's automatic `latest` entirely, so the only things that can
+   write it are the two `type=raw` rules — one gated on
+   `github.event.release.prerelease == false`, the other on `== true`.
+2. **`X.Y` and `X` collapse on their own.** For a semver tag with a prerelease
+   component, metadata-action recompiles every non-`{{raw}}` pattern as
+   `{{version}}`. So all three `type=semver` lines — `{{version}}`,
+   `{{major}}.{{minor}}`, and `{{major}}` — each yield the full prerelease
+   version and deduplicate to one tag. `0.9` and `0` are not suppressed by a
+   condition in this repository; they are never generated.
+
+The second mechanism is behaviour of a pinned third-party action rather than of
+this repository, so it is worth re-reading at
+`docker/metadata-action@<pinned-sha>` `src/meta.ts` whenever that pin moves.
+The first mechanism holds regardless.
 
 ---
 
@@ -117,17 +191,24 @@ replace the tag production is pulling.
 
 ## 4. Verifying a release
 
+Verify the tag you actually published. `latest` exists only for stable
+releases, so for a prerelease use the exact version — `0.9.0-beta.1` — or the
+immutable `sha-<full-sha>`.
+
 ```sh
+# The tag under verification. For a stable release this may be `latest`.
+TAG=0.9.0-beta.1
+
 # Provenance and signature — proves this image was built by this repository's
 # workflow from this commit, and not by anyone else.
-gh attestation verify oci://ghcr.io/aznyi/harbormaster:latest -R Aznyi/HarborMaster
+gh attestation verify "oci://ghcr.io/aznyi/harbormaster:$TAG" -R Aznyi/HarborMaster
 
 # SBOM
-docker buildx imagetools inspect ghcr.io/aznyi/harbormaster:latest \
+docker buildx imagetools inspect "ghcr.io/aznyi/harbormaster:$TAG" \
   --format '{{ json .SBOM }}'
 
 # Pin what you deploy to a digest, not a tag.
-docker buildx imagetools inspect ghcr.io/aznyi/harbormaster:latest \
+docker buildx imagetools inspect "ghcr.io/aznyi/harbormaster:$TAG" \
   --format '{{ .Manifest.Digest }}'
 ```
 
@@ -181,7 +262,9 @@ here so their absence is a visible decision rather than an oversight.
 1. **Do not delete the tag.** Anyone who pulled it has it; deletion only removes
    the evidence.
 2. Publish a fixed patch release.
-3. Move `latest` to the fixed release.
+3. Move the channel tag to the fixed release — `latest` for a stable release,
+   `beta` for a prerelease. Publishing the fix with the correct prerelease
+   setting does this; there is no manual retag.
 4. If the bad artifact is dangerous, mark the GHCR version deprecated and say so
    loudly in the release notes and the advisory.
 5. Record what happened and what gate should have caught it. If no gate would

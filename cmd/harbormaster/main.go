@@ -223,9 +223,7 @@ func run() error {
 		slog.String("goVersion", build.GoVersion),
 		slog.String("platform", build.Platform))
 
-	if !cfg.IsLoopback() {
-		logger.Warn("http listener is not bound to loopback; HarborMaster fronts a privileged Docker socket, so ensure the port is not reachable from an untrusted network")
-	}
+	announceListenerExposure(logger, cfg, runningInContainer())
 
 	// SIGINT/SIGTERM cancel this context, which unwinds the whole process.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1052,6 +1050,74 @@ func announceBootstrap(ctx context.Context, logger *slog.Logger, auth *service.A
 		"   HarborMaster issues a new token and invalidates this one.\n"+
 		"  ==========================================================\n\n",
 		expiresAt.Format(time.RFC3339), token)
+}
+
+// containerMarkers are files a container runtime leaves in a container's own
+// filesystem, and that nothing outside one creates.
+//
+// Docker writes /.dockerenv; Podman and CRI-O write /run/.containerenv. Both
+// are presence checks rather than content parsing: there is nothing to bound,
+// nothing to misread, and no path that any caller supplies.
+var containerMarkers = []string{"/.dockerenv", "/run/.containerenv"}
+
+// runningInContainer reports whether this process is inside a container, as far
+// as that can be established from within its own namespace.
+//
+// It answers false on any doubt, and the two failure directions are not worth
+// the same. A false negative produces the blunt warning below, which is the
+// behaviour this replaced and is safe. A false positive would soften a warning
+// that was real, so the probes are limited to markers nothing outside a
+// container creates -- no cgroup parsing, no hostname heuristics.
+func runningInContainer() bool {
+	for _, marker := range containerMarkers {
+		// A fixed path from a package-level list. There is no caller-supplied
+		// path here and nowhere to introduce one.
+		if _, err := os.Stat(marker); err == nil { //nolint:gosec // fixed paths
+			return true
+		}
+	}
+	return false
+}
+
+// announceListenerExposure states what HarborMaster can establish about the
+// reachability of its own HTTP port, and nothing beyond it.
+//
+// # Why a container is a different statement
+//
+// The listen address inside a container does not determine exposure. The image
+// sets HARBORMASTER_HTTP_ADDR=0.0.0.0:8080 because it has to: a process bound
+// to 127.0.0.1 inside a container is unreachable through a published port, so
+// binding loopback there would mean nothing could reach it at all. What decides
+// exposure is the publish specification on the HOST -- `-p 127.0.0.1:8080:8080`
+// against `-p 8080:8080` -- or the network the container is attached to, and
+// neither is visible from inside the namespace.
+//
+// Warning unconditionally therefore reported a finding that had not been made,
+// on every containerised deployment including the supported Compose one, which
+// sets that address explicitly. A warning that fires on every correct start is
+// one operators learn to scroll past -- the same reasoning that keeps the
+// bootstrap announcement at INFO.
+//
+// It is also the general rule stated in the architecture notes: a check that
+// could not be PERFORMED establishes nothing, and nothing must not be reported
+// as a failure. So the containerised case says which fact is missing and where
+// the operator can read it, and the uncontainerised case -- where the bind
+// address does settle the question -- still warns.
+// The containerised fact is a parameter rather than a call inside, so the
+// decision can be tested on every host without one of these tests depending on
+// whether the machine running it happens to be in a container.
+func announceListenerExposure(logger *slog.Logger, cfg config.Config, containerised bool) {
+	if cfg.IsLoopback() {
+		return
+	}
+	if containerised {
+		logger.Info("http listener is bound to every interface inside this container, which is what makes a published port reachable at all; whether that port is reachable from an untrusted network is decided on the host and cannot be established from here",
+			slog.String("addr", cfg.Server.Addr),
+			slog.String("nextStep", "check the host's publish specification with `docker port`, and keep it on loopback or behind a TLS-terminating reverse proxy"))
+		return
+	}
+	logger.Warn("http listener is not bound to loopback; HarborMaster fronts a privileged Docker socket, so ensure the port is not reachable from an untrusted network",
+		slog.String("addr", cfg.Server.Addr))
 }
 
 // openStore opens the database with the configured reliability settings and

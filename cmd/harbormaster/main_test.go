@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Aznyi/HarborMaster/internal/config"
 	"github.com/Aznyi/HarborMaster/internal/diagnostics"
 )
 
@@ -131,4 +135,119 @@ func TestDiagnoseAndBackupWorkWithoutDocker(t *testing.T) {
 	if !strings.Contains(diagnoseOut.String(), "HarborMaster diagnosis") {
 		t.Errorf("diagnose printed no report: %s", diagnoseOut.String())
 	}
+}
+
+// ------------------------------------------------- the listener exposure --
+
+// captureRecords runs fn against a JSON logger and returns one entry per line.
+func captureRecords(t *testing.T, fn func(*slog.Logger)) []map[string]any {
+	t.Helper()
+
+	var buf bytes.Buffer
+	fn(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// A loopback bind settles the question, so there is nothing to say about it in
+// either environment.
+func TestListenerExposureSaysNothingWhenBoundToLoopback(t *testing.T) {
+	for _, containerised := range []bool{true, false} {
+		cfg := config.Config{Server: config.Server{Addr: "127.0.0.1:8080"}}
+		records := captureRecords(t, func(logger *slog.Logger) {
+			announceListenerExposure(logger, cfg, containerised)
+		})
+		if len(records) != 0 {
+			t.Errorf("containerised=%v: expected no output, got %v", containerised, records)
+		}
+	}
+}
+
+// The regression this exists for. The image must bind 0.0.0.0 for a published
+// port to be reachable at all, so warning on that address reported a finding
+// that had not been made -- on EVERY containerised deployment, including the
+// supported Compose one. A warning that always fires is one nobody reads.
+func TestListenerExposureDoesNotWarnInAContainer(t *testing.T) {
+	cfg := config.Config{Server: config.Server{Addr: "0.0.0.0:8080"}}
+	records := captureRecords(t, func(logger *slog.Logger) {
+		announceListenerExposure(logger, cfg, true)
+	})
+
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one record, got %d: %v", len(records), records)
+	}
+	if level, _ := records[0]["level"].(string); level != "INFO" {
+		t.Errorf("level = %q, want INFO: a check that could not be performed is not a finding", level)
+	}
+
+	msg, _ := records[0]["msg"].(string)
+	if !strings.Contains(msg, "cannot be established from here") {
+		t.Errorf("the message must say which fact is missing, got: %q", msg)
+	}
+	// It must not assert the thing it has not checked.
+	if strings.Contains(msg, "ensure the port is not reachable") {
+		t.Errorf("the containerised message must not repeat the unconditional warning: %q", msg)
+	}
+	if _, ok := records[0]["nextStep"]; !ok {
+		t.Error("the message must name where the operator can read the missing fact")
+	}
+}
+
+// Outside a container the bind address DOES settle the question, so the warning
+// has to survive. Softening it everywhere would have traded one wrong answer
+// for another.
+func TestListenerExposureStillWarnsOutsideAContainer(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:8080", ":8080", "192.168.1.5:8080", "[::]:8080"} {
+		cfg := config.Config{Server: config.Server{Addr: addr}}
+		records := captureRecords(t, func(logger *slog.Logger) {
+			announceListenerExposure(logger, cfg, false)
+		})
+
+		if len(records) != 1 {
+			t.Fatalf("addr=%s: expected exactly one record, got %d", addr, len(records))
+		}
+		if level, _ := records[0]["level"].(string); level != "WARN" {
+			t.Errorf("addr=%s: level = %q, want WARN", addr, level)
+		}
+		msg, _ := records[0]["msg"].(string)
+		if !strings.Contains(msg, "not bound to loopback") {
+			t.Errorf("addr=%s: unexpected message %q", addr, msg)
+		}
+	}
+}
+
+// The probe reads fixed absolute paths and nothing else. A relative path, or
+// one assembled from anything a caller controls, would turn a presence check
+// into a way to influence what HarborMaster concludes about its own exposure.
+func TestContainerMarkersAreFixedAbsolutePaths(t *testing.T) {
+	if len(containerMarkers) == 0 {
+		t.Fatal("no container markers are probed")
+	}
+	for _, marker := range containerMarkers {
+		if !strings.HasPrefix(marker, "/") {
+			t.Errorf("marker %q is not absolute", marker)
+		}
+		// `path`, not `filepath`: these are Linux paths read from /proc-adjacent
+		// locations at runtime, never host paths on the machine running the test.
+		if marker != path.Clean(marker) {
+			t.Errorf("marker %q is not a cleaned path", marker)
+		}
+	}
+}
+
+// It must answer rather than panic wherever the suite runs, and it must not
+// depend on anything being present.
+func TestRunningInContainerAnswersOnAnyHost(t *testing.T) {
+	_ = runningInContainer()
 }
