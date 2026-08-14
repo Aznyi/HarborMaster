@@ -22,6 +22,17 @@ on:
 permissions:
   contents: read
 
+# The same Go line ci.yml and security.yml build and scan with.
+#
+# Stated explicitly rather than resolved from go.mod's `go` directive, which
+# selects the LANGUAGE version (1.25) and would leave CodeQL analysing an older
+# line than the release is compiled with. go.mod now also carries a `toolchain`
+# floor that would resolve correctly on its own; naming the version here as well
+# means the three workflows can be compared at a glance, and a future change to
+# either file cannot silently reintroduce the skew.
+env:
+  GO_VERSION: "1.26"
+
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -57,7 +68,7 @@ jobs:
         if: matrix.language == 'go'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Initialize CodeQL

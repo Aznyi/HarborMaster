@@ -154,7 +154,7 @@ func TestDiffDetectsChangesPerGroup(t *testing.T) {
 func TestSensitiveEntriesReportChangeWithoutValues(t *testing.T) {
 	before := fixtureDetail()
 	after := fixtureDetail()
-	after.Environment[2].RawValue = "a-brand-new-secret-value"
+	setFixtureSecret(after.Environment, "DB_PASSWORD", "a-brand-new-secret-value")
 
 	diff := mustDiff(t, diffInput(t, before), diffInput(t, after), DiffOptions{})
 
@@ -429,7 +429,7 @@ func TestRemovedSensitiveEntryWithholdsItsValue(t *testing.T) {
 func TestSensitiveLogOptionsAreNotDiffed(t *testing.T) {
 	before := fixtureDetail()
 	after := fixtureDetail()
-	after.Logging.Options[1].RawValue = "tok_something-else"
+	setFixtureSecret(after.Logging.Options, "splunk-token", "tok_something-else")
 
 	diff := mustDiff(t, diffInput(t, before), diffInput(t, after), DiffOptions{})
 	blob, err := json.Marshal(diff)

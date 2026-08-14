@@ -432,7 +432,254 @@ func TestAFailingStoreDoesNotStopTheEngine(t *testing.T) {
 	}
 }
 
+// SEVERAL destinations unresponsive at once still leaves the healthy one served.
+//
+// # Why one slow destination was not enough to cover this
+//
+// TestOneUnresponsiveDestinationDoesNotStarveTheOthers blocks a single endpoint
+// on a four-worker engine, so there are always workers left over and the fast
+// destination is served immediately. The interesting case is when the blocked
+// destinations SATURATE the pool -- three broken webhooks on a three-worker
+// engine, or with the shipped defaults two broken ones at MaxPerDestination 2.
+//
+// # What was measured, because the distinction matters
+//
+// In that state every worker is inside a send that will not answer, so the
+// healthy destination waits. It is a bounded DELAY, not starvation: the delay is
+// the delivery timeout, because that is what ends the blocked attempt and frees
+// the worker, and nothing is lost in the meantime -- the queue holds it. Timing
+// the first delivery to the healthy destination against three blocked ones gave
+// roughly DeliveryTimeout + deliverySlotWait at each setting tried (~1.0s at a
+// 500ms timeout, ~2.5s at 2s, still nothing at 30s after twenty seconds).
+//
+// So this asserts what is actually guaranteed: the healthy destination is served
+// within a bound tied to the delivery timeout, and keeps being served. A
+// regression that reordered fan-out, lost the deferral, or let a blocked
+// destination hold more than its share would break it. The coupling to
+// DeliveryTimeout is a real operational property and is recorded as a limitation
+// rather than asserted away here -- narrowing it means changing how a
+// notification fans out across destinations, which is out of scope for a
+// stabilisation pass.
+func TestSeveralUnresponsiveDestinationsStillLeaveTheHealthyOneServed(t *testing.T) {
+	t.Parallel()
+
+	slowIDs := []string{
+		"ndst_" + repeat("1", 20),
+		"ndst_" + repeat("2", 20),
+		"ndst_" + repeat("3", 20),
+	}
+	fastID := "ndst_" + repeat("f", 20)
+
+	blocked := map[string]bool{}
+	fake := newFakeNotificationStore()
+	for i, id := range slowIDs {
+		blocked[id] = true
+		fake.destinations = append(fake.destinations, testDestination(id, "slow"+string(rune('a'+i))))
+	}
+	fake.destinations = append(fake.destinations, testDestination(fastID, "fast"))
+	fake.rules = []domain.NotificationRule{
+		testRule("nrul_"+repeat("a", 20), append(append([]string{}, slowIDs...), fastID)...),
+	}
+
+	block := make(chan struct{})
+	sender := &gaugedSender{
+		block: block,
+		blockFor: func(request notify.SendRequest) bool {
+			return blocked[request.Destination.DestinationID]
+		},
+	}
+
+	cfg := testNotificationConfig()
+	// Workers equals the number of blocked destinations: the exact shape where a
+	// worker that parks on a blocked endpoint leaves nobody to serve the rest.
+	cfg.Workers = 3
+	cfg.MaxPerDestination = 1
+	cfg.QueueSize = 64
+	// Short, so the bound this asserts is the delivery timeout rather than the
+	// test's patience. The shipped default is 15s and the relationship is the
+	// same; see the measurements above.
+	cfg.DeliveryTimeout = 500 * time.Millisecond
+	service := newTestNotificationService(fake, sender, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		service.Run(ctx)
+	}()
+
+	for i := 0; i < 40; i++ {
+		service.Raise(testNotification())
+	}
+
+	// Generous against a loaded CI box, and still an order of magnitude inside
+	// what permanent starvation would produce.
+	deadline := time.After(15 * time.Second)
+	for sender.countFor(fastID) < 5 {
+		select {
+		case <-deadline:
+			t.Fatalf("the working destination received %d messages in fifteen seconds "+
+				"while %d others were blocked, at a %v delivery timeout; the healthy "+
+				"endpoint is not being served at all",
+				sender.countFor(fastID), len(slowIDs), cfg.DeliveryTimeout)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// And no blocked destination ever exceeded its share of workers AT ONCE. The
+	// measurement has to be the in-flight peak, not the number of attempts: a
+	// blocked endpoint is attempted many times over the run, and counting those
+	// would say nothing about how many workers it held.
+	for _, id := range slowIDs {
+		if got := sender.peakFor(id); got > cfg.MaxPerDestination {
+			t.Fatalf("blocked destination %s held %d workers at once, want at most "+
+				"%d; one broken endpoint can take the pool", id[:9], got,
+				cfg.MaxPerDestination)
+		}
+	}
+
+	close(block)
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the blocks were released")
+	}
+}
+
+// Work still pending when the process stops is picked up by the next one.
+//
+// The failure this catches: holding the retry backlog only in memory. A
+// deployment restarts -- an upgrade, a host reboot, a crash -- and every
+// notification that was mid-retry is silently lost, so the operator is never
+// told about the thing that was being reported. The backlog has to live in the
+// store, and the new process's retry sweep has to find it with no in-memory
+// state carried across.
+func TestPendingRetriesSurviveARestart(t *testing.T) {
+	t.Parallel()
+
+	destinationID := "ndst_" + repeat("a", 20)
+	fake := newFakeNotificationStore()
+	fake.destinations = []domain.NotificationDestination{testDestination(destinationID, "chat")}
+	fake.rules = []domain.NotificationRule{testRule("nrul_"+repeat("a", 20), destinationID)}
+
+	start := time.Unix(1700000000, 0).UTC()
+
+	// The first process: the destination is failing, so the delivery is left
+	// scheduled for a retry it will not live to make.
+	failing := &fakeSender{result: notify.Result{Retryable: true, StatusCode: 503, Detail: "unavailable"}}
+	cfg := testNotificationConfig()
+	cfg.RetryInterval = time.Hour // never sweeps within this process
+	first := NewNotificationService(NotificationOptions{
+		Store: fake, Sender: failing, Config: cfg, Logger: quietLogger(),
+		Now: func() time.Time { return start },
+	})
+	first.route(context.Background(), queued{notification: testNotification()})
+
+	pending := retryingDeliveries(fake)
+	if len(pending) != 1 {
+		t.Fatalf("%d deliveries left retrying after the first attempt failed, want 1; "+
+			"there is nothing for a restart to recover", len(pending))
+	}
+	if pending[0].NextAttemptAt == nil {
+		t.Fatal("a retrying delivery carried no next-attempt time; the new process " +
+			"has no way to know when it is due")
+	}
+	// The first process ends here. Nothing is carried over but the store.
+
+	// The second process: a fresh service, a working destination, and a clock
+	// past the scheduled retry.
+	working := &fakeSender{result: notify.Result{OK: true}}
+	second := NewNotificationService(NotificationOptions{
+		Store: fake, Sender: working, Config: cfg, Logger: quietLogger(),
+		Now: func() time.Time { return start.Add(2 * time.Hour) },
+	})
+	second.sweepRetries(context.Background())
+
+	if got := len(working.requests()); got != 1 {
+		t.Fatalf("the restarted engine made %d attempts at the pending retry, want 1; "+
+			"work in flight across a restart was dropped", got)
+	}
+	if left := retryingDeliveries(fake); len(left) != 0 {
+		t.Fatalf("%d deliveries still retrying after the restarted engine succeeded, "+
+			"want 0", len(left))
+	}
+}
+
+// retryingDeliveries reports the deliveries still awaiting another attempt.
+func retryingDeliveries(fake *fakeNotificationStore) []domain.NotificationDelivery {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	var out []domain.NotificationDelivery
+	for _, delivery := range fake.deliveries {
+		if delivery.Result == domain.DeliveryRetrying {
+			out = append(out, delivery)
+		}
+	}
+	return out
+}
+
 // ------------------------------------------------------------------ doubles --
+
+// gaugedSender is blockingSender that also records how many deliveries to a
+// destination were IN FLIGHT at once.
+//
+// The distinction its peak measures is the whole point of MaxPerDestination:
+// a blocked endpoint is attempted repeatedly across a run, so a cumulative
+// count says nothing about how much of the worker pool it holds.
+type gaugedSender struct {
+	mu       sync.Mutex
+	counts   map[string]int
+	inFlight map[string]int
+	peak     map[string]int
+	block    chan struct{}
+	blockFor func(notify.SendRequest) bool
+}
+
+func (g *gaugedSender) Send(ctx context.Context, request notify.SendRequest) notify.Result {
+	id := request.Destination.DestinationID
+
+	g.mu.Lock()
+	if g.counts == nil {
+		g.counts = map[string]int{}
+		g.inFlight = map[string]int{}
+		g.peak = map[string]int{}
+	}
+	g.counts[id]++
+	g.inFlight[id]++
+	if g.inFlight[id] > g.peak[id] {
+		g.peak[id] = g.inFlight[id]
+	}
+	blocking := g.blockFor != nil && g.blockFor(request)
+	g.mu.Unlock()
+
+	defer func() {
+		g.mu.Lock()
+		g.inFlight[id]--
+		g.mu.Unlock()
+	}()
+
+	if blocking {
+		select {
+		case <-g.block:
+		case <-ctx.Done():
+		}
+	}
+	return notify.Result{OK: true}
+}
+
+func (g *gaugedSender) countFor(destinationID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.counts[destinationID]
+}
+
+func (g *gaugedSender) peakFor(destinationID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.peak[destinationID]
+}
 
 // blockingSender holds some destinations open and answers others immediately.
 type blockingSender struct {

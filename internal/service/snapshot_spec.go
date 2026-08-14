@@ -149,13 +149,24 @@ func buildSpecEnv(vars []domain.EnvVar, hasher *Hasher) []domain.SpecEnvVar {
 			continue
 		}
 
-		// The one place a raw secret is read. It is hashed here and never
-		// referenced again: entry carries the digest, not the value.
-		digest := hasher.Digest(v.RawValue)
-		entry.Length = digest.Length
-		entry.Digest = digest.Digest
-		entry.DigestAlgorithm = digest.Algorithm
-		entry.DigestKeyID = digest.KeyID
+		// The evidence CARRIED on the variable, computed when the value was
+		// read from the daemon.
+		//
+		// It is not recomputed here. Capture reads HarborMaster's own inventory
+		// by design, and the inventory cannot hold a raw value -- EnvVar.RawValue
+		// is `json:"-"` precisely so it cannot -- so hashing RawValue at this
+		// point hashed the empty string and gave every secret on the host one
+		// identical digest. See domain.EnvVar.Digest.
+		//
+		// A variable with no carried evidence keeps an empty digest. That is not
+		// comparable with anything (domain.SecretDigest.Comparable requires a
+		// non-empty algorithm and key id), so a reader reports it as
+		// unverifiable rather than as unchanged.
+		evidence := v.SecretEvidence()
+		entry.Length = evidence.Length
+		entry.Digest = evidence.Digest
+		entry.DigestAlgorithm = evidence.Algorithm
+		entry.DigestKeyID = evidence.KeyID
 		out = append(out, entry)
 	}
 	return out

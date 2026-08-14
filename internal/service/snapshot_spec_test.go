@@ -60,10 +60,7 @@ func fixtureDetail() domain.ContainerDetail {
 		Environment: []domain.EnvVar{
 			{Name: "PATH", Value: "/usr/bin", Sensitivity: domain.SensitivityNormal, RawValue: "/usr/bin"},
 			{Name: "NGINX_PORT", Value: "8080", Sensitivity: domain.SensitivityNormal, RawValue: "8080"},
-			{
-				Name: "DB_PASSWORD", Value: domain.MaskedValue,
-				Sensitivity: domain.SensitivitySensitive, RawValue: specSecretValue,
-			},
+			fixtureSecret("DB_PASSWORD", specSecretValue),
 		},
 		Labels: []domain.Label{
 			{Key: "com.docker.compose.project", Value: "shop", Source: domain.LabelSourceCompose},
@@ -107,10 +104,7 @@ func fixtureDetail() domain.ContainerDetail {
 			Driver: "json-file",
 			Options: []domain.EnvVar{
 				{Name: "max-size", Value: "10m", Sensitivity: domain.SensitivityNormal, RawValue: "10m"},
-				{
-					Name: "splunk-token", Value: domain.MaskedValue,
-					Sensitivity: domain.SensitivitySensitive, RawValue: "tok_" + specSecretValue,
-				},
+				fixtureSecret("splunk-token", "tok_"+specSecretValue),
 			},
 		},
 		Compose:  domain.ComposeMetadata{Managed: true, Project: "shop", Service: "web", ContainerNumber: 1},
@@ -249,7 +243,7 @@ func TestSpecNeverContainsSensitiveValues(t *testing.T) {
 func TestChecksumChangesWhenASecretChanges(t *testing.T) {
 	a := fixtureDetail()
 	b := fixtureDetail()
-	b.Environment[2].RawValue = "a-completely-different-secret"
+	setFixtureSecret(b.Environment, "DB_PASSWORD", "a-completely-different-secret")
 
 	if checksumTestSpec(t, buildTestSpec(t, a)) == checksumTestSpec(t, buildTestSpec(t, b)) {
 		t.Error("changing a secret did not change the checksum")
@@ -265,10 +259,10 @@ func TestChecksumChangesWhenASecretChanges(t *testing.T) {
 // the property under test: the value itself contributes nothing to the bytes.
 func TestSecretValueDoesNotReachDocumentBytes(t *testing.T) {
 	a := fixtureDetail()
-	a.Environment[2].RawValue = "AAAAAAAAAAAAAAAA"
+	setFixtureSecret(a.Environment, "DB_PASSWORD", "AAAAAAAAAAAAAAAA")
 
 	b := fixtureDetail()
-	b.Environment[2].RawValue = "BBBBBBBBBBBBBBBB"
+	setFixtureSecret(b.Environment, "DB_PASSWORD", "BBBBBBBBBBBBBBBB")
 
 	if marshalTestSpec(t, buildTestSpec(t, a)) != marshalTestSpec(t, buildTestSpec(t, b)) {
 		t.Error("two same-length secrets produced different documents; the value is leaking into the bytes")
@@ -288,7 +282,7 @@ func TestSecretValueDoesNotReachDocumentBytes(t *testing.T) {
 // documented as a known limitation rather than hidden.
 func TestSecretLengthIsObservableByDesign(t *testing.T) {
 	detail := fixtureDetail()
-	detail.Environment[2].RawValue = "short"
+	setFixtureSecret(detail.Environment, "DB_PASSWORD", "short")
 
 	spec := buildTestSpec(t, detail)
 	for _, entry := range spec.Environment {

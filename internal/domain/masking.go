@@ -123,6 +123,38 @@ type Masker struct {
 	folded   []string
 	stripped []string
 	mode     MaskMode
+
+	// digester produces the keyed comparison evidence for a sensitive value.
+	//
+	// Optional, and nil in every construction that does not have an
+	// installation key -- configuration parsing, tests of the classification
+	// rules themselves. A nil digester leaves the evidence fields empty, and an
+	// empty algorithm is not Comparable() with anything, so the downstream
+	// answer is "cannot be compared" rather than a token that would match
+	// another unkeyed one.
+	digester EnvDigester
+}
+
+// EnvDigester produces keyed comparison evidence for a sensitive value.
+//
+// A function rather than the key itself, deliberately: the packages that
+// classify environment variables handle raw values in memory but must never
+// hold the installation key, and this hands them the one operation they need
+// without the material behind it.
+type EnvDigester func(value string) SecretDigest
+
+// WithDigester returns a Masker that records comparison evidence.
+//
+// Separate from construction because the Masker is built from configuration,
+// which is parsed before the installation key is loaded. The composition root
+// attaches the digester once both exist.
+func (m *Masker) WithDigester(digester EnvDigester) *Masker {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	clone.digester = digester
+	return &clone
 }
 
 // NewMasker builds a Masker from name fragments. Patterns are upper-cased and
@@ -243,12 +275,30 @@ func (m *Masker) IsSensitive(name string) bool {
 // RawValue always carries the real value; it is never serialised (see EnvVar).
 func (m *Masker) Classify(name, value string) EnvVar {
 	if m.IsSensitive(name) {
-		return EnvVar{
+		sensitive := EnvVar{
 			Name:        name,
 			Value:       MaskedValue,
 			Sensitivity: SensitivitySensitive,
 			RawValue:    value,
 		}
+		// THE DIGEST IS TAKEN HERE, and here is the only place it can be.
+		//
+		// This is the instant a value is both present and known to be
+		// sensitive. A few frames later it crosses the persistence boundary and
+		// RawValue is gone for good, which is exactly what is wanted for the
+		// value and exactly wrong for the evidence about it.
+		//
+		// The masked placeholder is never the input: it is a presentation
+		// string, identical for every secret, and digesting it is precisely the
+		// defect this replaces.
+		if m.digester != nil {
+			evidence := m.digester(value)
+			sensitive.Digest = evidence.Digest
+			sensitive.DigestAlgorithm = evidence.Algorithm
+			sensitive.DigestKeyID = evidence.KeyID
+			sensitive.ValueLength = evidence.Length
+		}
+		return sensitive
 	}
 	return EnvVar{
 		Name:        name,

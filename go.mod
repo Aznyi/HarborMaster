@@ -1,6 +1,27 @@
 module github.com/Aznyi/HarborMaster
 
+// The LANGUAGE version the code is written against. Left at 1.25 deliberately:
+// nothing here needs newer semantics, and raising it would drop support for
+// building on the 1.25 line for no gain.
 go 1.25.0
+
+// The minimum TOOLCHAIN a build may use, which is a security floor rather than
+// a language choice.
+//
+// The two are different questions. `go` above says which semantics the source
+// relies on; this says which compiler is new enough to be safe to ship, because
+// a Go binary carries the standard library it was built with. Building this
+// module with 1.26.5 produced eight stdlib advisories in the released image
+// (CVE-2026-46600 and CVE-2026-39821 at HIGH, plus -56862, -56860, -56859,
+// -56858, -56853 and -33818), all fixed in 1.26.6.
+//
+// It also removes the analysis/build skew: actions/setup-go reads this
+// directive from go.mod, so the CodeQL job that resolves its version from this
+// file now analyses the same Go line the release is compiled with instead of
+// the older one the `go` directive alone selected.
+//
+// Raise this together with GO_IMAGE in the Dockerfile.
+toolchain go1.26.6
 
 require (
 	github.com/containerd/errdefs v1.0.0

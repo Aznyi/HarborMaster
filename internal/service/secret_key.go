@@ -185,6 +185,20 @@ const (
 	PurposeCSRF = "harbormaster.csrf.v1"
 	// PurposeBootstrap digests the one-time bootstrap token.
 	PurposeBootstrap = "harbormaster.bootstrap.v1"
+
+	// PurposeSnapshotValue digests a sensitive configuration value so two
+	// captures can be compared without either storing what was compared.
+	//
+	// Its own keyspace, disjoint from the three above: a digest recorded beside
+	// a container's configuration is far more widely readable than a session
+	// token, and sharing a keyspace would let a value chosen in one context be
+	// presented in another.
+	//
+	// The `.v2` is not decoration. Digests written before this purpose existed
+	// were computed over an already-emptied value and are all identical; the
+	// version is what makes them incomparable to these rather than silently
+	// equal to each other. See domain.DigestHMACSHA256V2.
+	PurposeSnapshotValue = "harbormaster.snapshot.value.v2"
 )
 
 // Valid reports whether the key is usable. A zero SecretKey is not.

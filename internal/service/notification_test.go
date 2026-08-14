@@ -404,7 +404,7 @@ func TestARequeueForABusyDestinationDoesNotResendToTheOthers(t *testing.T) {
 	service := newTestNotificationService(fake, sender, cfg)
 
 	// Hold the slow destination's only slot, so routing must requeue it.
-	if !service.claim("ndst_55555555555555555555") {
+	if !service.claim(context.Background(), "ndst_55555555555555555555") {
 		t.Fatal("could not take the slot the test needs")
 	}
 
@@ -418,8 +418,11 @@ func TestARequeueForABusyDestinationDoesNotResendToTheOthers(t *testing.T) {
 	// And what was put back is TARGETED at the slow destination, carrying its
 	// rule, rather than being an unrouted notification that would go through the
 	// rules -- and back to the fast destination -- all over again.
+	// Read from the DEFERRAL channel, not the fresh queue. A busy-destination
+	// retry is kept off `queue` deliberately, so a blocked endpoint's backlog
+	// cannot displace notifications other destinations are still waiting for.
 	select {
-	case item := <-service.queue:
+	case item := <-service.deferred:
 		if item.destinationID != "ndst_55555555555555555555" {
 			t.Fatalf("requeued destinationId = %q, want ndst_slow; an unrouted requeue "+
 				"would re-deliver to every destination that already took this",
@@ -452,14 +455,17 @@ func TestRequeuingIsBounded(t *testing.T) {
 	service := newTestNotificationService(fake, sender, cfg)
 
 	// Permanently occupied.
-	service.claim("ndst_cccccccccccccccccccc")
+	service.claim(context.Background(), "ndst_cccccccccccccccccccc")
 
 	ctx := context.Background()
 	item := queued{notification: testNotification()}
 	for pass := 0; pass < maxNotificationRequeues+2; pass++ {
 		service.route(ctx, item)
 		select {
-		case next := <-service.queue:
+		case next := <-service.deferred:
+			// The backlog ration is released when an item leaves the channel, the
+			// same as a worker does, so the next pass may defer again.
+			service.releaseDeferral(next.destinationID)
 			item = next
 		default:
 			// Nothing put back: the bound was reached.
@@ -874,30 +880,47 @@ func TestOneDestinationCannotStarveTheOthers(t *testing.T) {
 	service := newTestNotificationService(newFakeNotificationStore(),
 		&fakeSender{result: notify.Result{OK: true}}, cfg)
 
-	first := service.claim("ndst_aaaaaaaaaaaaaaaaaaaa")
-	second := service.claim("ndst_aaaaaaaaaaaaaaaaaaaa")
+	first := service.claim(context.Background(), "ndst_aaaaaaaaaaaaaaaaaaaa")
+	second := service.claim(context.Background(), "ndst_aaaaaaaaaaaaaaaaaaaa")
 	if !first || !second {
 		t.Fatalf("the first two claims were refused (%v, %v)", first, second)
 	}
-	if service.claim("ndst_aaaaaaaaaaaaaaaaaaaa") {
+	if service.claim(context.Background(), "ndst_aaaaaaaaaaaaaaaaaaaa") {
 		t.Fatalf("a third concurrent delivery to one destination was allowed past the "+
 			"limit of %d", cfg.MaxPerDestination)
 	}
 	// Another destination is unaffected.
-	if !service.claim("ndst_bbbbbbbbbbbbbbbbbbbb") {
+	if !service.claim(context.Background(), "ndst_bbbbbbbbbbbbbbbbbbbb") {
 		t.Fatal("one busy destination blocked a different one")
 	}
 
-	// And releasing frees the slot without leaving an entry behind.
+	// And releasing returns every token.
+	//
+	// The bookkeeping is a token bucket per destination rather than a counter, so
+	// what must be true after every release is that each bucket is FULL again --
+	// no token leaked, and the next delivery claims immediately. The map keeps one
+	// fixed-size bucket per destination, which is bounded by the number of
+	// destinations an administrator created rather than by traffic.
 	service.release("ndst_aaaaaaaaaaaaaaaaaaaa")
 	service.release("ndst_aaaaaaaaaaaaaaaaaaaa")
 	service.release("ndst_bbbbbbbbbbbbbbbbbbbb")
+
 	service.mu.Lock()
-	remaining := len(service.inFlight)
+	buckets := make(map[string]int, len(service.slots))
+	for id, slots := range service.slots {
+		buckets[id] = len(slots)
+	}
 	service.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("inFlight retained %d entries after every release; the map would grow "+
-			"with every destination ever used", remaining)
+
+	for id, available := range buckets {
+		if available != cfg.MaxPerDestination {
+			t.Fatalf("destination %s has %d of %d tokens after every release; a leaked "+
+				"token permanently reduces that destination's throughput",
+				id, available, cfg.MaxPerDestination)
+		}
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("slots holds %d buckets, want one per destination used (2)", len(buckets))
 	}
 }
 

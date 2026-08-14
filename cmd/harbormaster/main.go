@@ -242,6 +242,41 @@ func run() error {
 		slog.String("journalMode", db.OpenReport().JournalMode),
 		slog.String("integrity", db.OpenReport().Integrity.Summary()))
 
+	// Configuration snapshots.
+	//
+	// The key is resolved BEFORE anything can capture. Failing here is
+	// deliberate and total: a snapshot written under the wrong key produces
+	// digests that compare unequal against all history, which reads as "every
+	// secret changed at once" -- a false alarm indistinguishable from a breach.
+	// Refusing to start is loud, recoverable, and honest.
+	//
+	// It is resolved before the DOCKER CLIENT because the client's masker needs
+	// the digester built from it. A sensitive value can only be digested while
+	// it is in memory, which is the moment the masker classifies it; a client
+	// constructed before the key existed would classify every value with no
+	// evidence attached and there is no later point to add it.
+	snapshotKey, err := service.ResolveSnapshotKey(ctx, db.Snapshots, cfg.Snapshots,
+		filepath.Join(filepath.Dir(cfg.Store.Path), "snapshot-hmac.key"))
+	if err != nil {
+		return fmt.Errorf("resolve snapshot signing key: %w", err)
+	}
+	// Key ID and source only. The key itself never reaches a log record.
+	logger.Info("snapshot digest key ready",
+		slog.String("keyId", snapshotKey.KeyID),
+		slog.String("source", string(snapshotKey.Source)))
+	if snapshotKey.PermissionsTooWide {
+		logger.Warn("snapshot key file is readable beyond its owner",
+			slog.String("mode", fmt.Sprintf("%#o", snapshotKey.ObservedMode)),
+			slog.String("expected", "0600"))
+	}
+	if cfg.MaskPatternsWereOverridden() {
+		logger.Warn("default secret-masking patterns were REPLACED by configuration",
+			slog.Int("configuredPatterns", len(cfg.Snapshots.MaskPatternsOverride)),
+			slog.String("effect", "variables matching only the defaults will no longer be masked"))
+	}
+
+	hasher := service.NewHasher(snapshotKey)
+
 	dockerClient, err := docker.New(docker.Options{
 		Host:    cfg.Docker.Host,
 		Timeout: cfg.Docker.Timeout,
@@ -252,7 +287,13 @@ func run() error {
 		// Built from configuration so an operator can extend the patterns, and
 		// applied inside the adapter so values are masked at the boundary
 		// rather than somewhere further out.
-		Masker: cfg.Masker(),
+		//
+		// The digester travels with it. Masking and digesting are the same
+		// decision made at the same instant -- "this is sensitive, so hide the
+		// value and record evidence about it" -- and splitting them is what let
+		// the evidence be computed after the value was gone. The adapter
+		// receives a function, never the key.
+		Masker: cfg.Masker().WithDigester(hasher.DigestValue),
 	})
 	if err != nil {
 		return err
@@ -332,35 +373,6 @@ func run() error {
 		Logger:    logger,
 		StartedAt: startedAt,
 	})
-
-	// Configuration snapshots.
-	//
-	// The key is resolved BEFORE anything can capture. Failing here is
-	// deliberate and total: a snapshot written under the wrong key produces
-	// digests that compare unequal against all history, which reads as "every
-	// secret changed at once" -- a false alarm indistinguishable from a breach.
-	// Refusing to start is loud, recoverable, and honest.
-	snapshotKey, err := service.ResolveSnapshotKey(ctx, db.Snapshots, cfg.Snapshots,
-		filepath.Join(filepath.Dir(cfg.Store.Path), "snapshot-hmac.key"))
-	if err != nil {
-		return fmt.Errorf("resolve snapshot signing key: %w", err)
-	}
-	// Key ID and source only. The key itself never reaches a log record.
-	logger.Info("snapshot digest key ready",
-		slog.String("keyId", snapshotKey.KeyID),
-		slog.String("source", string(snapshotKey.Source)))
-	if snapshotKey.PermissionsTooWide {
-		logger.Warn("snapshot key file is readable beyond its owner",
-			slog.String("mode", fmt.Sprintf("%#o", snapshotKey.ObservedMode)),
-			slog.String("expected", "0600"))
-	}
-	if cfg.MaskPatternsWereOverridden() {
-		logger.Warn("default secret-masking patterns were REPLACED by configuration",
-			slog.Int("configuredPatterns", len(cfg.Snapshots.MaskPatternsOverride)),
-			slog.String("effect", "variables matching only the defaults will no longer be masked"))
-	}
-
-	hasher := service.NewHasher(snapshotKey)
 
 	readiness := service.NewReadinessEngine(service.ReadinessOptions{
 		Inventory: service.StoreReadinessInventory{

@@ -440,6 +440,26 @@ defect was found is worth as much as the fix.
   secure. The deletion now follows the connection, and plain HTTP on loopback
   behaves exactly as before. This closes the one CodeQL finding the project
   carried.
+- **A snapshot's sensitive-value evidence was computed after the value was
+  gone.** A snapshot is built from the persisted inventory, where the raw value
+  of a sensitive variable has already been dropped — that is the confidentiality
+  boundary and it is working. The digest was taken at that point, so every
+  sensitive variable in every snapshot recorded the digest of an empty string:
+  all identical, and useless for answering the one question the digest exists to
+  answer. The digest is now taken once, at classification, while the value is
+  still in hand, and travels with the variable as evidence; the value itself
+  still never reaches the database. Nothing was weakened to make this possible —
+  no plaintext is persisted, logged, audited, or returned. Digests written
+  before the fix cannot be repaired and are not treated as though they could be:
+  the corrected evidence carries a new algorithm name, so old evidence reports
+  itself as *not comparable* rather than being read as a match or a change.
+- **One unresponsive notification destination could delay the healthy ones.**
+  Retries of a blocked endpoint competed with fresh notifications on equal
+  terms, so a broken webhook's backlog decided how often the working ones were
+  served. Deliveries now wait a bounded time for their destination's slot, fresh
+  notifications are taken ahead of retries, and each destination's share of the
+  retry backlog is rationed. Found by a 50-run soak that failed intermittently,
+  then root-caused by instrumenting the queue rather than by inference.
 
 ## Upgrading
 
@@ -459,6 +479,13 @@ Two things worth knowing if you are coming from an `edge` build:
   nothing broadens, and archived policies are untouched.
 - The `notification:read` and `notification:manage` permissions are added to
   the existing roles automatically. No account changes.
+- Sensitive-value evidence recorded by an `edge` build is superseded and reports
+  itself as **not comparable**, so a snapshot taken before the upgrade will not
+  answer whether a secret changed. It is not backfilled and not repaired,
+  because the value it was supposed to have been computed from was already gone
+  and inventing evidence would be worse than having none. No schema change and
+  no operator action: the next snapshot after the upgrade carries correct
+  evidence.
 
 **HarborMaster does not upgrade itself**, by design — see
 [HarborMaster refuses to update itself](#harbormaster-refuses-to-update-itself).
@@ -506,6 +533,18 @@ matrix:
   Discord, Teams, or SMTP endpoint.** The transport, the address guard, the
   channel formatting, and the engine are tested; the wire format has not been
   confirmed by a receiving service.
+- **Enough simultaneously-unresponsive destinations will delay the working
+  ones.** A notification fans out to its destinations within one worker, so when
+  the endpoints that do not answer occupy the whole pool — with the shipped
+  defaults, four unresponsive destinations, or two at
+  `NOTIFICATIONS_MAX_PER_DESTINATION=2` — a healthy destination waits for one
+  delivery timeout before it is served. It is a delay, not a loss: the queue
+  holds the work, no destination exceeds its share of workers, and service
+  resumes as each blocked attempt times out. The bound is
+  `NOTIFICATIONS_DELIVERY_TIMEOUT`, 15 seconds by default; lowering it shortens
+  the delay. Narrowing it further means changing how a notification fans out
+  across destinations, which was out of scope for a stabilisation pass. Measured
+  and pinned by `TestSeveralUnresponsiveDestinationsStillLeaveTheHealthyOneServed`.
 - **One dependency advisory is accepted rather than fixed.** GO-2026-5932
   reports that `golang.org/x/crypto/openpgp` is unmaintained. There is no fixed
   version and there will not be one; HarborMaster does not use the package, and

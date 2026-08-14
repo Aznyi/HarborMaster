@@ -188,8 +188,16 @@ func writeContainerCanonical(hash io.Writer, container domain.ContainerDetail) {
 	// reordering is a real change.
 	for _, env := range container.Environment {
 		if env.Sensitive() {
-			digest := sha256.Sum256([]byte(env.RawValue))
-			writeField(hash, "env", env.Name+"=sha256:"+hex.EncodeToString(digest[:]))
+			// The CARRIED evidence, for the same reason the snapshot spec uses
+			// it: this checksum is computed from a detail that has been through
+			// persistence, where RawValue is gone. Hashing it there produced one
+			// constant for every secret, so two containers differing only in a
+			// credential checksummed identically -- and a rotated credential did
+			// not change the checksum that dedup compares.
+			//
+			// An absent digest is written as a distinct marker rather than as an
+			// empty string, so "no evidence" cannot collide with a real digest.
+			writeField(hash, "env", env.Name+"="+sensitiveChecksumToken(env))
 			continue
 		}
 		writeField(hash, "env", env.Name+"="+env.Value)
@@ -198,11 +206,38 @@ func writeContainerCanonical(hash io.Writer, container domain.ContainerDetail) {
 	writeResourcesCanonical(hash, container.Resources)
 	writeSecurityCanonical(hash, container.Security)
 
+	writeChecksumLogging(hash, container)
+}
+
+// sensitiveChecksumToken renders one sensitive value for the configuration
+// checksum.
+//
+// The checksum decides whether a capture is a duplicate of the previous one, so
+// what goes in here decides whether a rotated credential is noticed. It must
+// therefore be derived from the value, and the only surviving derivation is the
+// carried evidence.
+//
+// A variable with no evidence renders as a marker naming the variable rather
+// than as a bare constant, so two DIFFERENT unverifiable variables cannot
+// collide with each other or with a real digest. What it cannot do is
+// distinguish two different values OF THE SAME variable: with no evidence there
+// is nothing to distinguish them by, and a checksum has to stay a pure function
+// of what it is given. The marker is honest about that rather than pretending
+// otherwise, and the composition root attaches a digester unconditionally, so
+// the path is reachable only where no installation key exists at all.
+func sensitiveChecksumToken(env domain.EnvVar) string {
+	if env.Digest == "" || env.DigestAlgorithm == "" {
+		return "unverifiable:" + env.Name
+	}
+	return string(env.DigestAlgorithm) + ":" + env.DigestKeyID + ":" + env.Digest
+}
+
+// writeChecksumLogging folds the logging configuration in.
+func writeChecksumLogging(hash io.Writer, container domain.ContainerDetail) {
 	writeField(hash, "logDriver", container.Logging.Driver)
 	for _, option := range container.Logging.Options {
 		if option.Sensitive() {
-			digest := sha256.Sum256([]byte(option.RawValue))
-			writeField(hash, "logOption", option.Name+"=sha256:"+hex.EncodeToString(digest[:]))
+			writeField(hash, "logOption", option.Name+"="+sensitiveChecksumToken(option))
 			continue
 		}
 		writeField(hash, "logOption", option.Name+"="+option.Value)

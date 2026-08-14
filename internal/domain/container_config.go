@@ -54,6 +54,47 @@ type EnvVar struct {
 	// RawValue is the unmasked value. Never serialised. Persisted so a future
 	// phase can recreate a container faithfully.
 	RawValue string `json:"-"`
+
+	// Digest is the keyed comparison evidence for a SENSITIVE value, and the
+	// only thing about that value which survives persistence.
+	//
+	// # Why it is computed here rather than where it is used
+	//
+	// RawValue is `json:"-"`, so it exists only between the daemon read and the
+	// first time the detail is encoded. Everything downstream -- a snapshot, a
+	// dedup checksum -- runs AFTER that boundary and sees an empty RawValue.
+	// Digesting there produced one identical token for every secret on the host.
+	//
+	// So the digest is taken at classification, the moment the value arrives and
+	// the only moment it is both present and known to be sensitive, and is
+	// carried forward in its place. The value itself still goes nowhere.
+	//
+	// Empty for a non-sensitive variable, whose real Value is already stored,
+	// and empty when no digester was configured -- which readers must treat as
+	// "cannot be compared", never as "unchanged".
+	Digest          string          `json:"digest,omitempty"`
+	DigestAlgorithm DigestAlgorithm `json:"digestAlgorithm,omitempty"`
+	DigestKeyID     string          `json:"digestKeyId,omitempty"`
+	// ValueLength is the byte length of the raw value, carried for the same
+	// reason and with the same lifetime. Already part of the recorded design:
+	// SecretDigest.Length is serialised, and the snapshot's environment rows
+	// have always had a length column.
+	ValueLength int `json:"valueLength,omitempty"`
+}
+
+// SecretEvidence projects the carried comparison evidence.
+//
+// Present mirrors the variable being set at all, which is what the snapshot's
+// own "present" flag means; a variable set to the empty string still has
+// evidence, and one that was never set does not.
+func (e EnvVar) SecretEvidence() SecretDigest {
+	return SecretDigest{
+		Present:   true,
+		Length:    e.ValueLength,
+		Digest:    e.Digest,
+		Algorithm: e.DigestAlgorithm,
+		KeyID:     e.DigestKeyID,
+	}
 }
 
 // Sensitive reports whether the variable was classified as secret-bearing.

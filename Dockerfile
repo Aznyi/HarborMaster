@@ -14,9 +14,25 @@
 # Base images are pinned to explicit patch versions. Pinning by digest is
 # stronger still and is the intended follow-up; it needs a registry lookup that
 # the pinned tags below stand in for.
+#
+# THE GO PATCH VERSION IS A SECURITY FLOOR, NOT A PREFERENCE.
+#
+# The binary this stage produces carries the standard library it was compiled
+# with, so a stdlib CVE is shipped in the image whatever the runtime base is and
+# however current the host's Go is. Trivy reads that version out of the binary
+# and reports against it.
+#
+# Pinned at 1.26.5 this image shipped eight advisories at once -- CVE-2026-46600
+# (dnsmessage, HIGH), CVE-2026-39821 (idna, HIGH), and CVE-2026-56862, -56860,
+# -56859, -56858, -56853 and CVE-2026-33818 across crypto/tls, net/url,
+# encoding/xml, html/template, net/http and encoding/asn1. Every one of them is
+# fixed in 1.26.6.
+#
+# Raise this together with `toolchain` in go.mod, which is the same floor for
+# builds that do not go through this Dockerfile.
 
 ARG NODE_IMAGE=node:22.23.2-alpine3.24
-ARG GO_IMAGE=golang:1.26.5-alpine3.24
+ARG GO_IMAGE=golang:1.26.6-alpine3.24
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot
 
 # ---------------------------------------------------------------- frontend --

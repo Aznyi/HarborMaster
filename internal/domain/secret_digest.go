@@ -11,7 +11,27 @@ type DigestAlgorithm string
 // Digest algorithms.
 const (
 	// DigestHMACSHA256 is HMAC-SHA-256 under the installation key.
+	//
+	// SUPERSEDED, and deliberately still named. Digests recorded under it were
+	// computed after the raw value had already been dropped by the persistence
+	// boundary, so every sensitive value in every snapshot written this way
+	// digests the EMPTY STRING and they are all identical. They reveal nothing
+	// -- confidentiality was never the defect -- but they answer "did this value
+	// change" wrongly, always with "no".
+	//
+	// They cannot be repaired: the input they should have had was never stored,
+	// which is the whole point of the design. So they are not rewritten and not
+	// trusted. Comparable() already refuses to compare across algorithms, so an
+	// old digest and a v2 digest are incomparable by construction and the
+	// comparison reports UNVERIFIABLE rather than a false match.
 	DigestHMACSHA256 DigestAlgorithm = "hmac-sha256"
+
+	// DigestHMACSHA256V2 is HMAC-SHA-256 under the installation key, derived
+	// through a named purpose, over the value as it was READ FROM THE DAEMON.
+	//
+	// The version exists to make the two distinguishable at a glance and, more
+	// importantly, incomparable to each other. See PurposeSnapshotValue.
+	DigestHMACSHA256V2 DigestAlgorithm = "hmac-sha256-v2"
 )
 
 // SecretDigest describes a sensitive value without containing it.

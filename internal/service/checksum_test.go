@@ -28,7 +28,7 @@ func checksumFixture() []domain.ContainerDetail {
 			},
 			Environment: []domain.EnvVar{
 				{Name: "PORT", Value: "8080", Sensitivity: domain.SensitivityNormal, RawValue: "8080"},
-				{Name: "DB_PASSWORD", Value: domain.MaskedValue, Sensitivity: domain.SensitivitySensitive, RawValue: "hunter2"},
+				fixtureSecret("DB_PASSWORD", "hunter2"),
 			},
 			Networks: []domain.NetworkAttachment{
 				{NetworkName: "frontend", IPv4Address: "172.20.0.2", Aliases: []string{"z", "a"}},
@@ -137,7 +137,7 @@ func TestChecksumDetectsChangedSecretValues(t *testing.T) {
 	base := checksumFixture()
 
 	rotated := checksumFixture()
-	rotated[0].Environment[1].RawValue = "a-different-password"
+	setFixtureSecret(rotated[0].Environment, "DB_PASSWORD", "a-different-password")
 	// The masked value is unchanged, exactly as the API would report it.
 	if rotated[0].Environment[1].Value != domain.MaskedValue {
 		t.Fatal("fixture should keep the masked value identical")

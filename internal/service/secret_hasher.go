@@ -40,6 +40,35 @@ func (h *Hasher) Digest(value string) domain.SecretDigest {
 	}
 }
 
+// DigestValue produces the comparison evidence carried on an EnvVar.
+//
+// # Why this is not Digest above
+//
+// Two differences, both deliberate. It derives through PurposeSnapshotValue, so
+// configuration digests occupy their own keyspace; and it reports
+// DigestHMACSHA256V2, so evidence written before the value reached the digest
+// intact is incomparable to evidence written after rather than equal to it.
+//
+// The variable's NAME is still not part of the input, preserving the recorded
+// decision on Digest: the same credential copied across services should be
+// recognisable as the same secret, and renaming a variable should not read as
+// "the secret changed".
+//
+// Suitable to hand to domain.Masker.WithDigester -- it closes over the key and
+// exposes only the operation.
+func (h *Hasher) DigestValue(value string) domain.SecretDigest {
+	if h == nil {
+		return domain.SecretDigest{}
+	}
+	return domain.SecretDigest{
+		Present:   true,
+		Length:    len(value),
+		Digest:    h.key.HMACFor(PurposeSnapshotValue, value),
+		Algorithm: domain.DigestHMACSHA256V2,
+		KeyID:     h.key.KeyID,
+	}
+}
+
 // Absent describes a variable that is not set.
 //
 // Distinct from a variable set to the empty string, which gets a real digest:

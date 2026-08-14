@@ -682,30 +682,44 @@ func (r *ImageIntelRepository) ByReferences(
 	const batch = 400
 	for start := 0; start < len(references); start += batch {
 		end := min(start+batch, len(references))
-		chunk := references[start:end]
-
-		args := make([]any, 0, len(chunk))
-		for _, reference := range chunk {
-			args = append(args, reference)
-		}
-
-		rows, err := r.db.QueryContext(ctx,
-			selectImageIntelColumns+`
-			WHERE i.reference IN (`+placeholders(len(chunk))+`)`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query image intel by references: %w", AsError(err))
-		}
-
-		records, err := scanImageIntel(rows)
-		_ = rows.Close()
-		if err != nil {
+		if err := r.gatherByReferences(ctx, references[start:end], found); err != nil {
 			return nil, err
-		}
-		for _, record := range records {
-			found[record.Reference] = record
 		}
 	}
 	return found, nil
+}
+
+// gatherByReferences reads one bounded run into the result map.
+//
+// Its own function so the rows are closed by a defer that runs at the end of
+// THIS call rather than at the end of the loop: deferring inside the loop would
+// hold every batch's rows open until the last one finished.
+func (r *ImageIntelRepository) gatherByReferences(
+	ctx context.Context,
+	chunk []string,
+	into map[string]domain.ImageIntel,
+) error {
+	args := make([]any, 0, len(chunk))
+	for _, reference := range chunk {
+		args = append(args, reference)
+	}
+
+	rows, err := r.db.QueryContext(ctx,
+		selectImageIntelColumns+`
+		WHERE i.reference IN (`+placeholders(len(chunk))+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("query image intel by references: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	records, err := scanImageIntel(rows)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		into[record.Reference] = record
+	}
+	return nil
 }
 
 // ForImageID returns every tracked reference resolving to one local image.
