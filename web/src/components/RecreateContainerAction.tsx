@@ -3,7 +3,12 @@ import { useId, useState } from "react";
 import type { Acquisition } from "../api/acquisitionTypes";
 import { pinnedReference } from "../api/acquisitionTypes";
 import { ApiError } from "../api/client";
+import { useContainerDependencies } from "../hooks/useDependencies";
 import { recreateForAcquisition } from "../hooks/useExecutions";
+import {
+  ProviderUpdateRefusal,
+  ProviderUpdateWarning,
+} from "./ProviderUpdateWarning";
 
 /**
  * The Recreate Container action, with its confirmation.
@@ -37,6 +42,22 @@ export function RecreateContainerAction({
   /** Called once a request has been accepted, so the caller can refresh. */
   onRequested?: () => void;
 }) {
+  /*
+   * What depends on this container, read BEFORE the operator confirms.
+   *
+   * The one fact Docker will not tell them: a container bound to this one's
+   * network namespace is bound to its current IDENTITY, and replacing this
+   * container silently detaches it. HarborMaster reattaches it, but an operator
+   * pressing a button that says "stop and recreate gluetun" deserves to know
+   * three other containers are about to be recreated too.
+   *
+   * The read is scoped to this control and its failure is reported rather than
+   * swallowed: "HarborMaster could not establish what depends on this" is a
+   * different answer from "nothing does", and the preflight will refuse on the
+   * same condition anyway.
+   */
+  const dependencies = useContainerDependencies(acquisition.containerId);
+
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -94,14 +115,10 @@ export function RecreateContainerAction({
 
   return (
     <div className="space-y-3">
-      {error && (
-        <p
-          role="alert"
-          className="rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger"
-        >
-          {error}
-        </p>
-      )}
+      {/* The refusal, in HarborMaster's own words. A preflight refusal names
+          WHICH check said no, and that sentence is the only part of the answer
+          that tells an operator what to do differently. */}
+      {error && <ProviderUpdateRefusal message={error} />}
 
       {!confirming ? (
         <button
@@ -144,6 +161,16 @@ export function RecreateContainerAction({
               by itself.
             </li>
           </ul>
+
+          {/* What else this touches. Above the digest, because "three other
+              containers are being recreated" changes the decision and the
+              digest only confirms it. A provider with no hard dependents
+              renders nothing here and keeps the flow it always had. */}
+          <ProviderUpdateWarning
+            container={containerName}
+            dependencies={dependencies.data ?? undefined}
+            unavailable={Boolean(dependencies.error)}
+          />
 
           {/* The exact content, not the name. */}
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">

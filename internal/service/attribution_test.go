@@ -65,6 +65,9 @@ func newAttributionHarness(t *testing.T) *attributionHarness {
 		Mutator:  base.mutator,
 		Hasher:   service.NewHasher(key),
 		Audit:    recorder,
+		// An ordinary container: nothing shares its namespace. Stated
+		// explicitly because the service fails closed without it.
+		Dependencies: standaloneDependencies{},
 		Config: config.Execution{
 			Enabled:               true,
 			RequireSnapshot:       true,

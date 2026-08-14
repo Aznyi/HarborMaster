@@ -658,6 +658,56 @@ func (r *ImageIntelRepository) Get(ctx context.Context, reference string) (domai
 	return records[0], nil
 }
 
+// ByReferences returns the intelligence for a set of canonical references.
+//
+// ONE query however many references are asked for, in bounded placeholder runs
+// -- the same shape the planner's batch read uses, and for the same reason: the
+// caller is a periodic sweep over the whole estate, and a lookup per reference
+// would make it an N+1.
+//
+// References with no record are simply absent from the map. That is not an
+// error: "HarborMaster has never checked this reference" is a fact a caller has
+// to be able to see, and it is the fail-closed answer for every caller here.
+func (r *ImageIntelRepository) ByReferences(
+	ctx context.Context,
+	references []string,
+) (map[string]domain.ImageIntel, error) {
+	found := make(map[string]domain.ImageIntel, len(references))
+	if len(references) == 0 {
+		return found, nil
+	}
+
+	// Bounded runs, so a large estate cannot build a statement with more
+	// placeholders than SQLite accepts.
+	const batch = 400
+	for start := 0; start < len(references); start += batch {
+		end := min(start+batch, len(references))
+		chunk := references[start:end]
+
+		args := make([]any, 0, len(chunk))
+		for _, reference := range chunk {
+			args = append(args, reference)
+		}
+
+		rows, err := r.db.QueryContext(ctx,
+			selectImageIntelColumns+`
+			WHERE i.reference IN (`+placeholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("query image intel by references: %w", AsError(err))
+		}
+
+		records, err := scanImageIntel(rows)
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			found[record.Reference] = record
+		}
+	}
+	return found, nil
+}
+
 // ForImageID returns every tracked reference resolving to one local image.
 //
 // A local image can carry several references -- the same content tagged twice --

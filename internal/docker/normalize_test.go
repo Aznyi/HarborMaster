@@ -520,6 +520,57 @@ func TestNormalizeSecurity(t *testing.T) {
 	}
 }
 
+// The namespace projection the dependency subsystem is built on.
+//
+// NetworkMode was not captured at all before Phase 16, which meant
+// `network_mode: container:<other>` -- the relationship that silently breaks a
+// dependent when its provider is recreated -- was invisible to HarborMaster.
+// This is the test that it reaches the normalized view, in the exact shape
+// Docker 29.6.2 records it.
+func TestNormalizeCapturesTheSharedNamespaceModes(t *testing.T) {
+	const providerID = "07d62ee08974aceac5ff1fe8a366e9187da8270855c3c5d6d02abbec6ae56c0e"
+
+	response := runningContainer()
+	response.HostConfig.NetworkMode = container.NetworkMode("container:" + providerID)
+	response.HostConfig.IpcMode = container.IpcMode("container:" + providerID)
+	response.HostConfig.PidMode = container.PidMode("container:" + providerID)
+
+	security := testClient().normalizeInspection(response, nil).Detail.Security
+
+	if security.NetworkMode != "container:"+providerID {
+		t.Errorf("networkMode = %q", security.NetworkMode)
+	}
+	if security.IPCMode != "container:"+providerID {
+		t.Errorf("ipcMode = %q", security.IPCMode)
+	}
+	if security.PIDMode != "container:"+providerID {
+		t.Errorf("pidMode = %q", security.PIDMode)
+	}
+
+	// And the value the daemon reports is one the domain can resolve. If these
+	// two ever disagree the dependency subsystem fails closed and refuses to
+	// order the container, which is safe but wrong -- so they are checked
+	// together.
+	id, ok := domain.ParseNamespaceContainerRef(security.NetworkMode)
+	if !ok || id != providerID {
+		t.Fatalf("the normalized mode did not resolve: (%q, %v)", id, ok)
+	}
+}
+
+// An ordinary container reports its network mode without claiming a share.
+func TestNormalizeOrdinaryNetworkModeIsNotAShare(t *testing.T) {
+	response := runningContainer()
+	response.HostConfig.NetworkMode = "bridge"
+
+	security := testClient().normalizeInspection(response, nil).Detail.Security
+	if security.NetworkMode != "bridge" {
+		t.Fatalf("networkMode = %q", security.NetworkMode)
+	}
+	if domain.SharesNamespace(security.NetworkMode) {
+		t.Fatal("bridge must not read as a shared container namespace")
+	}
+}
+
 func TestNormalizeHealthCheckConfiguration(t *testing.T) {
 	check := testClient().normalizeInspection(runningContainer(), nil).Detail.HealthCheck
 

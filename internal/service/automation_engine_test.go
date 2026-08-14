@@ -417,6 +417,23 @@ type autoEvidence struct {
 	plans    map[string]domain.ChangePlan
 	inFlight map[string]bool
 	total    int
+
+	// assessments are HarborMaster's positive "needs no update" findings, by
+	// container name. Absent means UNKNOWN, which is the fail-closed default
+	// every test that does not set it relies on.
+	assessments map[string]domain.CurrentAssessment
+	// assessErr makes the read fail, so the pass's degraded behaviour can be
+	// asserted rather than described.
+	assessErr error
+}
+
+func (f *autoEvidence) CurrentAssessments(
+	context.Context, time.Time,
+) (map[string]domain.CurrentAssessment, error) {
+	if f.assessErr != nil {
+		return nil, f.assessErr
+	}
+	return f.assessments, nil
 }
 
 func (f *autoEvidence) Targets(context.Context) ([]store.AutomationTarget, bool, error) {
@@ -563,6 +580,27 @@ func (f *autoPipeline) recorded(kind string) []autoRecordedRequest {
 		}
 	}
 	return out
+}
+
+// setAcquisition overwrites a recorded acquisition, so a test can say what the
+// pull did -- or delete it, so a test can say the record could not be read.
+//
+// The default RequestAcquisition answers `succeeded` immediately, which is the
+// happy path and cannot express "still pulling", "failed", or "unreadable".
+// Those three are the cases the acquisition -> execution handoff has to tell
+// apart, so each needs to be scriptable.
+func (f *autoPipeline) setAcquisition(id string, acquisition domain.Acquisition) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acquisition.AcquisitionID = id
+	f.acquisitions[id] = acquisition
+}
+
+// forgetAcquisition makes a recorded acquisition unreadable.
+func (f *autoPipeline) forgetAcquisition(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.acquisitions, id)
 }
 
 // setExecution overwrites a recorded execution, so a test can say what the

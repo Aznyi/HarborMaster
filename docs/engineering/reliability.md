@@ -514,6 +514,31 @@ condition reports the remedy it actually implies.
 | **A notification destination is broken** | Its card on the Notifications page says so, and the page header counts how many are failing. Nothing else degrades | Fix or replace the destination. A revoked webhook URL cannot be repaired; create a new destination |
 | **Notifications are being dropped** | Delivery records with result `dropped`, and a warning in the log naming a running total | Something raised notifications faster than they could be delivered. Raise `NOTIFICATIONS_QUEUE_SIZE` or `NOTIFICATIONS_WORKERS`, or narrow the rules |
 | **HarborMaster is on an old image and never appears in a plan** | Not a failure. The Automation page names the container it excludes | Update from outside: `docker compose pull && docker compose up -d`. See [Upgrading](upgrading.md) |
+| **A container could not be reattached after its provider was replaced** | Update dependencies lists the coordinated update as **Needs attention**; the container's row says **Rebind failed**; a `dependency.rebindFailed` notification names it | See below. HarborMaster does **not** retry this by itself |
+| **A container is waiting for a dependency** | Automation says *Waiting for dependency* and names the container it waits on | None. It is the system working, and it clears when that update verifies |
+| **No safe update order exists** | Update dependencies shows the loop, and the containers in it say **Dependency cycle** | Remove one configured ordering in the loop, or change the container configuration if every relationship in it is one Docker enforces |
+
+### A coordinated update that did not complete
+
+When HarborMaster replaces a container others share a namespace with, it must
+recreate each of those dependents on **the image digest they are already
+running** so they can attach to the replacement. No version moves.
+
+If one of those reattachments fails, the operation is recorded as failed and
+**the successful half stays on the host**: the provider is replaced, the
+dependents that were reattached are attached, and one container is not.
+HarborMaster does not roll a dependency group backward — reverting the provider
+would break exactly the containers that are currently correct.
+
+What that container looks like: it is running, Docker reports it as healthy or
+not depending on its own healthcheck, and its network, IPC, or PID namespace no
+longer exists. It usually presents as a service that has stopped talking to
+anything.
+
+To settle it, recreate that one container through the normal path — its own
+page, on its current image. The recreation takes the same preflight,
+verification, and refusal rules as any other. Nothing about the coordinated
+update needs unwinding first.
 
 Docker being unreachable is **degraded, never unhealthy**. Escalating it would
 put HarborMaster into a restart loop every time the daemon restarts.

@@ -595,8 +595,9 @@ func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, ge
 			 created_at, started_at, finished_at, exit_code, restart_count,
 			 restart_policy_name, restart_policy_max_retry,
 			 compose_project, compose_service, compose_container_number, compose_oneoff,
-			 hm_enabled, ports, present, first_seen_at, last_seen_at, generation, warning_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+			 hm_enabled, ports, present, first_seen_at, last_seen_at, generation, warning_count,
+			 network_mode, ipc_mode, pid_mode, namespaces_observed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
 		ON CONFLICT (id) DO UPDATE SET
 			short_id                 = excluded.short_id,
 			name                     = excluded.name,
@@ -625,7 +626,15 @@ func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, ge
 			present                  = 1,
 			last_seen_at             = excluded.last_seen_at,
 			generation               = excluded.generation,
-			warning_count            = excluded.warning_count`,
+			warning_count            = excluded.warning_count,
+			-- The namespace projection, refreshed with the row it describes.
+			-- namespaces_observed goes to 1 unconditionally: reaching this
+			-- statement means the container was inspected, which is the whole
+			-- of what the flag asserts.
+			network_mode             = excluded.network_mode,
+			ipc_mode                 = excluded.ipc_mode,
+			pid_mode                 = excluded.pid_mode,
+			namespaces_observed      = 1`,
 		overview.ID, hostIDOrDefault(overview.HostID), overview.ShortID, overview.Name,
 		overview.ImageID, overview.Image.Raw, overview.Image.Repository,
 		overview.Image.Tag, overview.Image.Digest,
@@ -637,7 +646,9 @@ func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, ge
 		overview.Compose.Project, overview.Compose.Service,
 		overview.Compose.ContainerNumber, overview.Compose.OneOff,
 		nullableBool(overview.HarborMaster.Enabled), portsJSON,
-		formatTime(now), formatTime(now), generation, len(record.Detail.Warnings))
+		formatTime(now), formatTime(now), generation, len(record.Detail.Warnings),
+		record.Detail.Security.NetworkMode, record.Detail.Security.IPCMode,
+		record.Detail.Security.PIDMode)
 	if err != nil {
 		return fmt.Errorf("upsert container: %w", err)
 	}

@@ -42,6 +42,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
   { label: "Automation", path: "/automation", permission: "automation:read" },
   { label: "Update policies", path: "/update-policies", permission: "automation:read" },
+  // Next to the update machinery rather than under administration: a dependency
+  // decides WHEN an update may happen, which is the same question the two items
+  // above answer. Listed for every role, because reading is `dependency:read`.
+  { label: "Update dependencies", path: "/dependencies", permission: "dependency:read" },
   { label: "Paused", path: "/automation/paused", permission: "automation:read" },
   { label: "Compliance", path: "/compliance", permission: "policy:read" },
   { label: "Policies", path: "/policies", permission: "policy:read" },

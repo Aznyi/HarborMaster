@@ -70,7 +70,10 @@ export function ContainerPicker({
   );
 
   return (
-    <div className="space-y-2">
+    // min-w-0 so a long selected name cannot widen whatever contains the
+    // picker. The chip truncates, and truncation needs white-space: nowrap,
+    // which makes the chip's min-content width the full name.
+    <div className="min-w-0 space-y-2">
       <label htmlFor={searchId} className="block text-xs uppercase tracking-wide text-content-muted">
         Search the inventory
       </label>
@@ -81,6 +84,19 @@ export function ContainerPicker({
         value={search}
         onChange={(event) => setSearch(event.target.value)}
         placeholder="Filter by name or image"
+        /*
+         * Named by the section it belongs to as WELL as by its own label.
+         *
+         * A form with two pickers on it -- the dependency editor has exactly
+         * that, one for each end of a relationship -- otherwise gives both
+         * search boxes the identical accessible name "Search the inventory",
+         * and somebody navigating by control name cannot tell which end they
+         * are filling in. Combining the two ids yields "Dependent container
+         * Search the inventory", which is unambiguous and needs no change from
+         * the single-picker callers: they pass no describedBy and keep the
+         * label they had.
+         */
+        aria-labelledby={describedBy ? `${describedBy} ${searchId}` : undefined}
         aria-describedby={describedBy}
         aria-controls={listId}
       />
@@ -88,13 +104,22 @@ export function ContainerPicker({
       {selected.length > 0 ? (
         <ul className="flex flex-wrap gap-1.5" aria-label="Selected containers">
           {selected.map((name) => (
-            <li key={name}>
+            /*
+             * min-w-0 and max-w-full on the ITEM, not only on the button.
+             *
+             * A flex item sizes to its content by default, so `max-w-full` on
+             * the button resolved against a list item that had already grown
+             * past the form -- and the truncate never fired. A long container
+             * name pushed the whole page 353px wide at 390px, which real
+             * Chromium found and jsdom could not: jsdom has no layout.
+             */
+            <li key={name} className="min-w-0 max-w-full">
               <button
                 type="button"
                 className="flex min-h-8 max-w-full items-center gap-1.5 rounded-full border border-accent/40 bg-accent-soft px-2.5 py-1 text-xs text-accent"
                 onClick={() => toggle(name)}
               >
-                <span className="truncate">{name}</span>
+                <span className="min-w-0 truncate">{name}</span>
                 {unlisted.includes(name) ? (
                   <span className="text-content-muted" title="Not in the current inventory listing">
                     (not listed)

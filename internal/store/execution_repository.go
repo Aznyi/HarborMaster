@@ -757,6 +757,72 @@ func (r *ExecutionRepository) ActiveForContainer(ctx context.Context, containerI
 	return count > 0, nil
 }
 
+// ReplacementFor returns the container id that SUCCEEDED this one.
+//
+// # What this answers, and why it is a record rather than an inference
+//
+// When HarborMaster recreates a container it writes both ends of the swap: the
+// original's id in `container_id` and the new one's in `replacement_id`. This
+// returns the second given the first, for a recreation that reached verified
+// success.
+//
+// Its caller is ResolveNamespaceProvider, which has to map the provider id
+// frozen into a dependent's captured config onto whatever holds that namespace
+// now. That question used to be answered by looking up the NAME the old id
+// held in the inventory and finding the container present under it. Two things
+// were wrong with that, both found in Stage 5a against a real daemon:
+//
+//  1. The read it used filtered `present = 1`, so it could never answer for a
+//     container that had been replaced -- which is the only case it exists for.
+//  2. Even reading absent rows would not have fixed it. A recreation renames the
+//     original to its parked name BEFORE removing it, and an inventory refresh
+//     that lands in that window records the PARKED name against the old id. The
+//     retained row said `hm16-provider.hm-old-exec_4197648fe5c78423e38d`, so no
+//     lookup by stable name could have matched.
+//
+// Recovering a stable name by stripping that suffix was the other option and is
+// deliberately not taken: IsHarborMasterDerivedName documents that the shape is
+// a display aid and never a security decision, because an operator can name a
+// container that way themselves. This is the fact itself, written by
+// HarborMaster about a mutation HarborMaster performed.
+//
+// Only `succeeded` counts. A failed recreation may have left a replacement
+// behind in quarantine, and attaching a dependent's namespace to a quarantined
+// container is precisely the wrong answer.
+//
+// Returns ErrNotFound when no such row exists, which every caller turns into a
+// refusal. The newest is taken, so a container replaced more than once resolves
+// one hop at a time.
+func (r *ExecutionRepository) ReplacementFor(
+	ctx context.Context,
+	containerID string,
+) (string, error) {
+	if !domain.ValidFullContainerID(containerID) {
+		return "", ErrNotFound
+	}
+	var replacement string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT replacement_id
+		  FROM executions
+		 WHERE container_id = ?
+		   AND state = 'succeeded'
+		   AND replacement_id <> ''
+		 ORDER BY id DESC
+		 LIMIT 1`, containerID).Scan(&replacement)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", ErrNotFound
+	case err != nil:
+		return "", fmt.Errorf("query container replacement: %w", AsError(err))
+	}
+	if !domain.ValidFullContainerID(replacement) {
+		// A stored id that is not a container id is a record this build cannot
+		// act on. Refused rather than returned.
+		return "", ErrNotFound
+	}
+	return replacement, nil
+}
+
 // ByAcquisition returns the execution that consumed an acquisition.
 //
 // The single-use check. Any row at all counts, whatever its outcome: see

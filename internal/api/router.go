@@ -83,6 +83,13 @@ type Server struct {
 	// conflating them would let one edit turn a reporting rule into a mutation
 	// rule.
 	updatePolicies UpdatePolicyService
+	// dependencies answers the workload-dependency endpoints.
+	//
+	// A READER plus one small table. Nothing on this interface pulls,
+	// recreates, or rolls anything back, and no method takes an image, a
+	// digest, or a container id. Nil in a deployment without it, which yields a
+	// 503 rather than a broken route.
+	dependencies DependencyService
 	// notifications answers the delivery-history endpoints, and
 	// notificationAdmin the configuration ones. Separate for the reason the two
 	// automation fields are: reading what was sent is a permission every role
@@ -259,6 +266,8 @@ type Options struct {
 	// able to write and review their rules before switching automation on,
 	// which is the order those two things should be done in.
 	UpdatePolicies UpdatePolicyService
+	// Dependencies answers the workload-dependency endpoints. Nil disables them.
+	Dependencies DependencyService
 	// Notifications answers the delivery-history endpoints. Nil disables them.
 	//
 	// Non-nil even on a deployment with sending switched off: the history and
@@ -339,6 +348,7 @@ func NewServer(opts Options) *Server {
 		rollbacks:    opts.Rollbacks,
 
 		automation:        opts.Automation,
+		dependencies:      opts.Dependencies,
 		updatePolicies:    opts.UpdatePolicies,
 		notifications:     opts.Notifications,
 		notificationAdmin: opts.NotificationAdmin,

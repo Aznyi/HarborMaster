@@ -69,6 +69,21 @@ const (
 	EventAutomationPaused NotificationEvent = "automation.paused"
 	EventSchedulerError   NotificationEvent = "automation.error"
 
+	// EventRebindFailed reports that a container sharing a replaced provider's
+	// namespace could not be reattached to the replacement.
+	//
+	// # Why this one is worth a message and the other dependency states are not
+	//
+	// Because of what it means on the host and because nothing will fix it. The
+	// dependent may be attached to a namespace that no longer exists — Docker
+	// reports nothing, the container keeps running, and its network silently
+	// stops working. HarborMaster does not retry a reattachment by itself.
+	//
+	// A dependency LOOP is a configuration problem that changes nothing about a
+	// running container and would be re-raised on every pass. A container
+	// WAITING on its dependency is the system working. Neither is news.
+	EventRebindFailed NotificationEvent = "dependency.rebindFailed"
+
 	// Observation.
 	EventDriftDetected   NotificationEvent = "drift.detected"
 	EventPolicyViolation NotificationEvent = "policy.violation"
@@ -90,7 +105,7 @@ var NotificationEvents = []NotificationEvent{
 	EventAcquisitionSucceeded, EventAcquisitionFailed,
 	EventExecutionSucceeded, EventExecutionFailed,
 	EventRollbackStarted, EventRollbackSucceeded, EventRollbackFailed,
-	EventAutomationPaused, EventSchedulerError,
+	EventAutomationPaused, EventSchedulerError, EventRebindFailed,
 	EventDriftDetected, EventPolicyViolation,
 	EventRegistryUnavailable, EventBackupFailed, EventIntegrityFailed,
 	EventTest,
@@ -115,7 +130,12 @@ func ValidNotificationEvent(value string) bool {
 func (e NotificationEvent) DefaultSeverity() NotificationSeverity {
 	switch e {
 	case EventExecutionFailed, EventRollbackFailed, EventAutomationPaused,
-		EventBackupFailed, EventIntegrityFailed:
+		EventBackupFailed, EventIntegrityFailed,
+		// Critical rather than warning: the container may be attached to a
+		// namespace that no longer exists, Docker reports nothing about that,
+		// and HarborMaster will not retry. It is a workload that may be down
+		// with no other signal.
+		EventRebindFailed:
 		return NotifyCritical
 	case EventAcquisitionFailed, EventRollbackStarted, EventSchedulerError,
 		EventRegistryUnavailable, EventPolicyViolation:
@@ -132,6 +152,8 @@ func (e NotificationEvent) Describe() string {
 		return "a newer image is available for a container"
 	case EventApprovalRequired:
 		return "an automated update is waiting for a person to release it"
+	case EventRebindFailed:
+		return "a container sharing a replaced container's namespace could not be reattached"
 	case EventAcquisitionSucceeded:
 		return "an image was downloaded and its digest confirmed"
 	case EventAcquisitionFailed:

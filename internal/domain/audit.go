@@ -185,6 +185,34 @@ const (
 	AuditAutomationPaused AuditAction = "automation.paused"
 	// AuditAutomationResumed is a person clearing that refusal.
 	AuditAutomationResumed AuditAction = "automation.resumed"
+
+	// Workload dependencies.
+	//
+	// # Four actions, and why DISCOVERY is not one of them
+	//
+	// There is deliberately no `dependency.detected`. A discovered relationship
+	// is derived from the inventory on every read, so an action per detected
+	// edge per refresh would be thousands of rows a day describing that nothing
+	// changed -- and an audit log nobody can read is an audit log nobody reads.
+	//
+	// What IS recorded is the four things a person did, or that changed what
+	// HarborMaster will do:
+
+	// AuditDependencyCreated is an operator recording an ordering constraint.
+	AuditDependencyCreated AuditAction = "dependency.created"
+	// AuditDependencyDeleted is an operator REMOVING one, which takes a safety
+	// constraint away and is why the permission is administrator-only.
+	AuditDependencyDeleted AuditAction = "dependency.deleted"
+	// AuditDependencyBlocked is HarborMaster refusing to advance a container
+	// because of what it depends on.
+	//
+	// Recorded once per refusal, not once per evaluation: a decision pass that
+	// declines the same container every fifteen minutes writes one row when the
+	// answer CHANGES, never one per pass.
+	AuditDependencyBlocked AuditAction = "dependency.blocked"
+	// AuditDependencyRebindRequired is HarborMaster establishing that a
+	// container must be reattached to a replaced namespace.
+	AuditDependencyRebindRequired AuditAction = "dependency.rebindRequired"
 )
 
 // AuditActions lists every action.
@@ -213,6 +241,9 @@ var AuditActions = []AuditAction{
 	AuditAutomationRunStarted, AuditAutomationRunCompleted, AuditAutomationRunFailed,
 	AuditAutomationApproved, AuditAutomationRejected,
 	AuditAutomationPaused, AuditAutomationResumed,
+
+	AuditDependencyCreated, AuditDependencyDeleted,
+	AuditDependencyBlocked, AuditDependencyRebindRequired,
 
 	AuditNotificationDestinationCreated, AuditNotificationDestinationUpdated,
 	AuditNotificationDestinationArchived, AuditNotificationDestinationTested,
@@ -321,8 +352,13 @@ const (
 	// consequences and a reader must not have to guess which happened.
 	AuditTargetNotificationDestination AuditTargetType = "notificationDestination"
 	AuditTargetNotificationRule        AuditTargetType = "notificationRule"
-	AuditTargetInventory               AuditTargetType = "inventory"
-	AuditTargetSystem                  AuditTargetType = "system"
+	// AuditTargetDependency is a workload ordering relationship. Distinct from
+	// AuditTargetContainer: the subject of the record is the RELATIONSHIP, and
+	// a reader looking for "what stopped being enforced" must not have to infer
+	// it from a container row.
+	AuditTargetDependency AuditTargetType = "dependency"
+	AuditTargetInventory  AuditTargetType = "inventory"
+	AuditTargetSystem     AuditTargetType = "system"
 )
 
 // AuditTargetTypes lists every target type.
@@ -333,6 +369,7 @@ var AuditTargetTypes = []AuditTargetType{
 	AuditTargetExecution, AuditTargetRollback,
 	AuditTargetUpdatePolicy, AuditTargetAutomation,
 	AuditTargetNotificationDestination, AuditTargetNotificationRule,
+	AuditTargetDependency,
 	AuditTargetInventory, AuditTargetSystem,
 }
 

@@ -5783,6 +5783,256 @@ paths:
         "503":
           $ref: "#/components/responses/NotificationsUnavailable"
 
+  # ---- workload dependencies ------------------------------------------------
+  #
+  # What must be stable before something else changes.
+  #
+  # Reading is `dependency:read`, which every role holds: a relationship is
+  # frequently the answer to "why has that container not been updated".
+  #
+  # Writing is `dependency:manage`, ADMINISTRATOR ONLY. Creating a relationship
+  # is conservative -- it can only make HarborMaster wait or refuse -- but
+  # DELETING one removes a safety constraint, and it is the same permission.
+  #
+  # Nothing here reaches Docker. There is no route that pulls, recreates, or
+  # rolls anything back, and no request body with a field for an image, a
+  # digest, a registry, or a container id.
+
+  /api/v1/dependencies:
+    get:
+      tags: [Dependencies]
+      summary: Every ordering relationship in force
+      description: |
+        Returns discovered and operator-defined relationships together.
+
+        `problems` is read ALONGSIDE `items`, never instead of it: a container
+        listed there declares a shared namespace HarborMaster could not
+        resolve, which BLOCKS it. Omitting that would make the estate look
+        tidier than it is.
+      operationId: listDependencies
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: The relationships in force
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/WorkloadDependency" }
+                  total: { type: integer }
+                  problems:
+                    type: array
+                    items: { $ref: "#/components/schemas/DependencyProblem" }
+                  unresolved:
+                    type: array
+                    description: Edge endpoints the estate does not contain.
+                    items: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+    post:
+      tags: [Dependencies]
+      summary: Record an operator-defined ordering
+      description: |
+        Administrator only.
+
+        The body carries two container NAMES and nothing else. There is no
+        field for an image, a digest, a registry, a namespace, a container id,
+        or any Docker option, and unknown fields are REJECTED rather than
+        ignored.
+
+        Refused with 409 for a self-edge, an unknown or absent container, a
+        preserved container, HarborMaster itself, a duplicate of a relationship
+        from any source, or an edge that would close a cycle. The cycle check
+        builds the graph the write would produce and runs BEFORE the insert.
+      operationId: createDependency
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DependencyCreateRequest" }
+      responses:
+        "201":
+          description: The relationship was recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkloadDependency" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The relationship was refused. The body carries HarborMaster's own
+            sentence for the refusal; the closed vocabulary is
+            `DependencyRefusal`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+
+  /api/v1/dependencies/graph:
+    get:
+      tags: [Dependencies]
+      summary: The deterministic update order for this estate
+      description: |
+        A PROJECTION over work that is already valid. It creates no plan,
+        approves nothing, and reaches no Docker socket.
+
+        `stages` is the execution order: everything in stage 0 may be
+        recreated first, and every container in stage N depends only on
+        containers in earlier stages. A container that cannot be ordered
+        appears in NO stage and is listed in `blocked` with the reason.
+
+        The order is deterministic. Two reads of an unchanged estate return the
+        same stages in the same order.
+      operationId: getDependencyGraph
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: The update order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DependencyGraph" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+
+  /api/v1/dependencies/operations:
+    get:
+      tags: [Dependencies]
+      summary: Coordinated provider updates, and where each reattachment got to
+      description: |
+        What HarborMaster DID when it replaced a container others share a
+        namespace with: which provider was updated, which dependents had to be
+        recreated on the image they were already running, and where each of
+        them ended up.
+
+        **A read, and it can only be a read.** There is no body, no query
+        parameter that selects a target, and no sibling endpoint that acts on
+        an operation. Retrying a reattachment goes through the acquisition and
+        recreation services, each of which re-runs its own preflight. There is
+        no group-rollback endpoint, because HarborMaster does not roll a
+        dependency group backward.
+
+        **Concluded operations are listed.** A provider that succeeded with one
+        rebind that did not is recorded as `failed`, and it is exactly what an
+        operator has to settle: the provider and the successful rebinds are
+        still on the host. Reporting only what is still running would hide the
+        state worth reporting.
+
+        `complete` is DERIVED from the execution records on every read —
+        provider verified AND every mandatory rebind verified — rather than
+        read from a stored flag.
+
+        Bounded at `limit` operations, which the response states so a caller
+        can tell a quiet host from a truncated listing.
+      operationId: listDependencyOperations
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: The coordinated provider updates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, limit]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DependencyOperationSummary" }
+                  total: { type: integer }
+                  limit:
+                    type: integer
+                    description: The cap this listing was bounded by.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+
+  /api/v1/dependencies/container/{id}:
+    get:
+      tags: [Dependencies]
+      summary: One container's relationships, in both directions
+      description: |
+        Takes the container's ID and resolves it to the stable NAME
+        relationships are keyed on.
+      operationId: getContainerDependencies
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The container's relationships
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerDependencies" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+
+  /api/v1/dependencies/{id}:
+    delete:
+      tags: [Dependencies]
+      summary: Remove an operator-defined ordering
+      description: |
+        Administrator only, because it REMOVES A SAFETY CONSTRAINT.
+
+        Reaches operator relationships only. A discovered namespace
+        relationship is derived from the inventory on every read and has no
+        stored row, so there is no id here that could name one.
+
+        A malformed id returns the same 404 an unknown id does, so the endpoint
+        cannot be used to learn which ids exist.
+      operationId: deleteDependency
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^dep_[0-9a-f]{20}$" }
+      responses:
+        "204":
+          description: The relationship was removed
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/DependenciesUnavailable"
+
 
 components:
   securitySchemes:
@@ -6117,6 +6367,25 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
 
+    DependenciesUnavailable:
+      description: |
+        Dependency tracking could not answer.
+
+        Two situations share this status, and both are statements about the
+        ESTATE rather than about HarborMaster being broken:
+
+        - the subsystem is not wired in this deployment;
+        - the graph could not be built right now, because the host has more
+          containers than one evaluation may consider, or more relationships
+          than HarborMaster will order at once.
+
+        The second is a REFUSAL, not a degraded answer. A partial graph would
+        make containers look more independent -- and therefore safer -- than
+        they are, so the whole build is refused instead of truncated.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
     AutomationUnavailable:
       description: |
         The automation engine is not configured in this deployment.
@@ -6234,6 +6503,371 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    # ------------------------------------------------- workload dependencies --
+
+    DependencySource:
+      type: string
+      description: |
+        Where HarborMaster learned a relationship.
+
+        The three `docker*` sources are HARD: the daemon itself enforces them,
+        and the dependent cannot run without the dependency's namespace. They
+        are DERIVED from the inventory on every read and can be neither created
+        nor deleted through this API.
+
+        `operator` is an assertion about the APPLICATION -- true of the
+        software, invisible to the daemon. It constrains ORDER and never
+        requires a namespace rebind.
+
+        No label creates a relationship. Anyone who can run `docker run` writes
+        labels, and a relationship that makes HarborMaster wait on -- or refuse
+        -- an update is a privileged assertion.
+      enum:
+        - dockerNetworkNamespace
+        - dockerIPCNamespace
+        - dockerPIDNamespace
+        - operator
+
+    DependencyState:
+      type: string
+      description: |
+        One container's dependency verdict.
+
+        `dependencySatisfied` is reached exactly two ways, both requiring
+        positive facts: the dependency needed no work and is present and
+        running, or it needed work and its execution reached VERIFIED success.
+        A submitted or accepted request satisfies nothing.
+      enum:
+        - dependencySatisfied
+        - dependencyWaiting
+        - dependencyBlocked
+        - dependencyCycle
+        - dependencyMissing
+        - dependencyIneligible
+
+    DependencyRefusal:
+      type: string
+      description: Why an operator relationship was not accepted.
+      enum:
+        - malformedName
+        - selfDependency
+        - duplicate
+        - unknownContainer
+        - containerNotPresent
+        - preservedContainer
+        - harborMasterContainer
+        - dependencyCycle
+        - discoveredSource
+        - limit
+
+    DiscoveryRefusal:
+      type: string
+      description: |
+        Why a declared namespace share produced no relationship.
+
+        Every one of these BLOCKS the container. A container declaring
+        `container:<id>` has said it shares somebody's namespace; if the
+        reference cannot be resolved, the honest answer is "HarborMaster cannot
+        establish what this depends on", never "this depends on nothing".
+
+        `referencedContainerUnknown` is the specific signal that a dependent is
+        bound to a namespace that has been replaced.
+      enum:
+        - namespacesUnobserved
+        - referenceNotParseable
+        - referencedContainerUnknown
+        - referencedContainerUnnamed
+
+    DependencyEvidence:
+      type: object
+      description: |
+        What HarborMaster observed. Never identity: a container id changes on
+        every recreation, which is the event this subsystem exists to survive,
+        so relationships are keyed on NAMES and these are kept only so a
+        relationship can explain itself.
+      properties:
+        dependentContainerId: { type: string }
+        dependencyContainerId: { type: string }
+        observedAt: { type: string, format: date-time }
+
+    WorkloadDependency:
+      type: object
+      description: |
+        One directed relationship, read as "the dependent needs the dependency
+        to be stable first".
+
+        Execution order is the REVERSE of the arrow: the dependency is
+        recreated first.
+      required: [dependent, dependency, source, kind, origin, hard, why, deletable]
+      properties:
+        dependencyId:
+          type: string
+          description: |
+            Present for OPERATOR relationships only. A discovered one is derived
+            on every read and has no stored identity, which is also why it
+            cannot be deleted.
+          pattern: "^dep_[0-9a-f]{20}$"
+        dependent: { type: string }
+        dependency: { type: string }
+        source: { $ref: "#/components/schemas/DependencySource" }
+        kind:
+          type: string
+          description: The relationship kind, in operator-facing words.
+          example: Network namespace
+        origin:
+          type: string
+          description: Who established it.
+          enum: [Detected by HarborMaster, Configured by you, Unrecognised]
+        hard:
+          type: boolean
+          description: The runtime itself requires this relationship.
+        why:
+          type: string
+          description: HarborMaster's own sentence explaining the relationship.
+        deletable:
+          type: boolean
+          description: False for every discovered relationship.
+        evidence: { $ref: "#/components/schemas/DependencyEvidence" }
+        createdBy: { $ref: "#/components/schemas/Requester" }
+
+    DependencyProblem:
+      type: object
+      description: |
+        A namespace share HarborMaster could not resolve. Distinct from a
+        relationship that does not exist, and a container appearing here is
+        BLOCKED whatever the edge list says about it.
+      required: [container, refusal]
+      properties:
+        container: { type: string }
+        source: { $ref: "#/components/schemas/DependencySource" }
+        referencedId:
+          type: string
+          description: The id the mode named, when one could be parsed. Evidence only.
+        refusal: { $ref: "#/components/schemas/DiscoveryRefusal" }
+
+    DependencyOperationState:
+      type: string
+      description: |
+        Where one coordinated provider update has got to.
+
+        `providerVerified` is NOT the end. At that moment every dependent is
+        attached to a namespace that no longer exists, which is precisely when
+        the reattachments have to happen. Only `succeeded` means the estate is
+        consistent again.
+
+        `failed` does not mean the host was returned to how it was. The
+        provider is not rolled back and successfully reattached dependents are
+        not reverted — HarborMaster does not roll a dependency group backward.
+      enum:
+        - queued
+        - providerRunning
+        - providerVerified
+        - rebindPending
+        - rebindRunning
+        - succeeded
+        - failed
+        - blocked
+        - interrupted
+
+    DependencyOperationFailure:
+      type: string
+      description: |
+        Why a coordinated provider update ended without succeeding. A closed
+        vocabulary, never a daemon string.
+      enum:
+        - providerFailed
+        - rebindFailed
+        - dependentNotRebindable
+        - evidenceUnavailable
+
+    DependencyOperation:
+      type: object
+      description: |
+        One coordinated provider update: the container being replaced, and every
+        dependent that must be recreated on the image it is already running so
+        it can attach to the replacement.
+
+        The member set is written in ONE transaction BEFORE the provider is
+        stopped. The reverse order would leave a stopped provider and no record
+        of what depended on it, which is the one situation a restart cannot
+        recover from.
+      required: [operationId, provider, state, createdAt, updatedAt]
+      properties:
+        operationId: { type: string }
+        provider:
+          type: string
+          description: The container whose namespace is shared, by stable NAME.
+        providerPlanId: { type: string }
+        providerExecutionId: { type: string }
+        state: { $ref: "#/components/schemas/DependencyOperationState" }
+        failure: { $ref: "#/components/schemas/DependencyOperationFailure" }
+        requestedBy: { $ref: "#/components/schemas/Requester" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/DependencyMember" }
+
+    DependencyOperationSummary:
+      type: object
+      description: |
+        One operation with the answers DERIVED from the execution records rather
+        than read from stored flags — for the same reason restart recovery
+        derives them: a stored flag is a claim about the past and the execution
+        record is the evidence.
+      required: [operation, providerVerified, complete, needsAttention]
+      properties:
+        operation: { $ref: "#/components/schemas/DependencyOperation" }
+        providerVerified:
+          type: boolean
+          description: |
+            The provider's own execution reached verified success. False when
+            there is no execution, when it has not finished, and when it
+            finished unsuccessfully — all three mean the same thing here.
+        complete:
+          type: boolean
+          description: Provider verified AND every mandatory reattachment verified.
+        needsAttention:
+          type: boolean
+          description: |
+            Not complete, and nothing will progress it. This is the partial
+            state an operator has to settle: the provider and the successful
+            reattachments remain in place.
+
+    DependencyMemberState:
+      type: string
+      description: |
+        Where one mandatory reattachment has got to.
+
+        A NAMED schema rather than an inline enum, because a UI renders each of
+        these as a sentence and the vocabulary has to be pinnable — a value a
+        client's map does not know shows an operator the raw identifier.
+
+        `verified` is the ONLY state that clears the requirement. `blocked` and
+        `failed` are settled without clearing, and HarborMaster never retries a
+        reattachment on its own: both stand until a person acts. `interrupted`
+        means a restart found it mid-flight, and recovery re-derives it from the
+        records rather than from anything a process remembered.
+      enum:
+        - pending
+        - planCreated
+        - acquired
+        - executing
+        - verified
+        - blocked
+        - failed
+        - interrupted
+
+    DependencyMember:
+      type: object
+      description: |
+        One mandatory reattachment within a coordinated provider update.
+
+        The PRESENCE of a plan, acquisition, or execution id means work was
+        requested. Only `state` says what happened, and only `verified` clears
+        the requirement.
+      required: [operationId, dependent, provider, source, state]
+      properties:
+        operationId: { type: string }
+        dependent: { type: string }
+        provider: { type: string }
+        source: { $ref: "#/components/schemas/DependencySource" }
+        expectedProviderId: { type: string }
+        targetProviderId: { type: string }
+        planId: { type: string }
+        acquisitionId: { type: string }
+        executionId: { type: string }
+        state: { $ref: "#/components/schemas/DependencyMemberState" }
+        refusal: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ContainerDependencies:
+      type: object
+      required: [container, dependsOn, dependedOnBy, state, detail]
+      properties:
+        container: { type: string }
+        dependsOn:
+          type: array
+          description: What this container needs stable first.
+          items: { $ref: "#/components/schemas/WorkloadDependency" }
+        dependedOnBy:
+          type: array
+          description: What needs THIS container stable first.
+          items: { $ref: "#/components/schemas/WorkloadDependency" }
+        stage:
+          type: integer
+          nullable: true
+          description: |
+            Position in the execution order. ABSENT means the container cannot
+            be ordered; `state` says why.
+        state: { $ref: "#/components/schemas/DependencyState" }
+        detail: { type: string }
+        problems:
+          type: array
+          items: { $ref: "#/components/schemas/DependencyProblem" }
+        outstandingRebinds:
+          type: array
+          items: { $ref: "#/components/schemas/DependencyMember" }
+
+    DependencyGraph:
+      type: object
+      required: [stages, edges]
+      properties:
+        stages:
+          type: array
+          description: |
+            The execution order. Everything in the first stage may be recreated
+            first; every container in stage N depends only on containers in
+            earlier stages. Deterministic across reads.
+          items:
+            type: array
+            items: { type: string }
+        cycles:
+          type: array
+          description: |
+            The loops that must be broken, each a closed path. Never broken
+            automatically.
+          items:
+            type: array
+            items: { type: string }
+        cycleDescriptions:
+          type: array
+          description: Each loop rendered as "a -> b -> c -> a".
+          items: { type: string }
+        unresolved:
+          type: array
+          description: Edge endpoints the estate does not contain.
+          items: { type: string }
+        blocked:
+          type: object
+          description: Containers that could not be ordered, and why.
+          additionalProperties: { type: string }
+        edges:
+          type: array
+          items: { $ref: "#/components/schemas/WorkloadDependency" }
+
+    DependencyCreateRequest:
+      type: object
+      description: |
+        Two container NAMES, and nothing else.
+
+        There is deliberately no field for an image, a digest, a registry, a
+        namespace, a container id, or any Docker option. Unknown fields are
+        REJECTED rather than ignored.
+      required: [dependent, dependency]
+      additionalProperties: false
+      properties:
+        dependent:
+          type: string
+          maxLength: 200
+          description: The container that needs the other one first.
+        dependency:
+          type: string
+          maxLength: 200
+          description: The container that must be stable first.
+
     # ------------------------------------------------------------- shared --
 
     Pagination:
@@ -7121,12 +7755,20 @@ components:
         alike: the first says HarborMaster has not looked, the second that it
         looked and found nothing to do. `cannotAdvise` is the absence of a
         judgement, not a mild one.
+        There is deliberately NO state for a container waiting on a dependency.
+        Waiting is the system working: it clears without anybody, and a state
+        for it would put a routine condition on the same list as a failed
+        reattachment.
       enum:
         - preserved
         - unhealthy
+        - dependencyFailed
         - approvalRequired
         - paused
+        - dependencyCycle
+        - dependencyUnresolved
         - needsReview
+        - dependencyBlocked
         - cannotAdvise
         - updateAvailable
         - notTracked
@@ -7197,6 +7839,37 @@ components:
         lastRollback:
           allOf: [{ $ref: "#/components/schemas/ActionOutcome" }]
           description: The most recent rollback. Absent when there has never been one.
+        dependencyKnown:
+          type: boolean
+          description: |
+            Whether the dependency subsystem answered for this container.
+
+            **False asserts nothing.** A deployment without dependency tracking,
+            or one whose graph could not be built, produces exactly the verdicts
+            it produced before dependencies existed — it does not produce a
+            fleet of containers claiming their dependencies are satisfied.
+        dependencyState:
+          allOf: [{ $ref: "#/components/schemas/DependencyState" }]
+          description: |
+            The dependency verdict, absent unless `dependencyKnown`. Carried
+            even when it did not change `state` — `dependencyWaiting` never
+            does, and a detail page still wants to explain the delay.
+        dependencyBlockedBy:
+          type: string
+          description: The container responsible, when one is. A name from the inventory.
+        rebindFailed:
+          type: boolean
+          description: |
+            A mandatory reattachment settled without succeeding. HarborMaster
+            does not retry one by itself, so this stands until a person acts.
+        rebindPending:
+          type: boolean
+          description: |
+            A mandatory reattachment is still in flight. Work in progress, not a
+            condition needing anybody — which is why it does not change `state`.
+        rebindProvider:
+          type: string
+          description: The container whose replacement is being attached to.
 
     ActionOutcome:
       type: object
@@ -10968,11 +11641,16 @@ components:
         The hardest question an operator asks an automation system is "why did
         you not update that container", and it is unanswerable unless the
         reasoning is recorded at the moment it happened.
+        `dependencyWaiting` is the one an operator most needs told apart from
+        the rest: it is the system WORKING. The dependency will finish, or fail
+        and produce a different reason, and nothing is asked of anybody in the
+        meantime.
       enum:
         - eligible
         - noPlan
         - noUpdate
         - notSelected
+        - notEligible
         - noPolicy
         - policyDisabled
         - labelDisabled
@@ -10991,6 +11669,13 @@ components:
         - runLimit
         - refusedByService
         - error
+        - selfUpdate
+        - dependencyWaiting
+        - dependencyBlocked
+        - dependencyCycle
+        - dependencyMissing
+        - dependencyIneligible
+        - dependentsNotRebindable
 
     AutomationRun:
       type: object
@@ -11055,6 +11740,24 @@ components:
             those modes and automatic.
         executionId: { type: string }
         rollbackId: { type: string }
+        containerState:
+          $ref: "#/components/schemas/ContainerState"
+        dependencyState:
+          allOf:
+            - $ref: "#/components/schemas/DependencyState"
+          description: |
+            What this container's dependencies looked like when the pass ran.
+
+            **Distinct from `reason`.** `reason` says what the ENGINE concluded;
+            this says what its dependencies looked like, and a container can be
+            skipped for an entirely unrelated reason while its dependencies are
+            perfectly fine.
+        blockedBy:
+          type: string
+          description: |
+            The container responsible, when one is. A NAME HarborMaster read
+            from its own inventory — never text from a daemon, never caller
+            input.
         position:
           type: integer
           description: |
@@ -11295,6 +11998,7 @@ components:
         - rollback.failed
         - automation.paused
         - automation.error
+        - dependency.rebindFailed
         - drift.detected
         - policy.violation
         - registry.unavailable

@@ -61,13 +61,49 @@ const (
 	// determined -- a calendar tag, an incomplete tag listing, or a comparison
 	// the parser refused to make. Reported honestly rather than guessed.
 	UpdateUnknown UpdateType = "unknown"
+
+	// UpdateRebind means the container must be recreated on the digest IT IS
+	// ALREADY RUNNING, because the namespace it shares belongs to a container
+	// that has been replaced.
+	//
+	// # Why this is an update type at all
+	//
+	// It is not an image change, and calling it one is uncomfortable. But the
+	// alternative was worse. Verified against Docker 29.6.2: recreating a
+	// namespace provider leaves its dependents RUNNING WITH NO NETWORK, silently
+	// -- and `docker restart` cannot repair one, it only takes it down. The
+	// repair is a recreation with the reference re-resolved, and the only safe
+	// way to perform a recreation in HarborMaster is through the change plan
+	// that founds an acquisition that founds an execution.
+	//
+	// Expressing the repair as a plan means it inherits every gate rather than
+	// needing new ones: the registry allowlist, the digest verification, the
+	// preservation comparison, the compliance evaluation, the self-update
+	// refusal, and all four verification proofs apply to it unchanged.
+	//
+	// # It is the most tightly pinned operation HarborMaster performs
+	//
+	// The proposed digest is not a digest a registry offered. It is the digest
+	// HarborMaster OBSERVED the container running. A rebind cannot change what
+	// executes on the host; it can only change which namespace it is attached
+	// to.
+	//
+	// # And it cannot be asked for
+	//
+	// No endpoint constructs one. A rebind plan exists only because the
+	// dependency coordinator observed a stale namespace reference in
+	// HarborMaster's own inventory. See RebindEvidence.
+	UpdateRebind UpdateType = "rebind"
 )
 
 // UpdateTypes lists every type, in report order: most to least urgent, with
 // the two non-answers last.
+//
+// UpdateRebind sits after the version changes and before the non-answers: it is
+// real work that must happen, but it is not a version moving.
 var UpdateTypes = []UpdateType{
 	UpdateMajor, UpdateMinor, UpdatePatch, UpdatePrerelease,
-	UpdateDigest, UpdateUnknown, UpdateNone,
+	UpdateDigest, UpdateRebind, UpdateUnknown, UpdateNone,
 }
 
 // ValidUpdateType reports whether name is a known update type.
@@ -89,6 +125,13 @@ func (u UpdateType) Available() bool {
 // sorting through a CASE expression built from these constants.
 func (u UpdateType) Rank() int {
 	switch u {
+	case UpdateRebind:
+		// Above every version change, deliberately. A rebind means the
+		// container is broken RIGHT NOW -- attached to a namespace that no
+		// longer exists -- while a major update means a newer image is
+		// available. Ranked so an operator sorting by what matters sees the
+		// outage before the opportunity.
+		return 7
 	case UpdateMajor:
 		return 6
 	case UpdateMinor:

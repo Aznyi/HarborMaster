@@ -563,18 +563,63 @@ func (s *AcquisitionService) preflight(
 	//     cannot drift apart. They used to: the planner paired a newer tag with
 	//     the CURRENT tag's digest, and this check compared that same current
 	//     digest against itself and passed vacuously.
-	onOffer := proposedChange(intel)
-	if !onOffer.Valid() {
-		decision.Refusal = domain.AcquisitionRefusalDigestUnavailable
-		return decision, nil
-	}
-	if onOffer.Reference() != plan.ProposedImage || onOffer.Digest() != plan.ProposedDigest {
-		decision.Refusal = domain.AcquisitionRefusalDigestChanged
-		return decision, nil
-	}
-	if approvedDigest != "" && approvedDigest != onOffer.Digest() {
-		decision.Refusal = domain.AcquisitionRefusalDigestChanged
-		return decision, nil
+	// A REATTACHMENT is checked against itself, not against the registry.
+	//
+	// # Why the registry comparison cannot apply here
+	//
+	// `proposedChange(intel)` answers "what would this image be UPGRADED to" --
+	// the newest tag the registry offers. A rebind proposes the opposite: the
+	// digest the container IS ALREADY RUNNING, so that it can be recreated
+	// unchanged and reattached to a replaced provider. The two are different by
+	// construction, so the comparison refused every reattachment with "the
+	// digest on offer has changed" -- while the provider it was meant to
+	// reattach to had already been replaced.
+	//
+	// Found live in Stage 5 against Docker 29.7.2.
+	//
+	// # What is checked instead, and why it is the same guarantee
+	//
+	// The property the TOCTOU check exists for is "the image that gets pulled is
+	// the image the plan named, and nothing moved underneath". For a rebind the
+	// plan's target came from HarborMaster's own inventory of what the container
+	// is running, re-read immediately before the plan was built, and it is
+	// already on this host. So the equivalent statement is that the plan is
+	// self-consistent: it proposes the reference and digest it currently has.
+	//
+	// A rebind that fails this is one whose image fields were crossed, which is
+	// the same crossing the ordinary path refuses -- and every other gate above
+	// and below still applies unchanged, including the execution preflight's own
+	// re-verification against the live container.
+	// `targetReference` and `targetDigest` are what will actually be pulled.
+	var targetReference, targetDigest string
+
+	if plan.UpdateType == domain.UpdateRebind {
+		if plan.ProposedImage != plan.CurrentImage ||
+			plan.ProposedDigest != plan.CurrentDigest {
+			decision.Refusal = domain.AcquisitionRefusalDigestChanged
+			return decision, nil
+		}
+		if approvedDigest != "" && approvedDigest != plan.ProposedDigest {
+			decision.Refusal = domain.AcquisitionRefusalDigestChanged
+			return decision, nil
+		}
+		targetReference, targetDigest = plan.ProposedImage, plan.ProposedDigest
+	} else {
+		// THE TOCTOU CHECK, for a plan that moves an image.
+		onOffer := proposedChange(intel)
+		if !onOffer.Valid() {
+			decision.Refusal = domain.AcquisitionRefusalDigestUnavailable
+			return decision, nil
+		}
+		if onOffer.Reference() != plan.ProposedImage || onOffer.Digest() != plan.ProposedDigest {
+			decision.Refusal = domain.AcquisitionRefusalDigestChanged
+			return decision, nil
+		}
+		if approvedDigest != "" && approvedDigest != onOffer.Digest() {
+			decision.Refusal = domain.AcquisitionRefusalDigestChanged
+			return decision, nil
+		}
+		targetReference, targetDigest = onOffer.Reference(), onOffer.Digest()
 	}
 
 	// The plan's own fingerprint. Recomputing it would mean re-gathering every
@@ -599,7 +644,7 @@ func (s *AcquisitionService) preflight(
 	// because a proposal is a new tag in the same repository and never a move
 	// to a different one -- a repository change here would be a pull from
 	// somewhere the plan never assessed.
-	proposedRef, proposedNormalised := normalisedReference(onOffer.Reference())
+	proposedRef, proposedNormalised := normalisedReference(targetReference)
 	if !proposedNormalised {
 		decision.Refusal = domain.AcquisitionRefusalTargetRefused
 		return decision, nil
@@ -617,8 +662,8 @@ func (s *AcquisitionService) preflight(
 		// reference.
 		Registry:   proposedRef.Host,
 		Repository: proposedRef.Path,
-		Digest:     onOffer.Digest(),
-		Reference:  onOffer.Reference(),
+		Digest:     targetDigest,
+		Reference:  targetReference,
 		Platform:   intel.Platform,
 	}
 

@@ -7,6 +7,7 @@ import { useAutomationApprovals } from "../hooks/useAutomation";
 // confirmation, the permission check and the error surface, and a second copy
 // would be a second thing to keep correct.
 import { ApproveButton as ApproveDecision } from "./AutomationRun";
+import { ApprovalDependencyNote } from "../components/DependencyStatus";
 import { PageIntro } from "../components/PageIntro";
 import { Pagination } from "../components/Pagination";
 import { ScrollArea } from "../components/DetailSection";
@@ -175,6 +176,11 @@ function ApprovalRow({
         ) : (
           <span className="font-medium">{decision.containerName}</span>
         )}
+        {/* Approval is AUTHORISATION, not a bypass. A container whose
+            dependency is still being updated has not been released ahead of it,
+            and a row that said only "waiting for approval" would leave an
+            operator believing their click starts the update immediately. */}
+        <ApprovalDependencyNote decision={decision} />
       </td>
 
       <td className="px-4 py-3">

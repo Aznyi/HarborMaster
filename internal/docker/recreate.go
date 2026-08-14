@@ -568,10 +568,10 @@ func copyConfigForCreate(response container.InspectResponse) *container.Config {
 		copied.StopTimeout = &timeout
 	}
 
-	// The hostname the daemon derived from the container's own short id is not
-	// configuration -- see the note on CaptureConfig. Cleared so the daemon
-	// derives a fresh one for the replacement.
-	if isGeneratedHostname(copied.Hostname, response.ID) {
+	// The hostname the daemon derived is not configuration -- see the note on
+	// CaptureConfig. Cleared so the daemon derives a fresh one for the
+	// replacement.
+	if isGeneratedHostname(copied.Hostname, response.ID, response.HostConfig) {
 		copied.Hostname = ""
 	}
 
@@ -587,11 +587,33 @@ func copyConfigForCreate(response container.InspectResponse) *container.Config {
 	return &copied
 }
 
-// isGeneratedHostname reports whether a hostname is the daemon's default.
+// isGeneratedHostname reports whether a hostname came from the daemon rather
+// than from an operator.
 //
-// The daemon uses the container's own short id when none is configured.
-func isGeneratedHostname(hostname, containerID string) bool {
+// Two ways it can have:
+//
+//  1. The container has no configured hostname, so the daemon used its own short
+//     id. The ordinary case.
+//
+//  2. The container SHARES ANOTHER CONTAINER'S NETWORK NAMESPACE. Docker refuses
+//     `--hostname` together with `--network container:<id>` -- always, not only
+//     when the two disagree -- so such a container cannot have had one set, and
+//     what inspection reports is the PROVIDER's short id.
+//
+// The second is decided by the mode rather than by the value's shape, because
+// the mode is the fact: whatever is in the field, the daemon put it there and
+// would refuse a create that sent it back. Reading it as configuration refused
+// every recreation of every namespace-sharing workload -- found live in Stage
+// 5a, at the point where the original had already been stopped and parked.
+//
+// IPC and PID sharing carry no such rule: a container may share either while
+// holding its own network namespace, and then its hostname is its own
+// configuration and is preserved.
+func isGeneratedHostname(hostname, containerID string, host *container.HostConfig) bool {
 	if hostname == "" {
+		return true
+	}
+	if host != nil && domain.SharesNamespace(string(host.NetworkMode)) {
 		return true
 	}
 	return len(containerID) >= 12 && hostname == containerID[:12]

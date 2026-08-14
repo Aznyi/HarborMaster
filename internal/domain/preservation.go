@@ -381,6 +381,27 @@ func BuildPreservationSummary(detail ContainerDetail, digest SecretDigester) Pre
 	add("security.apparmorProfile", security.AppArmorProfile)
 	add("security.seccompProfile", security.SeccompProfile)
 	add("security.selinuxLabel", security.SELinuxLabel)
+	// The network mode, alongside its two siblings.
+	//
+	// # Why this was missing, and what its absence hid
+	//
+	// Every other namespace mode was compared and this one never was. There is
+	// no normalisation behind that and no comment claiming one: `networks`
+	// above records ATTACHMENTS, and a container on `none`, on `host`, or
+	// sharing another container's namespace has none of those -- so all three
+	// rendered identically and were indistinguishable from each other.
+	//
+	// A replacement that came back on `host` when the original was on `none`
+	// therefore passed preservation, as would one attached to the wrong
+	// provider entirely. Stage 5b found the omission while diagnosing why the
+	// IPC and PID rebinds failed and the network rebind did not: the network
+	// case was passing because nothing looked.
+	//
+	// The intended change a REBIND makes is expressed by rewriting the expected
+	// configuration before the comparison, in the package that owns the capture,
+	// rather than by leaving the field uncompared here. An exception that broad
+	// is not a way to permit one approved change.
+	add("security.networkMode", security.NetworkMode)
 	add("security.ipcMode", security.IPCMode)
 	add("security.pidMode", security.PIDMode)
 	add("security.utsMode", security.UTSMode)
@@ -401,9 +422,28 @@ func BuildPreservationSummary(detail ContainerDetail, digest SecretDigester) Pre
 // See the note on BuildPreservationSummary: an unset hostname is filled in by
 // the daemon with the container's own short id, and comparing that across two
 // different containers would fail every recreation.
+//
+// # A shared network namespace has no hostname of its own
+//
+// Docker refuses `--hostname` together with `--network container:<id>` --
+// always, not only when the two disagree -- so a container in that mode cannot
+// have had one set, and what inspection reports is the PROVIDER's short id.
+//
+// That is the value a REBIND changes by construction: reattaching a dependent
+// from an old provider to a new one moves it from one short id to another. This
+// used to recognise only the container's OWN id as daemon-derived, so every
+// successful reattachment would have been reported as a configuration change.
+//
+// Decided by the mode rather than by the value's shape, because the mode is the
+// fact. IPC and PID sharing carry no such rule: a container may share either
+// while holding its own network namespace, and then its hostname is its own
+// configuration and is compared.
 func explicitHostname(detail ContainerDetail) string {
 	hostname := detail.Process.Hostname
 	if hostname == "" {
+		return ""
+	}
+	if SharesNamespace(detail.Security.NetworkMode) {
 		return ""
 	}
 	id := detail.Overview.ID

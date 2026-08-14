@@ -52,6 +52,8 @@ export type Permission =
   | "automation:run"
   | "automation:approve"
   | "automation:pause"
+  | "dependency:read"
+  | "dependency:manage"
   | "automation:manage"
   | "notification:manage"
   | "policy:manage"

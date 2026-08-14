@@ -68,7 +68,13 @@ const (
 		`WHEN 'proceed' THEN 1 ` +
 		`ELSE 0 END`
 
+	// Kept in step with domain.UpdateType.Rank. A rebind outranks every version
+	// change because it means the container is broken now, not that a newer
+	// image exists. There is no matching entry in imageUpdateRankSQL: image
+	// intelligence classifies what a REGISTRY offers, and a rebind is never
+	// something a registry reports.
 	planUpdateRankSQL = `CASE p.update_type ` +
+		`WHEN 'rebind' THEN 7 ` +
 		`WHEN 'major' THEN 6 ` +
 		`WHEN 'minor' THEN 5 ` +
 		`WHEN 'patch' THEN 4 ` +

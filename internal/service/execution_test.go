@@ -627,6 +627,10 @@ type execHarness struct {
 	// skew is added to now(), so a test can jump the clock forward to make a
 	// deadline arrive without sleeping through it.
 	skew atomic.Int64
+
+	// dependencies is the namespace evidence the preflight consults. Defaults
+	// to an ordinary standalone container; the invariant A tests replace it.
+	dependencies service.ExecutionDependencies
 }
 
 func (h *execHarness) now() time.Time {
@@ -672,8 +676,12 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		runtime:  runtime,
 		mutator:  mutator,
 		lineage:  newFakeLineageStore(),
-		base:     base,
-		start:    time.Now(),
+		// An ordinary container by default: nothing shares its namespace, and it
+		// shares nobody's. Tunable, because the invariant A tests are entirely
+		// about the two cases where that is not true.
+		dependencies: service.ExecutionDependencies(standaloneDependencies{}),
+		base:         base,
+		start:        time.Now(),
 	}
 	for _, apply := range tune {
 		apply(harness)
@@ -693,11 +701,15 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 	harness.service = service.NewExecutionService(service.ExecutionOptions{
 		Store:    harness.store,
 		Evidence: harness.evidence,
-		Runtime:  harness.runtime,
-		Capturer: harness.mutator,
-		Mutator:  harness.mutator,
-		Lineage:  harness.lineage,
-		Hasher:   service.NewHasher(key),
+		// Stated explicitly because the service fails closed without it: "cannot
+		// establish what shares this namespace" and "nothing shares it" are
+		// opposite facts, and only the second permits a stop.
+		Dependencies: harness.dependencies,
+		Runtime:      harness.runtime,
+		Capturer:     harness.mutator,
+		Mutator:      harness.mutator,
+		Lineage:      harness.lineage,
+		Hasher:       service.NewHasher(key),
 		Config: config.Execution{
 			Enabled:               true,
 			RequireSnapshot:       true,

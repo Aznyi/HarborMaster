@@ -31,6 +31,19 @@ import (
 type AutomationTarget struct {
 	ContainerID string
 	Selection   domain.SelectionTarget
+
+	// State is the container's lifecycle state.
+	//
+	// Read for ONE question, added in Phase 16: whether a container that needs
+	// no update is nevertheless STABLE enough for something depending on it to
+	// proceed. "Present" is not the same as "running", and a dependent released
+	// because its provider merely exists would be released on a container that
+	// is stopped.
+	//
+	// Deliberately not on domain.SelectionTarget. A policy selector must not be
+	// able to match on lifecycle state -- that would let a rule govern a
+	// container only while it happens to be up.
+	State domain.ContainerState
 }
 
 // MaxAutomationTargets bounds one pass's container load.
@@ -70,7 +83,7 @@ func (r *ContainerRepository) AutomationTargets(
 	truncated = total > MaxAutomationTargets
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, image_ref
+		SELECT id, name, image_ref, state
 		  FROM containers
 		 WHERE present = 1
 		 ORDER BY id
@@ -83,10 +96,18 @@ func (r *ContainerRepository) AutomationTargets(
 	byID := make(map[string]int, MaxAutomationTargets)
 	targets = make([]AutomationTarget, 0, 64)
 	for rows.Next() {
-		var target AutomationTarget
-		if err := rows.Scan(&target.ContainerID, &target.Selection.Name, &target.Selection.Image); err != nil {
+		var (
+			target AutomationTarget
+			state  string
+		)
+		if err := rows.Scan(&target.ContainerID, &target.Selection.Name,
+			&target.Selection.Image, &state); err != nil {
 			return nil, false, fmt.Errorf("scan automation target: %w", AsError(err))
 		}
+		// Mapped through the closed vocabulary rather than trusted, so an
+		// unrecognised value becomes StateUnknown -- which is not running, and
+		// therefore does not clear anything that depends on it.
+		target.State = domain.ParseContainerState(state)
 		byID[target.ContainerID] = len(targets)
 		targets = append(targets, target)
 	}

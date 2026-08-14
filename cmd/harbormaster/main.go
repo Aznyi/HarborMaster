@@ -656,6 +656,40 @@ func run() error {
 		capturer = dockerClient
 		mutator = dockerClient
 	}
+	// Workload dependencies: what must be stable before something else changes.
+	//
+	// A READER. It holds no Docker capability -- DependencyOptions has nowhere
+	// to put one -- and it submits nothing. Its whole output is evidence, handed
+	// to components that already own their capability and re-run their own
+	// preflight.
+	//
+	// Wired UNCONDITIONALLY, and that is load-bearing rather than convenient.
+	// The execution service fails closed without it: "HarborMaster cannot
+	// establish what shares this container's namespace" and "nothing shares this
+	// container's namespace" are opposite facts, and only the second permits a
+	// stop. TestCompositionRootSuppliesDependencyEvidence fails the build if this
+	// stops being passed to the execution service below.
+	dependencies := service.NewDependencyService(service.DependencyOptions{
+		Store:   db.Dependencies,
+		Lineage: service.NewDependencyLineage(db.Containers),
+		Self:    self,
+		Audit:   auditRecorder,
+		Logger:  logger,
+		// The coordinated-update record, the execution records it derives member
+		// state from, and the change plans it produces for reattachments.
+		//
+		// All three are HarborMaster's own tables. Writing a plan causes nothing
+		// to happen: acting on one goes through the existing acquisition and
+		// execution services, which own their capabilities and re-run their own
+		// preflights.
+		Operations: db.DependencyOperations,
+		Executions: service.NewDependencyExecutions(db.Executions),
+		Plans:      db.Plans,
+		// Somewhere to say one sentence, not a capability. Nil when
+		// notifications are off, which is the default and changes nothing.
+		Notifier: notifications.Notifier,
+	})
+
 	executions := service.NewExecutionService(service.ExecutionOptions{
 		Lineage: db.Lineage,
 		Store:   db.Executions,
@@ -668,6 +702,11 @@ func run() error {
 		// The LAST line of the self-update defence, and the one that matters
 		// most: this is the layer that actually stops a container.
 		Self: self,
+		// Invariant A. The live experiment established that STOPPING a
+		// namespace provider is the moment its dependents break -- silently,
+		// with no network and nothing logged -- so this is the layer that has to
+		// establish they can be reattached before anything stops.
+		Dependencies: dependencies,
 		// The same installation key the snapshots use. Configuration
 		// preservation compares sensitive values as keyed digests, and digests
 		// produced under a different key are not comparable -- so sharing the
@@ -773,9 +812,19 @@ func run() error {
 	automation := service.NewAutomationService(service.AutomationOptions{
 		Store:    db.Automation,
 		Policies: db.UpdatePolicies,
+		// The last two answer one question: which containers has HarborMaster
+		// positively established as needing no update. Without them a container
+		// with no change plan is indistinguishable from one that was never
+		// assessed, and its dependents are held for ever -- see
+		// domain.AssessNoUpdate.
 		Evidence: service.NewAutomationEvidence(
-			db.Containers, db.Plans, db.Acquisitions, db.Executions),
+			db.Containers, db.Plans, db.Acquisitions, db.Executions,
+			db.Lineage, db.ImageIntel),
 		Pipeline: service.NewAutomationPipeline(acquisitions, executions, rollbacks),
+		// The ordering evidence a pass reads, and the coordinator the follower
+		// advances. NOT a capability: it holds no Docker interface, and the
+		// engine's whole ability to affect the host remains the pipeline above.
+		Dependencies: dependencies,
 		// The passes, the pauses, and the approvals reach the security audit
 		// log. The MUTATIONS are audited by the services that perform them --
 		// auditing them twice would make the host-change counter over-report
@@ -962,6 +1011,10 @@ func run() error {
 
 		Automation:     automation,
 		UpdatePolicies: updatePolicies,
+		// The same reader the execution service consults for invariant A. One
+		// instance, so what the API shows and what the recreation path enforces
+		// are derived from the same evidence.
+		Dependencies: dependencies,
 		// Both are non-nil even when sending is off: an administrator
 		// configures destinations and reviews past deliveries before switching
 		// delivery on, which is the order those should happen in.

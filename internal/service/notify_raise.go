@@ -277,6 +277,53 @@ func NotifySchedulerError(notifier Notifier, stage, detail string) {
 	})
 }
 
+// ----------------------------------------------------------- dependencies --
+
+// NotifyRebindFailed reports a container that could not be reattached.
+//
+// # Why this is the only dependency event
+//
+// It is the one dependency condition that can leave a workload broken with no
+// other signal. A container sharing a replaced provider's namespace and not
+// reattached is attached to a namespace that no longer exists: Docker reports
+// nothing, the container keeps running, its network stops working, and
+// HarborMaster does not retry.
+//
+// A dependency LOOP changes nothing about a running container and would be
+// re-raised on every pass. A container WAITING on its dependency is the system
+// working. A dependency BLOCK is HarborMaster declining, which is the safe
+// direction and usually clears itself. None of those is worth waking somebody.
+//
+// # What the sentence carries
+//
+// Two container names and one HarborMaster-generated identifier. No image, no
+// digest, no refusal text from a daemon, and no error string — the state is a
+// value from a closed vocabulary and it is rendered as a fixed phrase.
+//
+// Deduplicated on the pair, so an operator watching a five-dependent provider
+// fail gets five distinct messages rather than one repeated, and gets each of
+// them once.
+func NotifyRebindFailed(
+	notifier Notifier,
+	dependent, provider, operationID string,
+) {
+	raise(notifier, domain.Notification{
+		Event:    domain.EventRebindFailed,
+		Severity: domain.NotifyCritical,
+		Title:    "HarborMaster could not reattach " + dependent,
+		Body: dependent + " shares " + provider + "'s namespace and could not be " +
+			"reattached to its replacement. It may have no working network until " +
+			"somebody recreates it. HarborMaster does not retry a reattachment " +
+			"by itself, and no image version was changed.",
+		ContainerName: dependent,
+		Fields: []domain.NotificationField{
+			field("Shares the namespace of", provider),
+			field("Operation", operationID),
+		},
+		DedupKey: "rebind:" + dependent + ":" + provider,
+	})
+}
+
 // ------------------------------------------------------ drift and policy --
 
 // NotifyDriftDetected reports a container that no longer matches its snapshot.

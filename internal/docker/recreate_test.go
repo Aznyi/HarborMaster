@@ -366,15 +366,25 @@ func TestRemoveRequestCannotForceOrDeleteVolumes(t *testing.T) {
 // The daemon sets Hostname to the container's own short id when none is
 // configured. Copying it would give the replacement the OLD container's
 // identity, and comparing it would report a difference on every success.
+// The second derivation -- the hostname a SHARED NETWORK NAMESPACE assigns --
+// has its own file: namespace_hostname_test.go.
 func TestGeneratedHostnameIsNotCarriedForward(t *testing.T) {
-	if !isGeneratedHostname(testContainerID[:12], testContainerID) {
+	// An ordinary container, holding its own network namespace.
+	own := &container.HostConfig{NetworkMode: "bridge"}
+
+	if !isGeneratedHostname(testContainerID[:12], testContainerID, own) {
 		t.Error("a hostname equal to the container's short id was not recognised as generated")
 	}
-	if !isGeneratedHostname("", testContainerID) {
+	if !isGeneratedHostname("", testContainerID, own) {
 		t.Error("an empty hostname was not treated as unset")
 	}
-	if isGeneratedHostname("api.internal", testContainerID) {
+	if isGeneratedHostname("api.internal", testContainerID, own) {
 		t.Error("an operator-chosen hostname was treated as generated and would be dropped")
+	}
+	// A missing host config establishes nothing about the network mode, so the
+	// answer falls back to the id comparison rather than to "derived".
+	if isGeneratedHostname("api.internal", testContainerID, nil) {
+		t.Error("an operator-chosen hostname was dropped because the host config was absent")
 	}
 }
 

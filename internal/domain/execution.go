@@ -527,6 +527,26 @@ const (
 	// ExecutionRefusalNameUnavailable means the parked or quarantine name this
 	// execution would need is already taken on the host.
 	ExecutionRefusalNameUnavailable ExecutionRefusal = "nameUnavailable"
+
+	// ExecutionRefusalNamespaceProviderMissing means this container shares
+	// another container's namespace and HarborMaster could not establish which
+	// live container that is.
+	//
+	// Verified against Docker 29.6.2: a create carrying a `container:<id>`
+	// reference to a container that no longer exists is REFUSED BY THE DAEMON,
+	// and the refusal arrives after the original has been stopped and parked.
+	// Refusing here means the recreation never starts rather than failing at the
+	// one moment there is no way back.
+	ExecutionRefusalNamespaceProviderMissing ExecutionRefusal = "namespaceProviderMissing"
+
+	// ExecutionRefusalDependentsNotRebindable is invariant A.
+	//
+	// This container's namespace is shared by others, and at least one of them
+	// could not be POSITIVELY established as repairable afterwards. Stopping is
+	// the moment they break -- the live experiment showed a dependent left
+	// running with no network and nothing logged -- so a provider whose
+	// dependents cannot be repaired is a provider that must not be stopped.
+	ExecutionRefusalDependentsNotRebindable ExecutionRefusal = "dependentsNotRebindable"
 )
 
 // ExecutionRefusals lists every refusal.
@@ -545,6 +565,7 @@ var ExecutionRefusals = []ExecutionRefusal{
 	ExecutionRefusalConflict, ExecutionRefusalLimit,
 	ExecutionRefusalDockerUnavailable, ExecutionRefusalSecretUnavailable,
 	ExecutionRefusalNameUnavailable, ExecutionRefusalSelfUpdate,
+	ExecutionRefusalNamespaceProviderMissing, ExecutionRefusalDependentsNotRebindable,
 }
 
 // ValidExecutionRefusal reports whether name is a known refusal.
@@ -568,6 +589,10 @@ func (r ExecutionRefusal) Explain() string {
 	switch r {
 	case ExecutionRefusalSelfUpdate:
 		return "this names the container HarborMaster is running in; stopping it would kill the process partway through, with no checkpoint and no rollback"
+	case ExecutionRefusalNamespaceProviderMissing:
+		return "this container shares another container's namespace, and HarborMaster could not establish which container currently holds it; recreating it would produce a container the daemon refuses to start"
+	case ExecutionRefusalDependentsNotRebindable:
+		return "other containers share this one's namespace, and HarborMaster could not establish that every one of them could be reattached afterwards; stopping this container would break them silently"
 	case ExecutionRefusalDisabled:
 		return "container recreation is switched off in this deployment"
 	case ExecutionRefusalAcquisitionMissing:

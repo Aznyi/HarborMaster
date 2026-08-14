@@ -121,6 +121,48 @@ type ExecutionEvidence interface {
 	Intel(ctx context.Context, reference string) (domain.ImageIntel, error)
 }
 
+// ExecutionDependencies is the namespace evidence the recreation path consults.
+//
+// Two methods, both READS, both answering a question this service cannot answer
+// from its own records. There is deliberately nothing here that changes
+// anything, and nothing that takes a container identity from a caller: both
+// inputs are values the execution service read from a capture or a plan it
+// already holds.
+type ExecutionDependencies interface {
+	// ResolveNamespaceProvider maps a provider id a capture NAMES onto the id
+	// that must be used instead. A live provider maps to itself.
+	//
+	// Returns an error when the chain cannot be established, which the caller
+	// turns into ExecutionRefusalNamespaceProviderMissing rather than passing a
+	// stale reference to the daemon.
+	ResolveNamespaceProvider(ctx context.Context, capturedID string) (string, error)
+
+	// AssessProvider runs invariant A: can every container sharing this one's
+	// namespace be reattached after it is replaced?
+	//
+	// The second return says whether the container is a provider at all. An
+	// ERROR means the check could not be performed, which is not the same as
+	// passing, and every caller refuses on it.
+	AssessProvider(ctx context.Context, providerName string) (domain.ProviderRebindAssessment, bool, error)
+
+	// EnsureOperation establishes and PERSISTS the record of which containers
+	// must be reattached after this one is replaced.
+	//
+	// Called from the worker-side preflight, immediately before the mutation
+	// point. The second return says whether the container is a namespace
+	// provider at all; an ordinary container gets no record and the path is
+	// unchanged for it.
+	//
+	// An error means the record could not be established, and the caller
+	// refuses without stopping anything. That ordering is the point: a record
+	// written after the stop would describe containers that are already broken.
+	EnsureOperation(ctx context.Context, provider string, planID string,
+		requestedBy domain.Requester) (operationID string, isProvider bool, err error)
+
+	// AttachProviderExecution links the record to the execution performing it.
+	AttachProviderExecution(ctx context.Context, operationID, executionID string) error
+}
+
 // ExecutionOptions configures an ExecutionService.
 type ExecutionOptions struct {
 	Store    ExecutionStore
@@ -146,6 +188,15 @@ type ExecutionOptions struct {
 	// the self-update defence, and the one that matters most: this is the layer
 	// that actually stops a container.
 	Self SelfReporter
+
+	// Dependencies answers the two namespace questions this service cannot
+	// answer for itself. READ-ONLY: nothing on it can change a container.
+	//
+	// Nil means the dependency subsystem is not wired, which fails CLOSED --
+	// see namespaceResolution and providerRebindable. An architecture test
+	// fails the build if the composition root stops supplying it, exactly as
+	// one does for Self.
+	Dependencies ExecutionDependencies
 
 	// Notify raises operator notifications. Nil sends none, which is the default:
 	// notifications are off unless a deployment asks for them, and every service
@@ -179,6 +230,8 @@ type ExecutionService struct {
 	// self reports HarborMaster's own container. Read on every preflight.
 	notifier Notifier
 	self     SelfReporter
+	// dependencies answers the namespace questions. Read-only.
+	dependencies ExecutionDependencies
 	// audit records the OUTCOME of a recreation in the security log. Nil in a
 	// test that is not about attribution; reportOutcome is nil-safe.
 	audit *AuditRecorder
@@ -251,22 +304,23 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 	}
 
 	return &ExecutionService{
-		store:      opts.Store,
-		evidence:   opts.Evidence,
-		runtime:    opts.Runtime,
-		capturer:   opts.Capturer,
-		mutator:    opts.Mutator,
-		hasher:     opts.Hasher,
-		notifier:   opts.Notify,
-		self:       opts.Self,
-		audit:      opts.Audit,
-		lineage:    opts.Lineage,
-		cfg:        cfg,
-		logger:     logger,
-		now:        now,
-		wake:       make(chan struct{}, 1),
-		cancels:    make(map[string]context.CancelFunc),
-		containers: make(map[string]struct{}),
+		store:        opts.Store,
+		evidence:     opts.Evidence,
+		runtime:      opts.Runtime,
+		capturer:     opts.Capturer,
+		mutator:      opts.Mutator,
+		hasher:       opts.Hasher,
+		notifier:     opts.Notify,
+		self:         opts.Self,
+		dependencies: opts.Dependencies,
+		audit:        opts.Audit,
+		lineage:      opts.Lineage,
+		cfg:          cfg,
+		logger:       logger,
+		now:          now,
+		wake:         make(chan struct{}, 1),
+		cancels:      make(map[string]context.CancelFunc),
+		containers:   make(map[string]struct{}),
 	}
 }
 

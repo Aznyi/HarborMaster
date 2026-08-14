@@ -1,6 +1,10 @@
 ﻿import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
+import { DependencySection } from "../components/DependencySection";
+import { CurrentDependencyStatus } from "../components/DependencyStatus";
+import { useContainerDependencies } from "../hooks/useDependencies";
+
 import { getContainerRaw } from "../api/client";
 import type {
   ActionOutcome,
@@ -471,6 +475,11 @@ function OverviewTab({ detail }: { detail: ContainerDetailData }) {
       <HeadlineSection detail={detail} attention={attention} />
       <ImageSection detail={detail} attention={attention} />
       <HistorySection attention={attention} />
+      <ContainerDependencies
+        id={overview.id}
+        name={overview.name}
+        attention={attention}
+      />
       <FindingsSection attention={attention} id={overview.id} />
 
       <details className="rounded-xl border border-border-subtle bg-surface-raised">
@@ -1470,5 +1479,39 @@ function PlanTab({ id }: { id: string }) {
         </Link>
       </p>
     </div>
+  );
+}
+
+/**
+ * The container's dependency relationships.
+ *
+ * Its own component so the read is scoped to this section: a dependency lookup
+ * that fails must not take the rest of the detail view with it. A container
+ * whose dependencies cannot be established still shows its image, its history,
+ * and its findings — and says so in the one section that is affected.
+ */
+function ContainerDependencies({
+  id,
+  name,
+  attention,
+}: {
+  id: string;
+  name: string;
+  attention: ContainerAttention;
+}) {
+  const dependencies = useContainerDependencies(id);
+
+  return (
+    <DependencySection
+      dependencies={dependencies.data ?? undefined}
+      // 503 is the dependency service saying it could not answer. Rendered as
+      // UNAVAILABLE rather than as "no dependencies", because those are
+      // opposite claims and only one of them is safe to act on.
+      unavailable={Boolean(dependencies.error)}
+      // The topology says what the relationships ARE. This says what is
+      // happening to them right now, and it comes from the same attention
+      // block the headline badge does — so the two cannot disagree.
+      status={<CurrentDependencyStatus attention={attention} container={name} />}
+    />
   );
 }

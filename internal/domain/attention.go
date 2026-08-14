@@ -60,6 +60,46 @@ const (
 	// Nothing HarborMaster might do to it matters more than that.
 	AttentionUnhealthy AttentionState = "unhealthy"
 
+	// AttentionDependencyFailed means a mandatory reattachment did not
+	// succeed.
+	//
+	// The loudest thing the dependency subsystem can say, and it ranks above
+	// approval because of what it MEANS on the host: a container that shares a
+	// replaced provider's namespace and was not reattached is a container whose
+	// network, IPC, or PID namespace may no longer exist. An approval is
+	// somebody's routine decision; this is an unfinished change.
+	//
+	// It ranks below unhealthy because the usual way an operator NOTICES this
+	// is the healthcheck failing, and when both hold the healthcheck is the
+	// more direct statement.
+	AttentionDependencyFailed AttentionState = "dependencyFailed"
+
+	// AttentionDependencyCycle means this container is in, or behind, a loop.
+	//
+	// Ranked with the states that mean "automation has stopped for this
+	// container until a person acts", because that is exactly what it is: no
+	// safe order exists and no pass will invent one. Unlike a block, it does
+	// not clear on its own.
+	AttentionDependencyCycle AttentionState = "dependencyCycle"
+
+	// AttentionDependencyUnresolved means HarborMaster could not establish what
+	// this container depends on.
+	//
+	// The dependency subsystem's own evidence gap, and it ranks with the other
+	// gap states for the same reason `notChecked` exists: it must never be
+	// rendered as "nothing constrains this container". It sits ABOVE the update
+	// states because it is a refusal rather than an absence -- HarborMaster
+	// will not update this container while it holds.
+	AttentionDependencyUnresolved AttentionState = "dependencyUnresolved"
+
+	// AttentionDependencyBlocked means something this container depends on could
+	// not be updated safely, or is not permitted to be.
+	//
+	// Below `needsReview` deliberately: a planner asking for a person is work
+	// addressed to the operator, while a block is a consequence of a decision
+	// made elsewhere and frequently clears itself on the next pass.
+	AttentionDependencyBlocked AttentionState = "dependencyBlocked"
+
 	// AttentionApprovalRequired means an update policy has decided on a change
 	// and is holding it for a person. The only state on this list that is
 	// waiting on the operator personally.
@@ -101,12 +141,33 @@ const (
 // The order is the rule. `AssessContainer` walks it and returns the first
 // state whose condition holds, so adding a state means deciding where it sits
 // relative to every other one -- which is the decision that actually matters.
+//
+// # Where the dependency states sit, and why
+//
+// The four were placed by asking, for each pair, which sentence an operator
+// scanning a list would rather have lost:
+//
+//	unhealthy        > dependencyFailed   the healthcheck is the direct symptom
+//	dependencyFailed > approvalRequired   an unfinished change beats a decision
+//	paused           > dependencyCycle    both stop automation; a pause is
+//	                                      HarborMaster having TRIED and given up
+//	needsReview      > dependencyBlocked  work addressed to the operator beats a
+//	                                      consequence that may clear itself
+//
+// `dependencyWaiting` is deliberately absent. Waiting is the system working,
+// it resolves without anybody, and a state for it would put a routine
+// condition on the same list as a failed reattachment. See
+// TestWaitingForADependencyIsNotAnAttentionState.
 var AttentionOrder = []AttentionState{
 	AttentionPreserved,
 	AttentionUnhealthy,
+	AttentionDependencyFailed,
 	AttentionApprovalRequired,
 	AttentionPaused,
+	AttentionDependencyCycle,
+	AttentionDependencyUnresolved,
 	AttentionNeedsReview,
+	AttentionDependencyBlocked,
 	AttentionCannotAdvise,
 	AttentionUpdateAvailable,
 	AttentionNotTracked,
@@ -136,6 +197,18 @@ func (state AttentionState) NeedsOperator() bool {
 	switch state {
 	case AttentionUnhealthy, AttentionApprovalRequired, AttentionPaused,
 		AttentionNeedsReview:
+		return true
+	// The three dependency states nothing resolves by itself. A failed
+	// reattachment is never retried automatically, a loop cannot be broken by a
+	// pass, and an unresolvable dependency stays unresolvable until the
+	// configuration or the inventory changes.
+	//
+	// AttentionDependencyBlocked is NOT here: it is frequently the ordinary
+	// consequence of a dependency that will be updated on the next pass, and
+	// listing it as work for a person would make the list noisy enough to stop
+	// being read.
+	case AttentionDependencyFailed, AttentionDependencyCycle,
+		AttentionDependencyUnresolved:
 		return true
 	default:
 		return false
@@ -222,6 +295,32 @@ type ContainerEvidence struct {
 	Preserved    PreservedKind
 	PreservedFor string
 
+	// From the dependency subsystem.
+	//
+	// DependencyKnown distinguishes "the dependency subsystem answered for this
+	// container" from "it is not wired, or could not answer". The zero value
+	// therefore asserts NOTHING: a deployment without dependency tracking
+	// produces exactly the verdicts it produced before this existed, rather
+	// than a fleet of containers claiming their dependencies are satisfied.
+	DependencyKnown bool
+	DependencyState DependencyState
+	// DependencyBlockedBy names the container responsible, when one is. A NAME
+	// HarborMaster read from its own inventory.
+	DependencyBlockedBy string
+
+	// RebindFailed marks a mandatory reattachment that settled without
+	// succeeding. HarborMaster does not retry one automatically, so this is a
+	// standing statement about the host until a person acts.
+	RebindFailed bool
+	// RebindPending marks a mandatory reattachment still outstanding.
+	//
+	// Carried for the DETAIL view and deliberately not a verdict of its own:
+	// work in progress is the system running, not a condition needing anybody.
+	RebindPending bool
+	// RebindProvider names the container whose replacement is being attached
+	// to, for either of the two above.
+	RebindProvider string
+
 	// What HarborMaster last DID to this container, if anything. Nil means no
 	// record exists, which is different from a record saying nothing happened.
 	LastUpdate   *ActionOutcome
@@ -271,6 +370,17 @@ type ContainerAttention struct {
 	Preserved    PreservedKind `json:"preserved,omitempty"`
 	PreservedFor string        `json:"preservedFor,omitempty"`
 
+	// The dependency picture, carried through so a row can name the container
+	// responsible and a detail page can explain it. Absent when the dependency
+	// subsystem did not answer -- which the UI must render as "not established",
+	// never as "satisfied".
+	DependencyKnown     bool            `json:"dependencyKnown"`
+	DependencyState     DependencyState `json:"dependencyState,omitempty"`
+	DependencyBlockedBy string          `json:"dependencyBlockedBy,omitempty"`
+	RebindFailed        bool            `json:"rebindFailed,omitempty"`
+	RebindPending       bool            `json:"rebindPending,omitempty"`
+	RebindProvider      string          `json:"rebindProvider,omitempty"`
+
 	// The last update and the last rollback HarborMaster performed here.
 	// Absent when there has never been one -- which the UI must render as
 	// "HarborMaster has not changed this container", never as a success.
@@ -295,6 +405,18 @@ func AssessContainer(evidence ContainerEvidence) ContainerAttention {
 		PreservedFor:     evidence.PreservedFor,
 		LastUpdate:       evidence.LastUpdate,
 		LastRollback:     evidence.LastRollback,
+
+		DependencyKnown: evidence.DependencyKnown,
+		RebindFailed:    evidence.RebindFailed,
+		RebindPending:   evidence.RebindPending,
+		RebindProvider:  evidence.RebindProvider,
+	}
+	// Carried only when the subsystem actually answered, for the same reason
+	// the plan fields are: a defaulted value here would claim a question was
+	// asked that was not.
+	if evidence.DependencyKnown {
+		attention.DependencyState = evidence.DependencyState
+		attention.DependencyBlockedBy = evidence.DependencyBlockedBy
 	}
 	// Carried only when an assessment exists. A zero UpdateType would
 	// serialise as the empty string anyway; being explicit here means a future
@@ -323,6 +445,13 @@ func assessState(evidence ContainerEvidence) AttentionState {
 		return AttentionUnhealthy
 	}
 
+	// A reattachment HarborMaster started and did not finish. Above approval
+	// because it is an unfinished change to the host rather than a decision
+	// waiting on somebody, and HarborMaster never retries one by itself.
+	if evidence.RebindFailed {
+		return AttentionDependencyFailed
+	}
+
 	// Above paused, because an approval is waiting on THIS PERSON while a
 	// pause is waiting on an investigation.
 	if evidence.AwaitingApproval {
@@ -333,14 +462,42 @@ func assessState(evidence ContainerEvidence) AttentionState {
 		return AttentionPaused
 	}
 
+	// The two dependency verdicts nothing resolves by itself. Only consulted
+	// when the subsystem actually answered: an unwired deployment asserts
+	// nothing here and falls through to exactly the verdict it produced before
+	// dependencies existed.
+	//
+	// dependencyWaiting and dependencySatisfied are deliberately absent. Waiting
+	// is the system working and clears without anybody; satisfied is not news.
+	// dependencyBlocked and dependencyIneligible are handled BELOW needsReview,
+	// where the order puts them.
+	if evidence.DependencyKnown {
+		switch evidence.DependencyState {
+		case DependencyCycle:
+			return AttentionDependencyCycle
+		case DependencyMissing:
+			return AttentionDependencyUnresolved
+		}
+	}
+
+	// blockedByDependency is checked at two points below, because the order
+	// puts it under needsReview but over everything the plan states say.
+	blockedByDependency := evidence.DependencyKnown &&
+		(evidence.DependencyState == DependencyBlocked ||
+			evidence.DependencyState == DependencyIneligible)
+
 	// Everything from here down is about the proposed image, so a container
 	// with no assessment cannot reach any of it.
 	if !evidence.PlanKnown {
-		// ...except this: "we established that nothing can be followed" is a
-		// stronger answer than "no assessment exists", and reporting the
-		// weaker one would suggest the planner might yet find something.
+		// ...except these two. "We established that nothing can be followed" is
+		// a stronger answer than "no assessment exists", and so is "a dependency
+		// stopped this": reporting the weaker one would suggest the planner
+		// might yet find something when the answer is already known.
 		if evidence.LineageKnown && !evidence.Tracked {
 			return AttentionNotTracked
+		}
+		if blockedByDependency {
+			return AttentionDependencyBlocked
 		}
 		return AttentionNotChecked
 	}
@@ -354,11 +511,18 @@ func assessState(evidence ContainerEvidence) AttentionState {
 			// current: "none" here means "nothing to compare against".
 			return AttentionNotTracked
 		}
+		// A container with nothing to update is not blocked in any sense that
+		// matters, so the block is not reported over "up to date". Doing so
+		// would put a row on the attention list for an update nobody wanted.
 		return AttentionUpToDate
 
 	case UpdateUnknown, "":
 		// An update may exist and its size could not be determined. Reported
-		// as the non-answer it is.
+		// as the non-answer it is -- unless a dependency has already settled
+		// the question, which is the more specific answer.
+		if blockedByDependency {
+			return AttentionDependencyBlocked
+		}
 		return AttentionCannotAdvise
 	}
 
@@ -366,10 +530,22 @@ func assessState(evidence ContainerEvidence) AttentionState {
 	// decides how loudly the row says so.
 	switch evidence.Recommendation {
 	case RecommendManualReview, RecommendAgainst:
+		// Above the block: a planner asking for a person is work addressed to
+		// the operator, while a block is a consequence of a decision made
+		// elsewhere that frequently clears on the next pass.
 		return AttentionNeedsReview
 	case RecommendUnknown, "":
+		if blockedByDependency {
+			return AttentionDependencyBlocked
+		}
 		return AttentionCannotAdvise
 	default:
+		if blockedByDependency {
+			// "An update exists and a dependency stopped it" is a more useful
+			// row than "an update exists", and it is why the update did not
+			// happen.
+			return AttentionDependencyBlocked
+		}
 		return AttentionUpdateAvailable
 	}
 }

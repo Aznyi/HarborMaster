@@ -796,6 +796,82 @@ The approval endpoint takes a run id and a container NAME, and neither chooses a
 target — together they SELECT one of HarborMaster's own held decisions. A name
 matching no held decision approves nothing.
 
+## 3g-ter. Workload dependencies
+
+Some containers cannot run without another container's *identity*. A container
+declaring `network_mode: container:gluetun` is bound to gluetun's current
+container id, not to its name: replace gluetun and the dependent is attached to
+a namespace that no longer exists. Docker reports nothing, the container keeps
+running, and its network stops working.
+
+HarborMaster reads those relationships off the daemon's own configuration and
+uses them for exactly two things: the ORDER work happens in, and whether it
+happens at all. A dependency never makes a container eligible for an update.
+
+### The dependency service holds no capability
+
+`DependencyOptions` has nowhere to put a Docker interface — not the read-only
+runtime, not the image acquirer, not the container mutator, not the rollbacker —
+and it holds no automation pipeline either. Its whole output is evidence. A
+reattachment is performed by the acquisition and execution services, each of
+which owns its own capability and re-runs its own preflight against the live
+host. Architecture tests pin both halves: one by reflection over the service,
+one by name over every file in the subsystem.
+
+The API surface is four reads and two writes. The writes touch one small table
+and carry two container NAMES; there is no field on the create request that
+could hold an image, a digest, or a container id, and a test walks the type by
+field name to keep it that way.
+
+### Detected and configured relationships are not the same thing
+
+A DETECTED relationship is derived from the inventory on every read. It has no
+stored row, so it cannot be created or deleted through the API — there is no id
+for a caller to name. It is the only kind that can require a recreation.
+
+A CONFIGURED relationship is an ordering an operator asserted about their own
+application. It constrains order and nothing else. **Updating a container by
+hand never recreates the containers configured to wait for it**, and the
+confirmation dialog says so explicitly, because the opposite assumption is a
+reasonable one to make.
+
+Removing a relationship takes a safety constraint away, which is why both writes
+are `dependency:manage` and administrator-only while reading is not.
+
+### A rebind moves no version
+
+When a provider is replaced, each hard dependent is recreated on **the digest it
+is already running**. Nothing is fetched, no tag is re-resolved, and no version
+moves. The namespace reference is re-resolved against the provider's current
+verified identity at execution time, from records HarborMaster wrote itself.
+
+### Two invariants govern when a provider may be touched
+
+**A.** A hard namespace provider may not enter mutation unless *every* affected
+hard dependent positively passed rebind preflight. Unknown, unrecreatable,
+untracked, preserved, self, and missing-digest dependents all block it. Stopping
+a provider whose dependents cannot be repaired would break them silently, and
+"could not be assessed" is not "safe".
+
+**B.** A verified provider execution is *not* the completion of the dependency
+operation. At that moment every dependent is attached to a namespace that no
+longer exists, which is the most fragile point in the whole sequence. Only
+provider-verified plus every mandatory rebind verified is complete, and that
+answer is derived from the execution records rather than read from a stored
+flag.
+
+### There is no group rollback
+
+A failed reattachment does not undo the provider and does not revert dependents
+that already succeeded — reverting the provider would break exactly the
+containers that are currently correct. The operation is recorded as failed with
+its successful half intact, the UI says so, and a person settles it. There is no
+endpoint that retries a reattachment or rolls a group backward, and a test walks
+the route table to keep it that way.
+
+This is the one dependency condition that raises a notification, because it is
+the one that can leave a workload broken with no other signal.
+
 ## 3h. Identity, authorization, and audit
 
 Phase 9.5 closed the boundary every earlier phase was compensating for. Before

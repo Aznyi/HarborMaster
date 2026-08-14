@@ -127,6 +127,26 @@ type DB struct {
 	// Authoritative -- the container label of the same name is evidence only.
 	Lineage *LineageRepository
 
+	// Dependencies holds what must be stable before something else changes.
+	//
+	// Only OPERATOR-asserted ordering is stored. The relationships Docker
+	// itself establishes -- a shared network, IPC, or PID namespace -- are
+	// DERIVED from the inventory's namespace projection on every read, because
+	// a stored copy of a fact that changes on every recreation is a second
+	// thing that can be wrong about the host.
+	//
+	// Nothing behind this can change a container. A relationship only ever
+	// makes HarborMaster wait or refuse.
+	Dependencies *DependencyRepository
+
+	// DependencyOperations holds coordinated, dependency-safe provider updates:
+	// one row per operation, one per mandatory rebind.
+	//
+	// Bookkeeping, like every other repository here. It records what
+	// HarborMaster decided and what the acquisition, execution, and rollback
+	// records reported; nothing on it can change a container.
+	DependencyOperations *DependencyOperationRepository
+
 	// Users holds accounts, their password verifiers, and the bootstrap state
 	// that says whether this installation has been claimed.
 	Users *UserRepository
@@ -375,10 +395,12 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Executions:   &ExecutionRepository{db: sqlDB},
 		Rollbacks:    &RollbackRepository{db: sqlDB},
 
-		UpdatePolicies: &UpdatePolicyRepository{db: sqlDB},
-		Automation:     &AutomationRepository{db: sqlDB},
-		Notifications:  &NotificationRepository{db: sqlDB},
-		Lineage:        &LineageRepository{db: sqlDB},
+		UpdatePolicies:       &UpdatePolicyRepository{db: sqlDB},
+		Automation:           &AutomationRepository{db: sqlDB},
+		Notifications:        &NotificationRepository{db: sqlDB},
+		Lineage:              &LineageRepository{db: sqlDB},
+		Dependencies:         &DependencyRepository{db: sqlDB},
+		DependencyOperations: &DependencyOperationRepository{db: sqlDB},
 
 		Users:    &UserRepository{db: sqlDB},
 		Sessions: &SessionRepository{db: sqlDB},

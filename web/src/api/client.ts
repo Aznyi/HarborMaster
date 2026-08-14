@@ -7,6 +7,14 @@
  */
 
 import type {
+  ContainerDependencies,
+  DependencyCreateRequest,
+  DependencyGraph,
+  DependencyListing,
+  DependencyOperationListing,
+  WorkloadDependency,
+} from "./dependencyTypes";
+import type {
   DeliveryQuery,
   NotificationConfigQuery,
   NotificationDelivery,
@@ -2151,5 +2159,100 @@ export function getNotificationDelivery(
   return request<NotificationDelivery>(
     `/notifications/deliveries/${encodeURIComponent(deliveryId)}`,
     options,
+  );
+}
+
+// ------------------------------------------------------ workload dependencies --
+
+/**
+ * GET /api/v1/dependencies
+ *
+ * Every relationship in force, detected and configured together.
+ *
+ * `problems` is read ALONGSIDE `items`, never instead of it: a container listed
+ * there declares a shared namespace HarborMaster could not resolve, which BLOCKS
+ * it. Rendering the edge list alone would show a tidier estate than exists.
+ */
+export function listDependencies(
+  options?: RequestOptions,
+): Promise<DependencyListing> {
+  return request<DependencyListing>("/dependencies", options);
+}
+
+/**
+ * GET /api/v1/dependencies/container/{id}
+ *
+ * One container's relationships in both directions. Takes the container's ID
+ * and resolves it server-side to the stable NAME relationships are keyed on.
+ */
+export function getContainerDependencies(
+  containerId: string,
+  options?: RequestOptions,
+): Promise<ContainerDependencies> {
+  return request<ContainerDependencies>(
+    `/dependencies/container/${encodeURIComponent(containerId)}`,
+    options,
+  );
+}
+
+/**
+ * GET /api/v1/dependencies/graph
+ *
+ * The deterministic update order. A PROJECTION over work that is already valid:
+ * reading it creates no plan, approves nothing, and touches no Docker socket.
+ */
+export function getDependencyGraph(
+  options?: RequestOptions,
+): Promise<DependencyGraph> {
+  return request<DependencyGraph>("/dependencies/graph", options);
+}
+
+/**
+ * GET /api/v1/dependencies/operations
+ *
+ * The coordinated provider updates HarborMaster performed, and where each
+ * mandatory reattachment got to. A READ: there is no sibling that retries,
+ * cancels, or rolls one of these back.
+ *
+ * Concluded operations are included on purpose. A provider that succeeded with
+ * one reattachment that did not is recorded as failed, and it is precisely the
+ * state an operator has to settle — the provider and the successful
+ * reattachments are still on the host.
+ */
+export function listDependencyOperations(
+  options?: RequestOptions,
+): Promise<DependencyOperationListing> {
+  return request<DependencyOperationListing>("/dependencies/operations", options);
+}
+
+/**
+ * POST /api/v1/dependencies — record an ordering. Administrator only.
+ *
+ * The body carries two container NAMES and nothing else. Refused with 409 for a
+ * self-edge, an unknown or absent container, a preserved container,
+ * HarborMaster itself, a duplicate, or an edge that would close a cycle.
+ */
+export function createDependency(
+  body: DependencyCreateRequest,
+  options?: RequestOptions,
+): Promise<WorkloadDependency> {
+  return request<WorkloadDependency>("/dependencies", options, "POST", body);
+}
+
+/**
+ * DELETE /api/v1/dependencies/{id} — remove an ordering. Administrator only.
+ *
+ * Reaches CONFIGURED relationships only. A detected namespace relationship is
+ * derived from the inventory on every read and has no stored row, so there is
+ * no id here that could name one. Answers 204.
+ */
+export function deleteDependency(
+  dependencyId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    `/dependencies/${encodeURIComponent(dependencyId)}`,
+    options,
+    "DELETE",
   );
 }

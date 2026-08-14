@@ -1,4 +1,5 @@
-import type { Pagination } from "./inventoryTypes";
+import type { DependencyState } from "./dependencyTypes";
+import type { ContainerState, Pagination } from "./inventoryTypes";
 import type { UpdateType } from "./imageTypes";
 import type { Recommendation } from "./planTypes";
 
@@ -174,7 +175,14 @@ export type AutomationReason =
   | "registryLimit"
   | "runLimit"
   | "refusedByService"
-  | "error";
+  | "error"
+  | "selfUpdate"
+  | "dependencyWaiting"
+  | "dependencyBlocked"
+  | "dependencyCycle"
+  | "dependencyMissing"
+  | "dependencyIneligible"
+  | "dependentsNotRebindable";
 
 export const AUTOMATION_REASON_LABELS: Record<AutomationReason, string> = {
   eligible: "Every check passed",
@@ -200,7 +208,108 @@ export const AUTOMATION_REASON_LABELS: Record<AutomationReason, string> = {
   runLimit: "Per-pass limit",
   refusedByService: "Refused by a preflight",
   error: "Could not be decided",
+  selfUpdate: "HarborMaster's own container",
+  // "Waiting", never "blocked" or "failed": the dependency will finish or fail
+  // on its own and nothing is being asked of anybody meanwhile.
+  dependencyWaiting: "Waiting for dependency",
+  dependencyBlocked: "Blocked by dependency",
+  dependencyCycle: "No safe update order",
+  dependencyMissing: "Dependency unavailable",
+  dependencyIneligible: "Dependency not permitted to update",
+  dependentsNotRebindable: "Dependants could not be reattached",
 };
+
+/**
+ * The longer sentence for each reason.
+ *
+ * # Why these are separate from the labels
+ *
+ * A label fits a table cell and a sentence answers the question. "Per-pass
+ * limit" is enough to scan a hundred rows; it is not enough to tell an operator
+ * that nothing is wrong and the container is first in line next time.
+ *
+ * The dependency ones carry the distinction the whole subsystem turns on:
+ * WAITING is the system working, BLOCKED is HarborMaster declining, and the
+ * last is the one case where a container's own update is refused to protect
+ * something else.
+ */
+export const AUTOMATION_REASON_DETAILS: Record<AutomationReason, string> = {
+  eligible: "Every check passed and the update was submitted.",
+  noPlan: "No current change plan exists for this container.",
+  noUpdate: "The plan proposes no change.",
+  notSelected: "No update policy selects this container.",
+  notEligible:
+    "A broad policy looked at this container and did not enrol it. " +
+    "HarborMaster never enrols its own container, the containers it keeps as " +
+    "evidence, or anything opted out by label.",
+  noPolicy: "No update policy is defined.",
+  policyDisabled: "The governing policy is switched off.",
+  labelDisabled: "The container carries a label opting it out.",
+  labelPaused: "The container carries a label pausing it.",
+  observeMode: "The policy is in observe mode, so nothing was changed.",
+  dryRunMode: "The policy is in dry-run mode, so nothing was changed.",
+  approvalRequired: "The policy holds each update until a person releases it.",
+  strategyCeiling: "The change is larger than the policy's ceiling permits.",
+  recommendation: "The planner's assessment asks for a person to look first.",
+  windowClosed: "The maintenance window is closed.",
+  windowUnresolvable:
+    "The maintenance window could not be evaluated, so it is treated as closed.",
+  automationPaused: "Automation is paused for this container.",
+  alreadyInFlight: "HarborMaster is already working on this container.",
+  concurrencyLimit: "The pass had already reached its concurrency limit.",
+  registryLimit: "The pass had already reached its limit for that registry.",
+  runLimit:
+    "The pass had already submitted as many updates as it will in one run. " +
+    "Nothing is wrong: this container is simply next in line.",
+  refusedByService: "A preflight check refused the request.",
+  error: "The decision could not be made.",
+  selfUpdate:
+    "This is the container HarborMaster is running in. It is never updated " +
+    "from the inside — update it from outside with your compose file.",
+  dependencyWaiting:
+    "A container this one depends on is still being updated. Nothing is " +
+    "wrong and nothing is being asked of you; this clears when that update " +
+    "finishes and verifies.",
+  dependencyBlocked:
+    "A container this one depends on could not be updated safely, so " +
+    "HarborMaster did not proceed with this one either.",
+  dependencyCycle:
+    "These containers depend on each other in a loop, so no safe order " +
+    "exists. The loop has to be broken before either can be updated.",
+  dependencyMissing:
+    "HarborMaster could not establish what this container depends on, so it " +
+    "will not update it.",
+  dependencyIneligible:
+    "A container this one depends on needs an update the rules in force do " +
+    "not permit, so this one waits on something that will not happen.",
+  dependentsNotRebindable:
+    "Containers share this one's namespace and HarborMaster could not " +
+    "establish that it can safely reattach all of them. Replacing this " +
+    "container would break them silently, so it was not replaced.",
+};
+
+/**
+ * Whether a reason describes a FAILURE.
+ *
+ * Used to keep waiting out of failure styling. Only three reasons here mean
+ * something went wrong; everything else is a decision, a limit, or the system
+ * working as designed — and a page that painted all twenty-nine the same way
+ * would teach an operator to ignore the colour.
+ */
+export function automationReasonIsFailure(reason: AutomationReason): boolean {
+  return (
+    reason === "error" ||
+    reason === "refusedByService" ||
+    reason === "dependencyBlocked" ||
+    reason === "dependencyMissing" ||
+    reason === "dependentsNotRebindable"
+  );
+}
+
+/** Whether a reason is about a dependency at all. */
+export function automationReasonIsDependency(reason: AutomationReason): boolean {
+  return reason.startsWith("dependency") || reason === "dependentsNotRebindable";
+}
 
 /** Why automation stopped for a container. */
 export type PauseReason = "repeatedFailure" | "automaticRollback" | "operator";
@@ -465,6 +574,20 @@ export interface AutomationDecision {
   acquisitionId?: string;
   executionId?: string;
   rollbackId?: string;
+
+  /** The lifecycle state the pass saw. "Present" is not "stable". */
+  containerState?: ContainerState;
+  /**
+   * What this container's dependencies looked like when the pass ran.
+   *
+   * DISTINCT from `reason`. `reason` says what the engine concluded; this says
+   * what the dependencies looked like, and a container can be skipped for an
+   * entirely unrelated reason while its dependencies are perfectly fine.
+   */
+  dependencyState?: DependencyState;
+  /** The container responsible, when one is. A name from the inventory. */
+  blockedBy?: string;
+
   position: number;
   decidedAt: string;
 }

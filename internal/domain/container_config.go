@@ -356,6 +356,16 @@ type Security struct {
 	DeviceCgroupRules []string        `json:"deviceCgroupRules,omitempty"`
 	DeviceRequests    []DeviceRequest `json:"deviceRequests,omitempty"`
 
+	// NetworkMode is the container's network namespace declaration: "bridge",
+	// "host", "none", a network name, or `container:<id>` for a namespace shared
+	// with another container.
+	//
+	// A security fact in its own right -- `host` means the container has the
+	// host's network stack -- and the input the dependency subsystem derives a
+	// hard runtime relationship from. It sits beside the other namespace modes
+	// because it is one, and because an operator checking this section before
+	// and after a change needs all of them in one place.
+	NetworkMode  string `json:"networkMode,omitempty"`
 	IPCMode      string `json:"ipcMode,omitempty"`
 	PIDMode      string `json:"pidMode,omitempty"`
 	UTSMode      string `json:"utsMode,omitempty"`

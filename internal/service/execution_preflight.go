@@ -269,6 +269,27 @@ func (s *ExecutionService) preflight(
 		return decision, nil
 	}
 
+	// ---- invariant A: what shares this container's namespace --------------
+	//
+	// HERE, in the preflight, because the preflight is what runs before the
+	// mutation point -- once when the request is made, and again inside the
+	// worker immediately before anything is stopped.
+	//
+	// The live experiment established that STOPPING is the moment dependents
+	// break: a container sharing this one's network namespace is left running
+	// with no network, silently, and `docker restart` cannot repair it. So a
+	// provider whose dependents cannot be positively established as repairable
+	// is a provider that must not be stopped, and the check has to be on this
+	// side of the line.
+	//
+	// Placed after the name check and before the snapshot deliberately: it is a
+	// property of the HOST rather than of HarborMaster's records, and grouping
+	// it with the cheap structural checks would suggest it is one.
+	if refusal := s.providerRebindable(ctx, decision.ContainerName); refusal != domain.ExecutionRefusalNone {
+		decision.Refusal = refusal
+		return decision, nil
+	}
+
 	// ---- the snapshot ----------------------------------------------------
 
 	baseline, err := s.evidence.Baseline(ctx, decision.ContainerID)

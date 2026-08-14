@@ -136,6 +136,25 @@ type AutomationEvidence interface {
 	ExecutionActive(ctx context.Context, containerID string) (bool, error)
 	// InFlightTotal is how much work is outstanding across the whole host.
 	InFlightTotal(ctx context.Context) (int, error)
+
+	// CurrentAssessments returns HarborMaster's own positive findings that a
+	// container needs no update, keyed by container NAME.
+	//
+	// # Why this is not derivable from the plan table
+	//
+	// The planner writes NO row for a container it assessed and found current,
+	// so "no plan" cannot distinguish "looked, and it is fine" from "did not
+	// look". Only the first may release a dependent. See domain.AssessCurrent.
+	//
+	// A container absent from the map has no assessment, which is the zero
+	// value and means UNKNOWN. An error, an unwired repository, or an estate
+	// nothing is tracked in all produce an empty map -- and therefore hold
+	// every dependent rather than releasing them.
+	//
+	// Keyed by name because lineage is: a recreation replaces the container and
+	// its id with it, so an id-keyed fact would stop describing the container
+	// at the exact moment it did its job.
+	CurrentAssessments(ctx context.Context, now time.Time) (map[string]domain.CurrentAssessment, error)
 }
 
 // SelfReporter tells the engine which container HarborMaster is running in.
@@ -187,6 +206,15 @@ type AutomationOptions struct {
 	Evidence AutomationEvidence
 	Pipeline AutomationPipeline
 
+	// Dependencies is the ordering evidence a pass reads and the coordinator the
+	// follower advances.
+	//
+	// NOT a capability. It holds no Docker interface -- an architecture test
+	// pins that by reflection -- and the engine's whole ability to affect the
+	// host remains AutomationPipeline. Nil leaves the pass exactly as it was
+	// before Phase 16.
+	Dependencies AutomationDependencies
+
 	// Self reports which container HarborMaster is running in, so a pass can
 	// refuse to update it. Nil means the zero identity, which matches nothing --
 	// and the execution service refuses independently, so a build without this
@@ -213,13 +241,14 @@ type AutomationOptions struct {
 
 // AutomationService owns the scheduler and the follower.
 type AutomationService struct {
-	store    AutomationStore
-	policies AutomationPolicyStore
-	evidence AutomationEvidence
-	pipeline AutomationPipeline
-	self     SelfReporter
-	audit    *AuditRecorder
-	notifier Notifier
+	store        AutomationStore
+	policies     AutomationPolicyStore
+	evidence     AutomationEvidence
+	pipeline     AutomationPipeline
+	self         SelfReporter
+	dependencies AutomationDependencies
+	audit        *AuditRecorder
+	notifier     Notifier
 
 	cfg    config.Automation
 	logger *slog.Logger
@@ -271,16 +300,17 @@ func NewAutomationService(opts AutomationOptions) *AutomationService {
 	}
 
 	return &AutomationService{
-		store:    opts.Store,
-		policies: opts.Policies,
-		evidence: opts.Evidence,
-		pipeline: opts.Pipeline,
-		self:     opts.Self,
-		audit:    opts.Audit,
-		notifier: opts.Notify,
-		cfg:      cfg,
-		logger:   logger,
-		now:      now,
+		store:        opts.Store,
+		policies:     opts.Policies,
+		evidence:     opts.Evidence,
+		pipeline:     opts.Pipeline,
+		dependencies: opts.Dependencies,
+		self:         opts.Self,
+		audit:        opts.Audit,
+		notifier:     opts.Notify,
+		cfg:          cfg,
+		logger:       logger,
+		now:          now,
 	}
 }
 
@@ -663,10 +693,20 @@ func (s *AutomationService) decide(
 
 	budget := NewAutomationBudget(s.cfg.MaxPerRun, s.cfg.MaxConcurrent, inFlight, registryOfReference)
 
-	decisions := make([]domain.AutomationDecision, 0, len(targets))
+	// ---- phase 1: decide every container ---------------------------------
+	//
+	// DECIDING and SUBMITTING were one loop until Phase 16. They are separated
+	// now for one reason: ordering. Whether a container may be submitted YET
+	// depends on what the pass decided about the containers it depends on, and
+	// that cannot be known while still deciding them.
+	//
+	// This phase is unchanged in every other respect. DecideAutomation is the
+	// same pure function, reads the same inputs, and reaches the same verdicts
+	// it always did.
+	outcomes := make([]AutomationOutcome, 0, len(targets))
 	for index, target := range targets {
 		if ctx.Err() != nil {
-			return decisions, counts, ctx.Err()
+			return collectDecisions(outcomes), counts, ctx.Err()
 		}
 		counts.Considered++
 
@@ -690,6 +730,33 @@ func (s *AutomationService) decide(
 		outcome := DecideAutomation(input)
 		outcome.Decision.RunID = run.RunID
 		outcome.Decision.Position = index
+		// The lifecycle state the pass saw, so a dependent can tell "needs no
+		// update" from "needs no update AND is up".
+		outcome.Decision.ContainerState = target.State
+		outcomes = append(outcomes, outcome)
+	}
+
+	// ---- phase 2: the dependency gate ------------------------------------
+	//
+	// Applied to the decisions phase 1 produced, and able to do exactly one
+	// thing to them: turn an eligible decision into a held or blocked one.
+	//
+	// A pass with no dependency evidence, or one whose graph could not be built,
+	// leaves every decision exactly as it was -- see applyDependencyGate for why
+	// that is the correct direction rather than a fail-open.
+	order := s.applyDependencyGate(ctx, outcomes)
+
+	// ---- phase 3: submit, in stage order ---------------------------------
+	//
+	// The budget is applied in the SAME order the graph implies, so a per-run
+	// ceiling truncates the tail of the estate rather than a slice through the
+	// middle of a chain. A container deferred by the budget stays waiting for a
+	// later pass; it is never marked blocked.
+	for _, index := range order {
+		if ctx.Err() != nil {
+			return collectDecisions(outcomes), counts, ctx.Err()
+		}
+		outcome := &outcomes[index]
 
 		switch {
 		case outcome.Eligible():
@@ -712,7 +779,7 @@ func (s *AutomationService) decide(
 				counts.Skipped++
 				break
 			}
-			if s.submit(ctx, run, &outcome, request.requestedBy) {
+			if s.submit(ctx, run, outcome, request.requestedBy) {
 				counts.Submitted++
 			} else {
 				counts.Failed++
@@ -726,11 +793,22 @@ func (s *AutomationService) decide(
 		default:
 			counts.Skipped++
 		}
-
-		decisions = append(decisions, outcome.Decision)
 	}
 
-	return decisions, counts, nil
+	return collectDecisions(outcomes), counts, nil
+}
+
+// collectDecisions projects the outcomes onto the records a pass stores.
+//
+// In TARGET order rather than submission order, because the decision list is a
+// record of what the pass thought about every container and an operator reading
+// it should see the estate, not the schedule.
+func collectDecisions(outcomes []AutomationOutcome) []domain.AutomationDecision {
+	decisions := make([]domain.AutomationDecision, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		decisions = append(decisions, outcome.Decision)
+	}
+	return decisions
 }
 
 // loadContainerEvidence fills in the per-container reads.

@@ -1,10 +1,10 @@
-import { useCallback, useState } from "react";
+﻿import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import type { AutomationDecision } from "../api/automationTypes";
 import { AUTOMATION_TRIGGER_LABELS } from "../api/automationTypes";
+import { DecisionReason } from "../components/DependencyStatus";
 import {
-  AutomationReasonText,
   AutomationRunStateBadge,
   AutomationVerdictBadge,
 } from "../components/AutomationBadges";
@@ -29,7 +29,7 @@ import { formatMoment } from "./Automation";
  *
  * Decisions are returned in the pass's own execution ORDER, not alphabetically
  * and not by outcome. That is what makes a dry run's output "what would happen,
- * in what sequence" rather than an unordered set — and on a real pass it is how
+ * in what sequence" rather than an unordered set â€” and on a real pass it is how
  * an operator reconstructs which container was touched first.
  *
  * # Approval happens here
@@ -67,7 +67,7 @@ export function AutomationRun() {
 
       <p className="text-sm">
         <Link className="underline" to="/automation">
-          ← Back to automation
+          â† Back to automation
         </Link>
       </p>
 
@@ -87,9 +87,9 @@ export function AutomationRun() {
         <Fact
           label="Counters"
           value={
-            `${record.considered ?? 0} considered · ` +
-            `${record.eligible ?? 0} eligible · ` +
-            `${record.submitted ?? 0} submitted · ` +
+            `${record.considered ?? 0} considered Â· ` +
+            `${record.eligible ?? 0} eligible Â· ` +
+            `${record.submitted ?? 0} submitted Â· ` +
             `${record.failed ?? 0} failed`
           }
         />
@@ -177,18 +177,15 @@ function DecisionList({
                   <AutomationVerdictBadge verdict={decision.verdict} />
                 </td>
                 <td className="px-3 py-2">
-                  <AutomationReasonText
-                    reason={decision.reason}
-                    detail={decision.detail}
-                  />
+                  <DecisionReason decision={decision} />
                 </td>
                 <td className="px-3 py-2 text-content-muted">
                   {decision.proposedImage ? (
                     <span title={decision.proposedDigest}>
-                      {decision.currentImage} → {decision.proposedImage}
+                      {decision.currentImage} â†’ {decision.proposedImage}
                     </span>
                   ) : (
-                    "—"
+                    "â€”"
                   )}
                 </td>
                 <td className="px-3 py-2 text-xs text-content-muted">
@@ -242,7 +239,7 @@ function RecordLinks({ decision }: { decision: AutomationDecision }) {
       </Link>,
     );
   }
-  if (links.length === 0) return <span>—</span>;
+  if (links.length === 0) return <span>â€”</span>;
 
   return (
     <span className="flex flex-wrap gap-2">
@@ -257,7 +254,7 @@ function RecordLinks({ decision }: { decision: AutomationDecision }) {
  * Releases one held decision.
  *
  * Two-step: the first press asks for confirmation, and the confirmation states
- * what will actually happen. Approving is not a preference — it stops a
+ * what will actually happen. Approving is not a preference â€” it stops a
  * container and starts a different one in its place.
  */
 export function ApproveButton({
@@ -322,7 +319,7 @@ export function ApproveButton({
           disabled={busy}
           onClick={() => void release()}
         >
-          {busy ? "Approving…" : "Yes, update it"}
+          {busy ? "Approvingâ€¦" : "Yes, update it"}
         </button>
         <button
           type="button"
@@ -341,3 +338,4 @@ export function ApproveButton({
     </div>
   );
 }
+

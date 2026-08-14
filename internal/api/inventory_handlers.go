@@ -251,6 +251,9 @@ func (s *Server) withAttention(
 		return nil, err
 	}
 
+	// One dependency read for the whole page, never one per row.
+	dependencies := s.dependencyFacts(ctx)
+
 	for _, summary := range summaries {
 		row := evidence[summary.ID]
 		// The inventory row is the authority on its own state; the store fills
@@ -258,6 +261,9 @@ func (s *Server) withAttention(
 		row.Health = summary.Health
 		row.State = summary.State
 		row.Present = summary.Present
+		if facts, known := dependencies[domain.NormaliseContainerName(summary.Name)]; known {
+			facts.Evidence(&row)
+		}
 
 		items = append(items, containerListItem{
 			ContainerSummary: summary,
@@ -354,6 +360,12 @@ func (s *Server) handleContainerDetail(w http.ResponseWriter, r *http.Request) {
 	row.Health = detail.Overview.Health
 	row.State = detail.Overview.State
 	row.Present = detail.Overview.Present
+	// The same dependency facts the list row carries, through the same call, so
+	// a container's own page and the row that led to it cannot disagree.
+	if facts, known := s.dependencyFacts(r.Context())[domain.NormaliseContainerName(
+		detail.Overview.Name)]; known {
+		facts.Evidence(&row)
+	}
 	response.Attention = domain.AssessContainer(row)
 
 	writeJSON(w, r, s.logger, http.StatusOK, response)

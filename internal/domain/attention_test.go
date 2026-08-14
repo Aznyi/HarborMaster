@@ -253,6 +253,19 @@ func TestOnlyTheStatesAskingSomethingNeedAnOperator(t *testing.T) {
 		domain.AttentionApprovalRequired: true,
 		domain.AttentionPaused:           true,
 		domain.AttentionNeedsReview:      true,
+
+		// The three dependency states nothing resolves by itself. A failed
+		// reattachment is never retried, a loop cannot be broken by a pass, and
+		// an unresolvable dependency stays unresolvable until the container
+		// configuration or the inventory changes.
+		//
+		// AttentionDependencyBlocked is deliberately NOT here: it is frequently
+		// the ordinary consequence of a dependency due to be updated on the
+		// next pass, and listing it as work for a person would make this list
+		// noisy enough to stop being read.
+		domain.AttentionDependencyFailed:     true,
+		domain.AttentionDependencyCycle:      true,
+		domain.AttentionDependencyUnresolved: true,
 	}
 	for _, state := range domain.AttentionOrder {
 		if got := state.NeedsOperator(); got != wants[state] {

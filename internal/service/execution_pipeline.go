@@ -95,6 +95,10 @@ type pipeline struct {
 
 	replacementID string
 	checkpoint    domain.ExecutionCheckpoint
+	// operationID names the dependency operation recorded for this recreation,
+	// when the container is a namespace provider. Empty for an ordinary
+	// container, which gets no record.
+	operationID string
 	// mutationAttempted records that a mutation was ISSUED, whether or not it
 	// was confirmed. It is what lets recovery distinguish "nothing was changed"
 	// from "something may have been changed and we did not find out".
@@ -220,6 +224,25 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 	}
 	work.captured = captured
 
+	// ---- shared namespaces -------------------------------------------------
+	//
+	// A capture carrying `network_mode: container:<id>` names the provider by
+	// the id the daemon resolved at CREATE time. If that provider has since been
+	// replaced, the id is dead, and Docker 29.6.2 refuses the create with
+	// `joining network namespace of container: No such container` -- which would
+	// arrive after the original is stopped and parked.
+	//
+	// So the references are re-pointed here: after the capture, because there is
+	// nothing to rewrite before it, and before the mutation point, because after
+	// it a refusal is a container that is already down.
+	//
+	// A no-op for any container that shares no namespace, and for any whose
+	// provider is still live.
+	if refusal := s.resolveNamespaces(preCtx, captured); refusal != domain.ExecutionRefusalNone {
+		s.refuse(ctx, work, refusal)
+		return
+	}
+
 	// The projection the replacement will be compared against, built from the
 	// ORIGINAL while it still exists. Built before anything is stopped, because
 	// after that the original's live configuration is no longer readable in the
@@ -243,6 +266,26 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 	// nor be undone.
 	if !s.nameAvailable(preCtx, work.decision.ParkedName, work.decision.QuarantineName) {
 		s.refuse(ctx, work, domain.ExecutionRefusalNameUnavailable)
+		return
+	}
+
+	// ---- what must be reattached afterwards --------------------------------
+	//
+	// THE LAST WRITE BEFORE THE MUTATION POINT, and the ordering is the safety
+	// property rather than a convenience.
+	//
+	// If this container's namespace is shared, its dependents lose their network
+	// the instant it is STOPPED -- verified live, silently, with nothing logged.
+	// So the complete set of containers that will need reattaching is
+	// established and made DURABLE here, while nothing has been touched. A
+	// crash between this line and the stop leaves a record of what was supposed
+	// to happen; the reverse ordering would leave a stopped provider and no
+	// record of what depended on it.
+	//
+	// A container nothing shares a namespace with gets no record and no change
+	// to this path.
+	if refusal := s.recordDependencyOperation(preCtx, work); refusal != domain.ExecutionRefusalNone {
+		s.refuse(ctx, work, refusal)
 		return
 	}
 

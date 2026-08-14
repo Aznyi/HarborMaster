@@ -116,6 +116,22 @@ func ValidUpdateStrategy(value string) bool {
 // whose size is unknown is exactly the thing a ceiling is for.
 func (s UpdateStrategy) Permits(update UpdateType) bool {
 	switch update {
+	case UpdateRebind:
+		// Permitted by every strategy, because a strategy is a ceiling on how
+		// far a VERSION may move and a rebind moves it nowhere: the proposed
+		// digest is the one HarborMaster observed the container already
+		// running.
+		//
+		// The alternative was worse in the direction that matters. A policy
+		// with a `patch` ceiling that refused rebinds would leave its own
+		// containers permanently attached to a namespace that no longer exists
+		// -- broken by an update the same policy performed -- with no path to
+		// repair short of an operator noticing.
+		//
+		// This widens nothing else. A rebind still needs a governing policy, an
+		// open window, an automatic mode, the acquisition preflight, and the
+		// execution preflight, exactly like any other change.
+		return true
 	case UpdateDigest:
 		return true
 	case UpdatePatch:

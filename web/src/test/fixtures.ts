@@ -1,4 +1,13 @@
 import { vi } from "vitest";
+import type {
+  ContainerDependencies,
+  DependencyGraph,
+  DependencyListing,
+  DependencyMember,
+  DependencyOperationListing,
+  DependencyOperationSummary,
+  WorkloadDependency,
+} from "../api/dependencyTypes";
 
 import type {
   ContainerDetail,
@@ -484,6 +493,30 @@ export interface ApiStubOptions {
 
   events?: ListResponse<DockerEvent> | Error | HttpFailure;
   eventEngine?: EventEngineStatus | Error | HttpFailure;
+  /**
+   * The dependency read Container Detail issues.
+   *
+   * Defaults to a container with no relationships. A fixture that omitted this
+   * would leave every Container Detail test making an unmocked request, which
+   * is how adding one section broke seven unrelated tests.
+   */
+  dependencies?: ContainerDependencies | Error | HttpFailure;
+  /** GET /dependencies -- every relationship in force. */
+  dependencyListing?: DependencyListing | Error | HttpFailure;
+  /** GET /dependencies/graph -- the deterministic update order. */
+  dependencyGraph?: DependencyGraph | Error | HttpFailure;
+  /** GET /dependencies/operations -- coordinated provider updates. */
+  dependencyOperations?: DependencyOperationListing | Error | HttpFailure;
+  /**
+   * POST /executions -- the recreation request.
+   *
+   * An HttpFailure here is the PREFLIGHT refusing, which is the case the manual
+   * update UX exists for: HarborMaster declines before it stops anything, and
+   * the operator has to be told which check said no.
+   */
+  execution?: unknown | Error | HttpFailure;
+  /** POST /dependencies and DELETE /dependencies/{id}. */
+  dependencyWrite?: unknown | Error | HttpFailure;
   eventFilters?: EventFilterOptions;
 }
 
@@ -602,6 +635,54 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
         });
       }
 
+      // Dependency routes, before the looser "/containers" match below:
+      // "/dependencies/container/{id}" contains "/containers" only by
+      // coincidence, and a prefix match would answer it with a container.
+      //
+      // Ordered most specific first. The bare "/dependencies" list route is a
+      // PREFIX of the other two, so matching it first would swallow both.
+      if (url.includes("/dependencies/graph")) {
+        return respond(options.dependencyGraph, emptyDependencyGraph());
+      }
+      if (url.includes("/dependencies/operations")) {
+        return respond(options.dependencyOperations, {
+          items: [],
+          total: 0,
+          limit: 50,
+        });
+      }
+      if (url.includes("/dependencies/container/")) {
+        // The default is a container with NO relationships, which is what most
+        // fixtures describe. A test about dependencies overrides it.
+        return respond(options.dependencies, emptyContainerDependencies());
+      }
+      if (url.includes("/dependencies")) {
+        const method = init?.method ?? "GET";
+        if (method === "POST") {
+          return respond(options.dependencyWrite, operatorDependency());
+        }
+        if (method === "DELETE") {
+          if (options.dependencyWrite instanceof HttpFailure) {
+            return respond(options.dependencyWrite, null);
+          }
+          if (options.dependencyWrite instanceof Error) {
+            return Promise.reject(options.dependencyWrite);
+          }
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return respond(options.dependencyListing, emptyDependencyListing());
+      }
+
+      // The recreation request. Matched before the looser routes below so a
+      // preflight refusal can be modelled: it is the one response this control
+      // exists to render.
+      if (url.includes("/executions") && (init?.method ?? "GET") === "POST") {
+        return respond(options.execution, {
+          executionId: "exe_0123456789abcdef0123",
+          state: "queued",
+        });
+      }
+
       // Event routes are matched next: "/event-engine" and "/events" would
       // both be swallowed by a looser prefix match further down.
       if (url.includes("/event-engine")) {
@@ -678,4 +759,118 @@ export function lastEventQuery(requests: RecordedRequest[]): URLSearchParams {
 
   const index = match.url.indexOf("?");
   return new URLSearchParams(index >= 0 ? match.url.slice(index + 1) : "");
+}
+
+/** A container with no dependency relationships, in either direction. */
+export function emptyContainerDependencies(
+  container = "web",
+): ContainerDependencies {
+  return {
+    container,
+    dependsOn: [],
+    dependedOnBy: [],
+    state: "dependencySatisfied",
+    detail: "every container this one depends on is verified or stable",
+  };
+}
+
+/**
+ * An estate with no relationships at all.
+ *
+ * The POSITIVELY established empty case: discovery ran and found nothing. A
+ * fixture that wants "HarborMaster could not establish this" supplies problems
+ * or an HttpFailure, because the UI must render those two differently.
+ */
+export function emptyDependencyListing(): DependencyListing {
+  return { items: [], total: 0 };
+}
+
+export function emptyDependencyGraph(): DependencyGraph {
+  return { stages: [], edges: [] };
+}
+
+/** One detected namespace relationship: sonarr rides gluetun's network. */
+export function namespaceDependency(
+  overrides: Partial<WorkloadDependency> = {},
+): WorkloadDependency {
+  return {
+    dependent: "sonarr",
+    dependency: "gluetun",
+    source: "dockerNetworkNamespace",
+    kind: "Network namespace",
+    origin: "Detected by HarborMaster",
+    hard: true,
+    why: "the dependent's Docker configuration shares this container's network namespace",
+    deletable: false,
+    ...overrides,
+  };
+}
+
+/** One mandatory reattachment inside a coordinated provider update. */
+export function rebindMember(
+  overrides: Partial<DependencyMember> = {},
+): DependencyMember {
+  return {
+    operationId: "depop_0123456789abcdef0123",
+    dependent: "sonarr",
+    provider: "gluetun",
+    source: "dockerNetworkNamespace",
+    state: "verified",
+    ...overrides,
+  };
+}
+
+/**
+ * A coordinated provider update that ended part-finished.
+ *
+ * The default is the case worth rendering: the provider succeeded, two
+ * reattachments verified, one failed, and HarborMaster will not roll any of it
+ * backward.
+ */
+export function operationSummary(
+  overrides: Partial<DependencyOperationSummary> = {},
+): DependencyOperationSummary {
+  return {
+    operation: {
+      operationId: "depop_0123456789abcdef0123",
+      provider: "gluetun",
+      state: "failed",
+      failure: "rebindFailed",
+      createdAt: "2026-08-13T09:00:00Z",
+      updatedAt: "2026-08-13T09:04:00Z",
+      members: [
+        rebindMember({ dependent: "sonarr", state: "verified" }),
+        rebindMember({ dependent: "radarr", state: "verified" }),
+        rebindMember({ dependent: "qbittorrent", state: "failed" }),
+      ],
+    },
+    providerVerified: true,
+    complete: false,
+    needsAttention: true,
+    ...overrides,
+  };
+}
+
+export function operationListing(
+  items: DependencyOperationSummary[] = [operationSummary()],
+): DependencyOperationListing {
+  return { items, total: items.length, limit: 50 };
+}
+
+/** One configured ordering, which an administrator may remove. */
+export function operatorDependency(
+  overrides: Partial<WorkloadDependency> = {},
+): WorkloadDependency {
+  return {
+    dependencyId: "dep_0123456789abcdef0123",
+    dependent: "api",
+    dependency: "postgres",
+    source: "operator",
+    kind: "Application ordering",
+    origin: "Configured by you",
+    hard: false,
+    why: "an operator recorded that the dependent needs this container",
+    deletable: true,
+    ...overrides,
+  };
 }

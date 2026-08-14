@@ -589,6 +589,7 @@ func normalizeSecurity(base container.InspectResponse, hostConfig *container.Hos
 		CapDrop:           hostConfig.CapDrop,
 		SecurityOpt:       append([]string(nil), hostConfig.SecurityOpt...),
 		DeviceCgroupRules: append([]string(nil), hostConfig.DeviceCgroupRules...),
+		NetworkMode:       string(hostConfig.NetworkMode),
 		IPCMode:           string(hostConfig.IpcMode),
 		PIDMode:           string(hostConfig.PidMode),
 		UTSMode:           string(hostConfig.UTSMode),

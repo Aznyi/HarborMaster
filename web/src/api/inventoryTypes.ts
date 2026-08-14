@@ -6,6 +6,7 @@
  * none appears here either.
  */
 
+import type { DependencyState } from "./dependencyTypes";
 import type { HealthComponent } from "./types";
 import type { UpdateType } from "./imageTypes";
 import type { Recommendation } from "./planTypes";
@@ -175,9 +176,13 @@ export interface HarborMasterMetadata {
 export type AttentionState =
   | "preserved"
   | "unhealthy"
+  | "dependencyFailed"
   | "approvalRequired"
   | "paused"
+  | "dependencyCycle"
+  | "dependencyUnresolved"
   | "needsReview"
+  | "dependencyBlocked"
   | "cannotAdvise"
   | "updateAvailable"
   | "notTracked"
@@ -230,6 +235,30 @@ export interface ContainerAttention {
   preservedFor?: string;
   lastUpdate?: ActionOutcome;
   lastRollback?: ActionOutcome;
+
+  /**
+   * Whether the dependency subsystem answered for this container.
+   *
+   * FALSE ASSERTS NOTHING. A deployment without dependency tracking, or one
+   * whose graph could not be built, produces exactly the verdicts it produced
+   * before dependencies existed — never a fleet of containers claiming their
+   * dependencies are satisfied.
+   */
+  dependencyKnown?: boolean;
+  /**
+   * The dependency verdict. Carried even when it did not change `state`:
+   * `dependencyWaiting` never does, and a detail page still wants to explain
+   * the delay.
+   */
+  dependencyState?: DependencyState;
+  /** The container responsible, when one is. A name from the inventory. */
+  dependencyBlockedBy?: string;
+  /** A mandatory reattachment settled without succeeding, and is not retried. */
+  rebindFailed?: boolean;
+  /** A mandatory reattachment is in flight. Work, not a condition. */
+  rebindPending?: boolean;
+  /** The container whose replacement is being attached to. */
+  rebindProvider?: string;
 }
 
 export interface ContainerSummary {

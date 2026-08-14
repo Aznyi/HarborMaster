@@ -73,6 +73,16 @@ func (s *AutomationService) follow(ctx context.Context) {
 		}
 		s.advance(ctx, decision)
 	}
+
+	// Coordinated provider updates, advanced on the SAME tick and by the same
+	// stateless rules: re-read the operation, re-read the execution records it
+	// names, take the one next step it is owed.
+	//
+	// Deliberately after the decision follow-through. A provider's own execution
+	// is advanced by that loop, and reading its outcome before it has been
+	// advanced would see a stale answer and defer the operation by one tick for
+	// no reason.
+	s.advanceDependencyOperations(ctx)
 }
 
 // advance takes the one next step a decision is owed.

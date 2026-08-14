@@ -30,9 +30,13 @@ import { StatusBadge, type BadgeTone } from "./StatusBadge";
 export const ATTENTION_LABELS: Record<AttentionState, string> = {
   preserved: "Kept by HarborMaster",
   unhealthy: "Unhealthy",
+  dependencyFailed: "Rebind failed",
   approvalRequired: "Approval required",
   paused: "Automation paused",
+  dependencyCycle: "Dependency cycle",
+  dependencyUnresolved: "Dependency unavailable",
   needsReview: "Needs review",
+  dependencyBlocked: "Dependency blocked",
   cannotAdvise: "Can't advise",
   updateAvailable: "Update available",
   notTracked: "Not tracked",
@@ -49,6 +53,19 @@ export const ATTENTION_MEANINGS: Record<AttentionState, string> = {
     "HarborMaster stopped and renamed this container to keep it as evidence. " +
     "It is not a running workload, and nothing will remove it for you.",
   unhealthy: "The container's own healthcheck is failing.",
+  dependencyFailed:
+    "HarborMaster could not reattach this container to the replacement of a " +
+    "container whose namespace it shares. It does not retry a reattachment " +
+    "by itself, so this stands until somebody looks.",
+  dependencyCycle:
+    "This container is in, or behind, a loop of dependencies. No safe update " +
+    "order exists, and no pass will invent one — the loop has to be broken.",
+  dependencyUnresolved:
+    "HarborMaster could not establish what this container depends on, so it " +
+    "will not update it. This is a refusal, not a finding of no dependencies.",
+  dependencyBlocked:
+    "Something this container depends on could not be updated safely, or is " +
+    "not permitted to be. Often clears on the next pass.",
   approvalRequired:
     "An update policy has decided on a change and is holding it until you " +
     "release it.",
@@ -85,8 +102,18 @@ export const ATTENTION_MEANINGS: Record<AttentionState, string> = {
 const ATTENTION_TONES: Record<AttentionState, BadgeTone> = {
   preserved: "neutral",
   unhealthy: "danger",
+  // A container possibly detached from its provider's namespace. The only
+  // dependency state that gets the danger tone -- the other three are real but
+  // none of them means something is broken right now.
+  dependencyFailed: "danger",
   approvalRequired: "warn",
   paused: "danger",
+  dependencyCycle: "warn",
+  dependencyUnresolved: "warn",
+  // Not a failure. A dependency block is HarborMaster declining to proceed,
+  // and frequently the next pass clears it -- rendering it in danger would put
+  // an ordinary consequence beside a failed healthcheck.
+  dependencyBlocked: "neutral",
   needsReview: "warn",
   cannotAdvise: "neutral",
   updateAvailable: "warn",
@@ -118,13 +145,23 @@ export function rowAttention(
   );
 }
 
-/** Whether a verdict is asking something of a person. Mirrors the server. */
+/**
+ * Whether a verdict is asking something of a person. Mirrors the server.
+ *
+ * The three dependency states nothing resolves by itself are here.
+ * `dependencyBlocked` is NOT: it is frequently the ordinary consequence of a
+ * dependency that will be updated on the next pass, and listing it as work
+ * would make the list noisy enough to stop being read.
+ */
 export function needsOperator(state: AttentionState): boolean {
   return (
     state === "unhealthy" ||
     state === "approvalRequired" ||
     state === "paused" ||
-    state === "needsReview"
+    state === "needsReview" ||
+    state === "dependencyFailed" ||
+    state === "dependencyCycle" ||
+    state === "dependencyUnresolved"
   );
 }
 

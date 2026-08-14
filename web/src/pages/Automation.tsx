@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+﻿import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 
 import type {
@@ -10,8 +10,8 @@ import {
   AUTOMATION_TRIGGER_LABELS,
   isAutomationRunActive,
 } from "../api/automationTypes";
+import { DecisionReason } from "../components/DependencyStatus";
 import {
-  AutomationReasonText,
   AutomationRunStateBadge,
   AutomationVerdictBadge,
   AutomationWarningNotice,
@@ -46,8 +46,8 @@ import { useSession } from "../hooks/useSession";
  *  2. **When it will next act.** "Waiting for 02:00" is the answer to the
  *     question an operator opens this page with, and it comes from the server's
  *     own timezone calculation rather than from a second one in the browser.
- *  3. **What it would do right now.** The preview is a READ — it writes no run
- *     and reaches no service — so it can sit on the page an operator refreshes.
+ *  3. **What it would do right now.** The preview is a READ â€” it writes no run
+ *     and reaches no service â€” so it can sit on the page an operator refreshes.
  *
  * # Dry run is offered before Run
  *
@@ -246,7 +246,7 @@ function PassControls({
           disabled={!enabled || running || busy !== null}
           onClick={() => void start(true)}
         >
-          {busy === "dryRun" ? "Running…" : "Dry run"}
+          {busy === "dryRun" ? "Runningâ€¦" : "Dry run"}
         </button>
         <button
           type="button"
@@ -254,7 +254,7 @@ function PassControls({
           disabled={!enabled || running || busy !== null}
           onClick={() => void start(false)}
         >
-          {busy === "run" ? "Running…" : "Run pass"}
+          {busy === "run" ? "Runningâ€¦" : "Run pass"}
         </button>
       </div>
 
@@ -325,7 +325,7 @@ function UpcomingPanel({ state }: { state: ReturnType<typeof useAutomationUpcomi
           description={
             decisions.length === 0
               ? "No containers were considered. Check that the inventory has run."
-              : "Every container was skipped. Turn on “Show skipped containers” to see why."
+              : "Every container was skipped. Turn on â€œShow skipped containersâ€ to see why."
           }
         />
       ) : (
@@ -360,22 +360,19 @@ export function DecisionTable({ decisions }: { decisions: AutomationDecision[] }
                 <AutomationVerdictBadge verdict={decision.verdict} />
               </td>
               <td className="px-3 py-2">
-                <AutomationReasonText
-                  reason={decision.reason}
-                  detail={decision.detail}
-                />
+                <DecisionReason decision={decision} />
               </td>
               <td className="px-3 py-2 text-content-muted">
                 {decision.proposedImage ? (
                   <span title={decision.proposedDigest}>
-                    {decision.currentImage} → {decision.proposedImage}
+                    {decision.currentImage} â†’ {decision.proposedImage}
                   </span>
                 ) : (
-                  "—"
+                  "â€”"
                 )}
               </td>
               <td className="px-3 py-2 text-content-muted">
-                {decision.policyName || "—"}
+                {decision.policyName || "â€”"}
               </td>
             </tr>
           ))}
@@ -453,8 +450,9 @@ function describeSubmitted(run: AutomationRun): string {
 
 /** Renders an instant in the viewer's locale, or a dash. */
 export function formatMoment(value: string | undefined): string {
-  if (!value) return "—";
+  if (!value) return "â€”";
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "—";
+  if (Number.isNaN(parsed.getTime())) return "â€”";
   return parsed.toLocaleString();
 }
+

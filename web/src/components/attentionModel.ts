@@ -1,4 +1,5 @@
 import type { AutomationStatus } from "../api/automationTypes";
+import type { DependencySummary } from "../api/dependencyTypes";
 import type { DriftSummary } from "../api/driftTypes";
 import type { EventEngineStatus } from "../api/eventTypes";
 import type { ExecutionSummary } from "../api/executionTypes";
@@ -78,6 +79,17 @@ export interface AttentionInputs {
   drift?: DriftSummary | null;
   /** False when the account cannot read automation at all. */
   canReadAutomation?: boolean;
+
+  /**
+   * The dependency picture, when the account can read it and it loaded.
+   *
+   * `undefined` means NOT LOADED and produces no item, like every other input.
+   * That matters more here than elsewhere: a dependency graph that could not be
+   * built is HarborMaster refusing to order the estate, and inferring "no loops"
+   * from a read that never arrived would be inventing exactly the reassurance
+   * the subsystem exists to withhold.
+   */
+  dependencies?: DependencySummary | null;
 }
 
 const LEVEL_ORDER: Record<AttentionLevel, number> = {
@@ -227,6 +239,69 @@ export function buildAttention(inputs: AttentionInputs): AttentionItem[] {
           "automatically until somebody looks.",
         to: "/automation/paused",
         count: paused,
+      });
+    }
+  }
+
+  // ------------------------------------------------------ dependencies --
+  //
+  // Only what nothing resolves by itself. A failed reattachment is the loudest
+  // because of what it means on the host -- a container possibly cut off from
+  // the namespace it was sharing -- and HarborMaster never retries one.
+  //
+  // Waiting is deliberately absent. It is the system working, it clears without
+  // anybody, and there is no clock in this function to distinguish "waiting"
+  // from "waiting too long" honestly.
+
+  if (inputs.dependencies) {
+    const { cycles, unresolved, rebindsFailed } = inputs.dependencies;
+
+    if (rebindsFailed > 0) {
+      add({
+        id: "dependency-rebind-failed",
+        level: "action",
+        title: `${rebindsFailed} container${rebindsFailed === 1 ? "" : "s"} could not be reattached`,
+        detail:
+          "HarborMaster replaced a container others shared a namespace with " +
+          "and could not reattach all of them. It does not retry a " +
+          "reattachment by itself. No image version was changed.",
+        to: "/dependencies",
+        count: rebindsFailed,
+      });
+    }
+    // A coordinated update that ended part-finished is deliberately NOT its own
+    // item. The two ways it can end are already reported: a failed reattachment
+    // by the item above, and a failed provider update by
+    // `executions-need-attention`. A third item would count one incident twice
+    // on a list an operator reads as a count of incidents.
+
+    if (cycles > 0) {
+      add({
+        id: "dependency-cycle",
+        level: "action",
+        title: `${cycles} dependency loop${cycles === 1 ? "" : "s"} need${
+          cycles === 1 ? "s" : ""
+        } attention`,
+        detail:
+          "These containers depend on each other in a loop, so no safe update " +
+          "order exists. Nothing will break the loop on its own.",
+        to: "/dependencies",
+        count: cycles,
+      });
+    }
+    if (unresolved > 0) {
+      add({
+        id: "dependency-unresolved",
+        level: "action",
+        title: `${unresolved} container${unresolved === 1 ? "" : "s"} share${
+          unresolved === 1 ? "s" : ""
+        } a namespace HarborMaster cannot resolve`,
+        detail:
+          "HarborMaster will not update these until it can establish what " +
+          "they depend on. This is a refusal, not a finding that they have no " +
+          "dependencies.",
+        to: "/dependencies",
+        count: unresolved,
       });
     }
   }

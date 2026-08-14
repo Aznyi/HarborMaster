@@ -384,6 +384,64 @@ func (s *Server) routeTable() []route {
 		{http.MethodPost, p + "/automation/resume", requires(domain.PermAutomationPause).policyBudget(), s.handleAutomationResume, ""},
 		{"", p + "/automation/resume", requires(domain.PermAutomationPause), nil, "POST"},
 
+		// ---- workload dependencies -------------------------------------------
+		//
+		// # Two permissions, and the split is about the DELETE
+		//
+		// READING is `dependency:read`, which every role holds. A dependency
+		// relationship is frequently the answer to "why has that container not
+		// been updated", and a viewer who cannot see one cannot answer the
+		// question their role exists for. A relationship reveals two container
+		// names and which namespace they share -- no image, no digest, no
+		// configuration.
+		//
+		// WRITING is `dependency:manage`, which only an ADMINISTRATOR holds.
+		// Creating a relationship is conservative: it can only ever make
+		// HarborMaster wait or refuse. DELETING one takes a safety constraint
+		// away, and it is the same permission -- so an operator able to delete
+		// could clear the gate standing between an unattended update and the
+		// container that has to finish first.
+		//
+		// Neither grants anything over Docker. There is no route here that
+		// pulls, recreates, or rolls anything back, and no request body with a
+		// field for an image, a digest, or a container id.
+		//
+		// The writes share the POLICY rate budget: they cost one small
+		// transaction on HarborMaster's own table, not a Docker sweep.
+
+		{http.MethodGet, p + "/dependencies", requires(domain.PermDependencyRead), s.handleDependencies, ""},
+		{http.MethodPost, p + "/dependencies", requires(domain.PermDependencyManage).policyBudget(), s.handleDependencyCreate, ""},
+		{"", p + "/dependencies", requires(domain.PermDependencyRead), nil, "GET, HEAD, POST"},
+
+		// GET-only, for the ServeMux reason: a bare "/dependencies/graph" would
+		// match every method on that literal while "/dependencies/{id}" matches
+		// its own, and ServeMux rejects the ambiguous pair.
+		{http.MethodGet, p + "/dependencies/graph", requires(domain.PermDependencyRead), s.handleDependencyGraph, ""},
+
+		// The coordinated provider updates HarborMaster performed, and where
+		// each mandatory reattachment got to. GET-only for the same ServeMux
+		// reason as /graph above.
+		//
+		// A READ, and there is deliberately no sibling that acts on one: an
+		// operation is advanced by the services that own the capability, each
+		// re-running its own preflight. There is no retry endpoint, no
+		// group-rollback endpoint, and nothing here that names a container.
+		{http.MethodGet, p + "/dependencies/operations", requires(domain.PermDependencyRead), s.handleDependencyOperations, ""},
+
+		// Three segments, so this never overlaps the two-segment detail route.
+		{http.MethodGet, p + "/dependencies/container/{id}", requires(domain.PermDependencyRead), s.handleDependenciesForContainer, ""},
+		{"", p + "/dependencies/container/{id}", requires(domain.PermDependencyRead), nil, "GET, HEAD"},
+
+		// DELETE only. There is deliberately no PATCH: a relationship has two
+		// endpoints and a source, and every one of them is identity -- an edit
+		// would be a different relationship, which is a delete and a create.
+		//
+		// It reaches OPERATOR rows only. A discovered namespace relationship is
+		// derived from the inventory on every read and has no stored row, so
+		// there is nothing here for a caller to name.
+		{http.MethodDelete, p + "/dependencies/{id}", requires(domain.PermDependencyManage).policyBudget(), s.handleDependencyDelete, ""},
+		{"", p + "/dependencies/{id}", requires(domain.PermDependencyRead), nil, "DELETE"},
+
 		// ---- notifications ---------------------------------------------------
 		//
 		// # Two permissions, and the split is the point

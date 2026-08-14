@@ -31,6 +31,10 @@ const READS: Permission[] = [
   "rollback:read",
   "automation:read",
   "notification:read",
+  // Every role reads dependencies: a relationship is frequently the answer to
+  // "why has that container not been updated", and a viewer who cannot see one
+  // cannot answer the question their role exists for.
+  "dependency:read",
 ];
 
 const OPERATOR_WRITES: Permission[] = [
@@ -54,6 +58,9 @@ const OPERATOR_WRITES: Permission[] = [
 
 const ADMIN_ONLY: Permission[] = [
   "automation:manage",
+  // Administrator-only because of the DELETE: removing an ordering takes a
+  // safety constraint away and lets an update proceed that was being held back.
+  "dependency:manage",
   "notification:manage",
   "policy:manage",
   "user:manage",

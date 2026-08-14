@@ -1,4 +1,4 @@
-import type { Pagination } from "./inventoryTypes";
+﻿import type { Pagination } from "./inventoryTypes";
 
 /**
  * Notification types: destinations, the rules that route to them, and the
@@ -9,7 +9,7 @@ import type { Pagination } from "./inventoryTypes";
  * A Slack, Discord, or Teams webhook URL is a bearer token in the shape of a
  * path: anyone who reads one can post into that channel forever. So the URL is
  * a field on the REQUEST type and on nothing else. `NotificationDestination`
- * carries `endpoint`, which is a scheme and host — `https://hooks.slack.com` —
+ * carries `endpoint`, which is a scheme and host â€” `https://hooks.slack.com` â€”
  * and that is what every list, detail, and delivery record shows.
  *
  * A type with nowhere to put a credential is a stronger guarantee than a
@@ -102,6 +102,7 @@ export type NotificationEvent =
   | "rollback.failed"
   | "automation.paused"
   | "automation.error"
+  | "dependency.rebindFailed"
   | "drift.detected"
   | "policy.violation"
   | "registry.unavailable"
@@ -121,6 +122,10 @@ export const NOTIFICATION_EVENT_LABELS: Record<string, string> = {
   "rollback.failed": "A rollback failed",
   "automation.paused": "Automation paused a container",
   "automation.error": "An automation pass could not complete",
+  // Never "could not be updated": a reattachment moves no version. It recreates
+  // a container on the digest it is already running so it can attach to the
+  // replacement of a container whose namespace it shares.
+  "dependency.rebindFailed": "A container could not be reattached to a replaced container",
   "drift.detected": "A container drifted from its snapshot",
   "policy.violation": "A container failed a compliance rule",
   "registry.unavailable": "A registry cannot be reached",
@@ -150,6 +155,7 @@ export const NOTIFICATION_EVENT_GROUPS: {
       "acquisition.failed",
       "automation.paused",
       "automation.error",
+      "dependency.rebindFailed",
       "integrity.failed",
       "backup.failed",
     ],
@@ -203,7 +209,7 @@ export const DELIVERY_RESULT_DESCRIPTIONS: Record<DeliveryResult, string> = {
     "The destination did not accept it. HarborMaster will try again on a backing-off schedule.",
   succeeded: "The destination accepted it.",
   failed:
-    "HarborMaster gave up. Either the failure was permanent — a revoked webhook URL — or every retry was used.",
+    "HarborMaster gave up. Either the failure was permanent â€” a revoked webhook URL â€” or every retry was used.",
   suppressed:
     "A rule's cooldown decided not to send a repeat of something you had already been told about. Nothing is wrong.",
   dropped:
@@ -226,7 +232,7 @@ export const DELIVERY_RESULT_TONE: Record<
 // -------------------------------------------------------------- resources --
 
 /**
- * Somewhere notifications are sent — the part that is safe to render.
+ * Somewhere notifications are sent â€” the part that is safe to render.
  *
  * `endpoint` is a scheme and host. There is no field on this type for the
  * webhook URL or the SMTP password, and no endpoint in the API returns one.
@@ -284,7 +290,7 @@ export interface NotificationRule {
   ruleId: string;
   name: string;
   enabled: boolean;
-  /** EMPTY MEANS EVERY EVENT — the opposite of an update policy's selector. */
+  /** EMPTY MEANS EVERY EVENT â€” the opposite of an update policy's selector. */
   events?: NotificationEvent[];
   minimumSeverity: NotificationSeverity;
   destinations: string[];
@@ -381,7 +387,7 @@ export interface DeliveryQuery {
   container?: string;
   result?: DeliveryResult[];
   event?: NotificationEvent[];
-  /** Only the dead letter — what HarborMaster tried to say and could not. */
+  /** Only the dead letter â€” what HarborMaster tried to say and could not. */
   failed?: boolean;
 }
 
@@ -404,3 +410,4 @@ export interface TestNotificationResponse {
   status: "queued";
   detail: string;
 }
+

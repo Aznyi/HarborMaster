@@ -26,6 +26,7 @@ import { ContainerPlan } from "./pages/ContainerPlan";
 import { ContainerDrift } from "./pages/ContainerDrift";
 import { Containers } from "./pages/Containers";
 import { Dashboard } from "./pages/Dashboard";
+import { Dependencies } from "./pages/Dependencies";
 import { Drift } from "./pages/Drift";
 import { Events } from "./pages/Events";
 import { ImageDetailPage } from "./pages/ImageDetail";
@@ -208,6 +209,14 @@ function AuthenticatedApp() {
         <Route
           path="/update-policies"
           element={<Guard permission="automation:read"><UpdatePolicies /></Guard>}
+        />
+        {/* Guarded on READ, not on manage. Every role may inspect what a
+            container is waiting for -- a relationship is frequently the answer
+            to "why has that not updated" -- and the page itself withholds the
+            create and remove controls from anybody without dependency:manage. */}
+        <Route
+          path="/dependencies"
+          element={<Guard permission="dependency:read"><Dependencies /></Guard>}
         />
 
         <Route

@@ -19,6 +19,7 @@ import {
 } from "../components/States";
 import { SnapshotSummary } from "../components/SnapshotSummary";
 import { useAutomationStatus } from "../hooks/useAutomation";
+import { useDependencies } from "../hooks/useDependencies";
 import { useDriftSummary } from "../hooks/useDrift";
 import { usePolicySummary } from "../hooks/usePolicies";
 import { useSession } from "../hooks/useSession";
@@ -139,6 +140,10 @@ function AttentionPanel({
   const plans = usePlans(SUMMARY_ONLY);
   const executions = useExecutions(SUMMARY_ONLY);
   const rollbacks = useRollbacks(SUMMARY_ONLY);
+  // ONE dependency read. The summary rides on the relationship listing rather
+  // than being a second endpoint, and the server derives it from the same facts
+  // the container rows use — so this count and those badges cannot disagree.
+  const dependencies = useDependencies();
 
   const inputs: AttentionInputs = useMemo(
     () => ({
@@ -155,6 +160,11 @@ function AttentionPanel({
       policy: policy.data,
       drift: drift.data,
       canReadAutomation,
+      // Null rather than a zeroed summary when the read failed: "the graph
+      // could not be built" is HarborMaster refusing to order the estate, and
+      // inferring "no loops" from it would invent the reassurance the whole
+      // subsystem exists to withhold.
+      dependencies: dependencies.error ? null : (dependencies.data?.summary ?? null),
     }),
     [
       health.data,
@@ -168,6 +178,8 @@ function AttentionPanel({
       policy.data,
       drift.data,
       canReadAutomation,
+      dependencies.data,
+      dependencies.error,
     ],
   );
 

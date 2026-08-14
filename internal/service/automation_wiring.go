@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/store"
@@ -33,6 +34,11 @@ type automationEvidence struct {
 	plans        *store.PlanRepository
 	acquisitions *store.AcquisitionRepository
 	executions   *store.ExecutionRepository
+	// lineage and intel answer ONE question between them: which containers has
+	// HarborMaster positively established as needing no update. Both may be
+	// nil, and then nothing is established -- see CurrentAssessments.
+	lineage *store.LineageRepository
+	intel   *store.ImageIntelRepository
 }
 
 // NewAutomationEvidence builds the read-only evidence source.
@@ -44,13 +50,104 @@ func NewAutomationEvidence(
 	plans *store.PlanRepository,
 	acquisitions *store.AcquisitionRepository,
 	executions *store.ExecutionRepository,
+	lineage *store.LineageRepository,
+	intel *store.ImageIntelRepository,
 ) AutomationEvidence {
 	return &automationEvidence{
 		containers:   containers,
 		plans:        plans,
 		acquisitions: acquisitions,
 		executions:   executions,
+		lineage:      lineage,
+		intel:        intel,
 	}
+}
+
+// currentAssessmentFreshness is how recent a registry check must be for its
+// answer to release a dependent.
+//
+// Matches the acquisition path's registry freshness, deliberately: the question
+// is the same one -- "is this registry answer recent enough to act on" -- and
+// two different windows would mean HarborMaster could consider evidence fresh
+// enough to hold a container back but not fresh enough to move it, or the
+// reverse.
+//
+// Not configurable. A deployment that could widen this could make a stale
+// "everything is fine" release dependents indefinitely, and the failure would
+// be silent.
+const currentAssessmentFreshness = 24 * time.Hour
+
+// CurrentAssessments returns HarborMaster's positive "needs no update"
+// findings, by container name.
+//
+// # Two reads, whatever the estate size
+//
+// One for the tracked lineage rows, one for the registry evidence behind the
+// references they name. The verdict itself is domain.AssessCurrent -- the same
+// pure function, over the same inputs, that the planner reaches its own
+// conclusion with, so the two cannot disagree about whether a container is
+// settled.
+//
+// # Every failure direction establishes nothing
+//
+// A nil repository, an unreadable table, a container with no lineage, a
+// reference never checked: all leave the container out of the map, which is the
+// zero assessment, which holds its dependents. There is no path here that
+// returns Established from an absence.
+func (e *automationEvidence) CurrentAssessments(
+	ctx context.Context,
+	now time.Time,
+) (map[string]domain.CurrentAssessment, error) {
+	if e.lineage == nil || e.intel == nil {
+		return map[string]domain.CurrentAssessment{}, nil
+	}
+
+	tracked, err := e.lineage.Tracked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(tracked) == 0 {
+		return map[string]domain.CurrentAssessment{}, nil
+	}
+
+	// The distinct references, so a hundred containers on one image cost one
+	// lookup rather than a hundred.
+	seen := make(map[string]struct{}, len(tracked))
+	references := make([]string, 0, len(tracked))
+	for _, row := range tracked {
+		if row.TrackingReference == "" {
+			continue
+		}
+		if _, already := seen[row.TrackingReference]; already {
+			continue
+		}
+		seen[row.TrackingReference] = struct{}{}
+		references = append(references, row.TrackingReference)
+	}
+
+	evidence, err := e.intel.ByReferences(ctx, references)
+	if err != nil {
+		return nil, err
+	}
+
+	assessments := make(map[string]domain.CurrentAssessment, len(tracked))
+	for _, row := range tracked {
+		// The container id the assessment is checked against is the one LINEAGE
+		// recorded. The pass compares its own observed id separately; what
+		// matters here is that no caller supplies either.
+		assessment := domain.AssessCurrent(
+			row, evidence[row.TrackingReference], row.ContainerID,
+			now, currentAssessmentFreshness)
+		if !assessment.Established {
+			// Only positive findings are carried. An unestablished entry and an
+			// absent one mean the same thing, and storing the difference would
+			// invite a reader to treat "we looked and could not tell" as a
+			// weaker kind of established.
+			continue
+		}
+		assessments[domain.NormaliseContainerName(row.ContainerName)] = assessment
+	}
+	return assessments, nil
 }
 
 func (e *automationEvidence) Targets(ctx context.Context) ([]store.AutomationTarget, bool, error) {

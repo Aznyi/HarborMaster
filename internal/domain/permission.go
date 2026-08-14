@@ -65,6 +65,18 @@ const (
 	// cannot see what it decided cannot answer the question the role exists to
 	// let them answer.
 	PermAutomationRead Permission = "automation:read"
+	// PermDependencyRead covers workload dependencies: what must be stable
+	// before something else changes, the graph, and the update order.
+	//
+	// A READ permission every role holds, for the same reason automation:read
+	// is. A dependency relationship is why an update did not happen, and a
+	// viewer who cannot see one cannot answer "why is that container still on
+	// the old image".
+	//
+	// Reading a relationship reveals two container names and which namespace
+	// they share. It reveals no image, no digest, no environment value, and no
+	// configuration.
+	PermDependencyRead Permission = "dependency:read"
 	// PermNotificationRead covers notification destinations, rules, and the
 	// delivery history.
 	//
@@ -157,6 +169,29 @@ const (
 	// grant themselves a standing, unattended version of execution:create over
 	// any container a selector reaches.
 	PermAutomationManage Permission = "automation:manage"
+
+	// PermDependencyManage creates and removes OPERATOR-defined ordering
+	// relationships.
+	//
+	// # Administrator-only, and the reason is the DELETE
+	//
+	// Creating a relationship can only ever make HarborMaster wait or refuse --
+	// it is a safety constraint, and adding one is conservative. Removing one
+	// takes a safety constraint away, and it is the same permission.
+	//
+	// So this sits with automation:manage rather than with the operator
+	// capabilities: an operator able to delete an ordering relationship could
+	// clear the gate standing between an unattended update and a container that
+	// depends on something else finishing first. That is the same reasoning
+	// that puts policy:manage and automation:manage here.
+	//
+	// It grants nothing over Docker. A relationship cannot start a pull, a
+	// recreation, or a rollback, and there is no field on the create request
+	// for an image, a digest, or a container id.
+	//
+	// It cannot touch a DISCOVERED relationship. Those are derived from the
+	// inventory on every read and have no stored row to delete.
+	PermDependencyManage Permission = "dependency:manage"
 	// PermPolicyManage creates, updates, and archives compliance rules.
 	//
 	// An ADMINISTRATOR permission rather than an operator one: a policy is what
@@ -204,6 +239,7 @@ var AllPermissions = []Permission{
 	PermAuditRead,
 	PermAutomationApprove, PermAutomationManage, PermAutomationPause,
 	PermAutomationRead, PermAutomationRun,
+	PermDependencyManage, PermDependencyRead,
 	PermDriftAnnotate, PermDriftRead,
 	PermEventRead,
 	PermExecutionCancel, PermExecutionCreate, PermExecutionRead,
@@ -257,6 +293,10 @@ func (p Permission) Describe() string {
 		return "read rollback history"
 	case PermAutomationRead:
 		return "read update policies, automation passes, and paused containers"
+	case PermDependencyRead:
+		return "read which containers must be stable before others can be updated"
+	case PermDependencyManage:
+		return "record and REMOVE ordering relationships between containers"
 
 	case PermInventoryRefresh:
 		return "re-read this host's inventory"
@@ -400,6 +440,7 @@ var viewerPermissions = []Permission{
 	PermRollbackRead,
 	PermAutomationRead,
 	PermNotificationRead,
+	PermDependencyRead,
 }
 
 // operatorPermissions are what an Operator adds to the Viewer set.
@@ -425,6 +466,9 @@ var operatorPermissions = []Permission{
 // administratorPermissions are what an Administrator adds to the Operator set.
 var administratorPermissions = []Permission{
 	PermAutomationManage,
+	// Removing an ordering relationship removes a safety constraint. See the
+	// note on PermDependencyManage.
+	PermDependencyManage,
 	PermNotificationManage,
 	PermPolicyManage,
 	PermUserManage,

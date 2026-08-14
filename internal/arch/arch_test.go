@@ -408,7 +408,7 @@ func TestTheRuntimeCannotCaptureAConfiguration(t *testing.T) {
 //
 // A type check would happily pass an `Env []string`. The point is not that the
 // exported surface holds safe TYPES; it is that it holds exactly these five
-// fields and these six methods, every one of which has been looked at.
+// fields and these eight methods, every one of which has been looked at.
 func TestCapturedConfigExposesNoSecretSurface(t *testing.T) {
 	capturedType := reflect.TypeOf(docker.CapturedConfig{})
 
@@ -457,6 +457,31 @@ func TestCapturedConfigExposesNoSecretSurface(t *testing.T) {
 		"LogValue":    true,
 		"String":      true,
 		"MarshalJSON": true,
+
+		// The two shared-namespace methods. Added in Phase 16, and admitted here
+		// deliberately rather than reluctantly, because neither one widens what
+		// this type lets out.
+		//
+		// NamespaceReferences returns CONTAINER IDS and a closed-vocabulary kind.
+		// A container id is already an exported field on this struct and appears
+		// in the inventory, in the API, and in container names on the host. It is
+		// an identifier, which is exactly what the field rule above permits; it
+		// is not configuration and carries no value from Config, HostConfig, or
+		// the environment.
+		//
+		// RebindNamespaces is a WRITE, and returns nothing but an error. It takes
+		// a map of id to id, validates both ends, and refuses anything it cannot
+		// resolve. There is no way to read configuration through it and no way to
+		// pass it a container name.
+		//
+		// Why they exist at all: verified against Docker 29.6.2, a capture whose
+		// `container:<id>` namespace reference names a provider that has since
+		// been replaced makes the daemon refuse the create -- AFTER the original
+		// has been stopped and parked. The alternative to these two methods was
+		// leaving that reference stale and letting the recreation fail at the
+		// worst possible moment.
+		"NamespaceReferences": true,
+		"RebindNamespaces":    true,
 	}
 
 	pointerType := reflect.TypeOf(&docker.CapturedConfig{})

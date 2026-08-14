@@ -126,6 +126,14 @@ var routedPaths = []string{
 	APIPrefix + "/snapshots/{id}",
 	APIPrefix + "/snapshots/{id}/diff",
 	APIPrefix + "/snapshots/{id}/restore-readiness",
+	// Workload dependencies. Reads are dependency:read; the two writes are
+	// dependency:manage, which only an administrator holds.
+	APIPrefix + "/dependencies",
+	APIPrefix + "/dependencies/graph",
+	APIPrefix + "/dependencies/operations",
+	APIPrefix + "/dependencies/container/{id}",
+	APIPrefix + "/dependencies/{id}",
+
 	APIPrefix + "/update-policies",
 	APIPrefix + "/update-policies/{id}",
 	APIPrefix + "/roles",
@@ -246,6 +254,13 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/automation/resume",
 			APIPrefix + "/notifications/destinations/{id}/test":
 			method = http.MethodPost
+
+		// DELETE-only. A relationship has two endpoints and a source, and every
+		// one of them is identity -- so there is no GET on a single
+		// relationship and no PATCH, because an "edit" would be a different
+		// relationship, which is a delete and a create.
+		case APIPrefix + "/dependencies/{id}":
+			method = http.MethodDelete
 		}
 
 		rec := do(t, srv, method, target, nil)

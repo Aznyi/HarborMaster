@@ -119,7 +119,97 @@ const (
 	// from every other reason here: no policy, window, or approval makes it
 	// succeed. HarborMaster is updated from outside itself.
 	ReasonSelfUpdate AutomationReason = "selfUpdate"
+
+	// Declined by a dependency.
+	//
+	// Six reasons rather than one, and deliberately not folded into
+	// ReasonRefused. A dependency block is not a service refusing and not an
+	// error: HarborMaster looked at what this container needs and correctly
+	// declined to move it yet. Each of these is a different sentence and a
+	// different remedy, and an operator filtering for "why did that not update"
+	// needs to tell them apart.
+	//
+	// The full vocabulary and its meanings live on domain.DependencyState; these
+	// are the automation-decision spellings of the same six answers.
+	ReasonDependencyWaiting    AutomationReason = "dependencyWaiting"
+	ReasonDependencyBlocked    AutomationReason = "dependencyBlocked"
+	ReasonDependencyCycle      AutomationReason = "dependencyCycle"
+	ReasonDependencyMissing    AutomationReason = "dependencyMissing"
+	ReasonDependencyIneligible AutomationReason = "dependencyIneligible"
+	// ReasonDependentsNotRebindable is invariant A: this container is a hard
+	// namespace provider and something that shares its namespace could not be
+	// established as repairable, so stopping it would break that container
+	// silently.
+	ReasonDependentsNotRebindable AutomationReason = "dependentsNotRebindable"
 )
+
+// AutomationReasons lists every reason a decision can carry.
+//
+// # Why the vocabulary is enumerable
+//
+// Because it is rendered. Every one of these becomes a sentence in the
+// Automation page, and a value the renderer does not know shows an operator the
+// raw identifier. That had already happened once: the seven reasons below
+// `ReasonSelfUpdate` were added without the published schema or the frontend
+// map learning about them, so a container held by a dependency reported
+// `dependencyWaiting` verbatim.
+//
+// With a list, the schema and the client can both be pinned against it by test
+// rather than by memory. See TestAutomationReasonsMatchThePublishedSchema.
+//
+// Order is the declaration order above: positive, no-work, declined, refused,
+// self, dependency.
+var AutomationReasons = []AutomationReason{
+	ReasonEligible,
+
+	ReasonNoPlan, ReasonNoUpdate, ReasonNotSelected, ReasonNotEligible,
+	ReasonNoPolicy, ReasonPolicyOff, ReasonLabelOff, ReasonLabelPaused,
+	ReasonObserveMode, ReasonDryRunMode, ReasonNeedApproval,
+
+	ReasonStrategy, ReasonRecommendation, ReasonWindowClosed,
+	ReasonWindowInvalid, ReasonPaused, ReasonInFlight, ReasonConcurrency,
+	ReasonRegistryLimit, ReasonRunLimit,
+
+	ReasonRefused, ReasonError,
+
+	ReasonSelfUpdate,
+
+	ReasonDependencyWaiting, ReasonDependencyBlocked, ReasonDependencyCycle,
+	ReasonDependencyMissing, ReasonDependencyIneligible,
+	ReasonDependentsNotRebindable,
+}
+
+// ValidAutomationReason reports whether value names a known reason.
+func ValidAutomationReason(value string) bool {
+	for _, reason := range AutomationReasons {
+		if string(reason) == value {
+			return true
+		}
+	}
+	return false
+}
+
+// DependencyReasonFor maps a dependency state onto its automation reason.
+//
+// One mapping, in one place, so the two closed vocabularies cannot drift. An
+// unrecognised state maps to ReasonDependencyBlocked: a state this build does
+// not understand is not a state that may proceed.
+func DependencyReasonFor(state DependencyState) AutomationReason {
+	switch state {
+	case DependencyWaiting:
+		return ReasonDependencyWaiting
+	case DependencyBlocked:
+		return ReasonDependencyBlocked
+	case DependencyCycle:
+		return ReasonDependencyCycle
+	case DependencyMissing:
+		return ReasonDependencyMissing
+	case DependencyIneligible:
+		return ReasonDependencyIneligible
+	default:
+		return ReasonDependencyBlocked
+	}
+}
 
 // Explain renders a reason in operator-facing words.
 func (r AutomationReason) Explain() string {
@@ -172,6 +262,24 @@ func (r AutomationReason) Explain() string {
 		return "the decision could not be completed"
 	case ReasonSelfUpdate:
 		return "this is the container HarborMaster is running in, and it cannot update itself"
+
+	// The dependency answers. Each defers to the state vocabulary's own
+	// sentence, so the six spellings cannot drift from the six meanings.
+	case ReasonDependencyWaiting:
+		return DependencyWaiting.Explain()
+	case ReasonDependencyBlocked:
+		return DependencyBlocked.Explain()
+	case ReasonDependencyCycle:
+		return DependencyCycle.Explain()
+	case ReasonDependencyMissing:
+		return DependencyMissing.Explain()
+	case ReasonDependencyIneligible:
+		return DependencyIneligible.Explain()
+	case ReasonDependentsNotRebindable:
+		return "another container shares this one's namespace and HarborMaster could " +
+			"not establish that it could be reattached afterwards, so stopping this " +
+			"container would break it"
+
 	default:
 		return string(r)
 	}
@@ -196,6 +304,30 @@ type AutomationDecision struct {
 
 	Verdict AutomationVerdict `json:"verdict"`
 	Reason  AutomationReason  `json:"reason"`
+
+	// ContainerState is the lifecycle state the pass saw.
+	//
+	// Recorded for one question: whether a container that needed no update was
+	// nevertheless RUNNING, which is what releases anything depending on it.
+	// "Present" is not "stable", and a dependent released on a stopped provider
+	// would be released on nothing.
+	ContainerState ContainerState `json:"containerState,omitempty"`
+
+	// DependencyState is the dependency verdict for this container.
+	//
+	// Always populated once the gate has run, even when the gate changed
+	// nothing: an operator asking why a container is waiting needs the answer
+	// whether or not the decision was altered.
+	//
+	// Distinct from Reason. Reason says what the ENGINE concluded;
+	// DependencyState says what its dependencies looked like, and a container
+	// can be skipped for an unrelated reason while its dependencies are fine.
+	DependencyState DependencyState `json:"dependencyState,omitempty"`
+	// BlockedBy names the container responsible, when one is.
+	//
+	// A NAME, and one HarborMaster read from its own inventory -- never text
+	// from a daemon and never caller input.
+	BlockedBy string `json:"blockedBy,omitempty"`
 	// Detail is HarborMaster's own sentence. Never a daemon or registry string.
 	Detail string `json:"detail,omitempty"`
 
