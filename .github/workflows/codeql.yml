@@ -22,16 +22,27 @@ on:
 permissions:
   contents: read
 
-# The same Go line ci.yml and security.yml build and scan with.
+# The exact Go patch ci.yml and security.yml build and scan with, and the one
+# the Dockerfile's GO_IMAGE names. All four move together.
+#
+# # Why the patch and not the line
 #
 # Stated explicitly rather than resolved from go.mod's `go` directive, which
 # selects the LANGUAGE version (1.25) and would leave CodeQL analysing an older
-# line than the release is compiled with. go.mod now also carries a `toolchain`
-# floor that would resolve correctly on its own; naming the version here as well
-# means the three workflows can be compared at a glance, and a future change to
-# either file cannot silently reintroduce the skew.
+# line than the release is compiled with.
+#
+# The minor-only form "1.26" is not enough either, and that is not theoretical:
+# it resolved to go1.26.5 on a runner and govulncheck reported five standard
+# library advisories -- GO-2026-6218, 6090, 6089, 5972 and 5026 -- every one of
+# them fixed in go1.26.6, which is what the release image is built with. A
+# `toolchain` floor in go.mod does not rescue it, because the scanners analyse
+# with the toolchain setup-go put on the runner. So the scan was reporting
+# vulnerabilities in a standard library the shipped artefact does not contain.
+#
+# Pin the patch. A range here means the security gates and the released binary
+# can disagree about what was even compiled.
 env:
-  GO_VERSION: "1.26"
+  GO_VERSION: "1.26.6"
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}

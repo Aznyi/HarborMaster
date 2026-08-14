@@ -40,7 +40,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.26"
+  # The exact patch, not the line. This is the workflow that proved why: at
+  # "1.26" the runner resolved go1.26.5 and govulncheck reported five standard
+  # library advisories that go1.26.6 -- the version the release image is built
+  # with -- already fixes. Moves together with ci.yml, codeql.yml, and the
+  # Dockerfile's GO_IMAGE.
+  GO_VERSION: "1.26.6"
   NODE_VERSION: "22"
 
 jobs:

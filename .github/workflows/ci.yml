@@ -15,7 +15,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.26"
+  # The exact patch, not the line. "1.26" resolved to go1.26.5 on a runner while
+  # the release image was built with go1.26.6, so the gates and the artefact
+  # disagreed about which standard library was compiled in. Moves together with
+  # security.yml, codeql.yml, and the Dockerfile's GO_IMAGE.
+  GO_VERSION: "1.26.6"
   NODE_VERSION: "22"
 
 jobs:

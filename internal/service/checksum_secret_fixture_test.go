@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -23,8 +24,11 @@ var (
 
 func checksumFixtureMasker() *domain.Masker {
 	checksumMaskerOnce.Do(func() {
+		// 32 written out because secretKeyBytes is unexported and this file is
+		// in the external test package. Composed rather than a hex literal for
+		// the same reason as its twin: see snapshot_secret_fixture_test.go.
 		key, err := service.LoadSecretKey(service.SecretKeyOptions{
-			Value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Value: strings.Repeat("5e", 32),
 		})
 		if err != nil {
 			panic("fixture secret key: " + err.Error())

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -31,7 +32,7 @@ var (
 func fixtureMasker() *domain.Masker {
 	fixtureMaskerOnce.Do(func() {
 		key, err := LoadSecretKey(SecretKeyOptions{
-			Value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Value: strings.Repeat("4d", secretKeyBytes),
 		})
 		if err != nil {
 			// A fixture key that will not load is a broken test binary, not a
