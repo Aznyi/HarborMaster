@@ -358,3 +358,101 @@ describe("ordering", () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 });
+
+// ------------------------------------------------------------ onboarding --
+
+/** A settled estate that has been assessed and can read automation. */
+function onboarded(): AttentionInputs {
+  return {
+    ...settled(),
+    canReadAutomation: true,
+    planner: { lastRunAt: "2026-08-06T02:00:00Z" } as AttentionInputs["planner"],
+    health: {
+      status: "healthy",
+      docker: { status: "up" },
+      database: { status: "up" },
+      features: { automation: true, planner: true },
+    } as unknown as AttentionInputs["health"],
+  };
+}
+
+it("raises nothing about onboarding on a configured installation", () => {
+  const items = buildAttention(onboarded());
+  expect(items.map((item) => item.id)).not.toContain("automation-not-configured");
+  expect(items.map((item) => item.id)).not.toContain("automation-engine-disabled");
+});
+
+it("says when the engine is running and nothing tells it what to do", () => {
+  const inputs = onboarded();
+  inputs.automation = {
+    ...inputs.automation,
+    policies: 0,
+    enabledPolicies: 0,
+    actingPolicies: 0,
+  } as AttentionInputs["automation"];
+
+  const item = buildAttention(inputs).find(
+    (candidate) => candidate.id === "automation-not-configured",
+  );
+  expect(item).toBeTruthy();
+  // Not an error: an installation with no policy is a normal, safe one.
+  expect(item!.level).toBe("info");
+  expect(item!.detail).toMatch(/will not change any of them/i);
+});
+
+it("says when an automatic policy cannot run because the engine is off", () => {
+  const inputs = onboarded();
+  inputs.health = {
+    ...inputs.health,
+    features: { automation: false, planner: true },
+  } as unknown as AttentionInputs["health"];
+  inputs.automation = {
+    ...inputs.automation,
+    policies: 1,
+    actingPolicies: 1,
+  } as AttentionInputs["automation"];
+
+  const item = buildAttention(inputs).find(
+    (candidate) => candidate.id === "automation-engine-disabled",
+  );
+  expect(item).toBeTruthy();
+  // The sentence that matters: saving the policy did not enable anything.
+  expect(item!.detail).toMatch(/does not enable it/i);
+  expect(item!.count).toBe(1);
+});
+
+it("stays silent about onboarding until the estate has been assessed", () => {
+  const inputs = onboarded();
+  inputs.planner = null;
+  inputs.automation = {
+    ...inputs.automation,
+    policies: 0,
+    actingPolicies: 0,
+  } as AttentionInputs["automation"];
+
+  // An estate nobody has assessed has no opinion about policies yet, and this
+  // window is normally seconds long. Raising an item here would ask somebody to
+  // fix something that is not broken.
+  expect(
+    buildAttention(inputs).map((item) => item.id),
+  ).not.toContain("automation-not-configured");
+});
+
+it("raises no onboarding item for a deliberate read-only installation", () => {
+  const inputs = onboarded();
+  inputs.health = {
+    ...inputs.health,
+    features: { automation: false, planner: true },
+  } as unknown as AttentionInputs["health"];
+  inputs.automation = {
+    ...inputs.automation,
+    policies: 0,
+    actingPolicies: 0,
+  } as AttentionInputs["automation"];
+
+  // Engine off AND no policies is somebody running HarborMaster as a reporter
+  // on purpose. Nothing is misconfigured, so nothing is raised.
+  const ids = buildAttention(inputs).map((item) => item.id);
+  expect(ids).not.toContain("automation-not-configured");
+  expect(ids).not.toContain("automation-engine-disabled");
+});

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChangePlan, ChangePlanSummary, RiskFactor } from "../api/planTypes";
 import { ChangePlans } from "./ChangePlans";
 import { ContainerPlan } from "./ContainerPlan";
+import { TestSessionProvider, testSession, testUser } from "../test/session";
 
 /**
  * Change plan UI tests.
@@ -152,12 +153,18 @@ function renderPlans() {
 }
 
 function renderContainerPlan() {
+  // Wrapped in a session because the plan page now carries the manual-review
+  // approval panel, which asks whether this operator may approve. In the app
+  // every page is inside a session; this fixture simply had no need of one
+  // before.
   return render(
-    <MemoryRouter initialEntries={["/plans/container/container-a"]}>
-      <Routes>
-        <Route path="/plans/container/:id" element={<ContainerPlan />} />
-      </Routes>
-    </MemoryRouter>,
+    <TestSessionProvider session={testSession({ user: testUser("operator") })}>
+      <MemoryRouter initialEntries={["/plans/container/container-a"]}>
+        <Routes>
+          <Route path="/plans/container/:id" element={<ContainerPlan />} />
+        </Routes>
+      </MemoryRouter>
+    </TestSessionProvider>,
   );
 }
 

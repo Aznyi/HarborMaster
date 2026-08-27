@@ -725,6 +725,51 @@ func (s *PlannerService) buildPlan(
 //
 // The returned target is a domain.ProposedTarget rather than two strings,
 // because two strings are what got crossed.
+// offeredTargets is every image the registry currently serves for this
+// reference that a plan could legitimately name.
+//
+// # Why the acquisition check asks this rather than "what would I choose"
+//
+// The TOCTOU check has to answer "is the plan's reference-and-digest pair still
+// what the registry is serving". It used to answer it by re-deriving the
+// planner's CHOICE with proposedChange and demanding an exact match. That made
+// the selection rule exist in two places, and Stage 17.9 paid for it: fixing
+// the tracked path to follow a moved tag before any newer tag left this check
+// still preferring the newer tag, so every such acquisition was refused with
+// "the digest on offer has changed" -- the planner and the check disagreeing
+// about a registry neither of them had misread.
+//
+// Selection belongs to the planner alone. This returns the candidates, and the
+// check requires the plan to be one of them. That is the same guarantee --
+// nothing moved underneath, and the repository cannot change -- without a
+// second opinion about which candidate is best.
+func offeredTargets(intel domain.ImageIntel) []domain.ProposedTarget {
+	var targets []domain.ProposedTarget
+
+	// The tracking reference at whatever it resolves to now.
+	if intel.RemoteDigest != "" {
+		if target, err := domain.NewProposedTarget(
+			intel.Familiar, intel.RemoteDigest, intel.Familiar); err == nil {
+			targets = append(targets, target)
+		}
+	}
+
+	// A newer tag in the same series, when the check resolved one.
+	if intel.LatestTag != "" && intel.LatestDigest != "" {
+		base := intel.Familiar
+		if index := lastIndexByte(base, ':'); index > lastIndexByte(base, '/') {
+			base = base[:index]
+		}
+		reference := base + ":" + intel.LatestTag
+		if target, err := domain.NewProposedTarget(
+			reference, intel.LatestDigest, reference); err == nil {
+			targets = append(targets, target)
+		}
+	}
+
+	return targets
+}
+
 func proposedChange(intel domain.ImageIntel) domain.ProposedTarget {
 	if intel.LatestTag != "" {
 		if intel.LatestDigest == "" {

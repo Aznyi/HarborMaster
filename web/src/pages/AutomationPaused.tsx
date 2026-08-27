@@ -171,37 +171,85 @@ function PauseCard({
       {mayResume && active ? (
         <div className="space-y-2">
           {confirming ? (
-            <>
-              <p className="text-sm text-content-muted">
-                Clearing this resets <strong>{pause.containerName}</strong>&rsquo;s
-                failure count to zero. The next pass may update it again.
+            <div
+              // A grouped confirmation rather than a modal: it is inline, so it
+              // does not trap focus. Escape still cancels, because a control
+              // that asks a question should always be answerable with "no".
+              role="group"
+              aria-label={`Resume automatic updates for ${pause.containerName}?`}
+              className="space-y-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2"
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && !busy) {
+                  event.stopPropagation();
+                  setConfirming(false);
+                }
+              }}
+            >
+              <p className="text-sm font-medium">Resume automatic updates?</p>
+
+              {/*
+                The three sentences, in this order, for this reason:
+                  1. what it DOES -- allow evaluation, not perform an update;
+                  2. what it does NOT do, said plainly, because "resume" reads
+                     as "retry" and that is the dangerous misreading;
+                  3. what happens next, so the operator knows the decision is
+                     made again from scratch rather than replayed.
+              */}
+              <p className="text-sm">
+                HarborMaster will allow <strong>{pause.containerName}</strong> to
+                be evaluated by automatic update policies again.
               </p>
-              <div className="flex gap-2">
+              <p className="text-sm font-medium">
+                This does not retry the failed update or change the container
+                now.
+              </p>
+              <p className="text-sm">
+                If the same update is still available, HarborMaster will evaluate
+                it again using current snapshots, registry information, policies,
+                dependencies and safety checks.
+              </p>
+              {/*
+                Said out loud because the card above says "paused after N failed
+                attempts", and clearing that count is a real consequence of this
+                button. An operator who fixed the underlying problem wants a
+                clean slate; one who did not should know the next failure starts
+                counting from zero rather than tripping the threshold at once.
+              */}
+              <p className="text-sm text-content-muted">
+                Its failure count is reset to zero, so one new failure will not
+                immediately pause it again.
+              </p>
+
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-1 text-xs font-medium text-warn disabled:opacity-50"
-                  disabled={busy}
-                  onClick={() => void clear()}
-                >
-                  {busy ? "Clearing…" : "Yes, resume automation"}
-                </button>
-                <button
-                  type="button"
-                  className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-xs"
+                  className="min-h-11 rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-xs"
                   disabled={busy}
                   onClick={() => setConfirming(false)}
                 >
                   Cancel
                 </button>
+                <button
+                  type="button"
+                  // Focused when the confirmation opens, so a keyboard user
+                  // lands on the action they asked for rather than at the top
+                  // of the card.
+                  ref={(node) => node?.focus()}
+                  className="min-h-11 rounded-lg border border-warn/40 bg-surface px-2.5 py-1 text-xs font-medium text-warn disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => void clear()}
+                >
+                  {busy ? "Resuming…" : "Resume automatic updates"}
+                </button>
               </div>
-            </>
+            </div>
           ) : (
             <button
               type="button"
-              className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-xs font-medium"
+              className="min-h-11 rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-xs font-medium"
               onClick={() => setConfirming(true)}
             >
-              Resume
+              Resume automatic updates
             </button>
           )}
           {failure ? (

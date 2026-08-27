@@ -34,17 +34,47 @@ import type { Recommendation } from "./planTypes";
  * express the outcome, and every value was read off the existing
  * implementation rather than chosen for how it sounds. The two that matter:
  *
- *  - `minimumRecommendation: "proceed"` on both acting presets. `proceed` is
- *    the STRICTER of the two automatable verdicts, and it is also what the
- *    create handler defaults to. It was tempting to use `proceedWithCaution`
- *    on the grounds that `proceed` would refuse real updates -- but the risk
- *    model says otherwise: a digest update on a healthy container scores 12
- *    points in the `low` band with no warning factor, which is `proceed`. A
- *    patch scores 5. `proceedWithCaution` only becomes necessary when a
- *    WARNING-severity factor is present, and the largest of those -- no
- *    configuration snapshot, 25 points -- is exactly what Phase 17.2's snapshot
- *    assurance removes. So the stricter floor is both achievable and correct,
- *    and the looser one would have been a needless widening.
+ *  - `minimumRecommendation: "proceedWithCaution"` on every preset, including
+ *    Observe. This was measured, and the measurement overturned the obvious
+ *    answer.
+ *
+ *    `proceed` is the stricter of the two automatable verdicts and it is what
+ *    the create handler defaults to, so it looks like the right floor for a
+ *    safety-first preset. It is not, because the risk model reaches the
+ *    `medium` band on CAUTION factors alone -- none of which say the change is
+ *    unsafe:
+ *
+ *        republished digest        12   caution
+ *        tag is mutable            12   caution   ("latest", "stable", ...)
+ *        published < 48 hours ago   8   caution
+ *                                  --
+ *                                  32   medium -> proceedWithCaution
+ *
+ *    That row is `image:latest`, freshly republished: the canonical Watchtower
+ *    workload, and precisely what Follow current tag exists to serve. At the
+ *    `proceed` floor the policy skips it with reason `recommendation`, so the
+ *    flagship preset does nothing at all -- and, because the freshness factor
+ *    ages out after 48 hours, it would start working later with no explanation.
+ *    A mutable tag on an aged image scores 24, one point under the boundary.
+ *
+ *    Every acting preset permits `digest`, so all three met this. `minor` on
+ *    more containers than the blast-radius threshold (15 + 8 + 6 = 29) met it
+ *    too.
+ *
+ *    `proceedWithCaution` widens the floor by exactly one verdict, and that
+ *    verdict is the one meaning "probably fine, something is worth reading".
+ *    Every WARNING-severity factor still produces `manualReview`, which no
+ *    floor may automate: a major version, open drift, a failed readiness check,
+ *    a missing snapshot, a platform mismatch, and an unresolved policy
+ *    violation are all still held for a person.
+ *
+ *    Observe carries the same floor deliberately. `Mutates()` is false for it,
+ *    but the floor is read at step 8 of `DecideAutomation` and the mode at step
+ *    11 -- so a stricter floor would make the observe preview disagree with the
+ *    preset it exists to preview.
+ *
+ *    Pinned end-to-end in `internal/service/automation_preset_floor_test.go`,
+ *    which asserts against the real risk model rather than a copied number.
  *
  *  - `strategy: "digestOnly"` for Follow current tag. `UpdateStrategy.Permits`
  *    admits exactly `digest` and `rebind` under that ceiling and refuses
@@ -144,13 +174,18 @@ const PRESET_SEMANTICS: Record<
    * reporting under the same ceiling that "Keep containers safely updated"
    * would apply makes it a preview of that preset rather than of nothing.
    *
-   * `autoRollback` is true for consistency with the acting presets; it is
-   * inert in this mode because there is nothing to roll back.
+   * The recommendation floor matches the acting presets for the same reason,
+   * and it is not inert: `DecideAutomation` reads the floor at step 8 and the
+   * mode at step 11, so a stricter floor here would silently drop containers
+   * out of the preview that an acting preset would have updated.
+   *
+   * `autoRollback` is true for consistency with the acting presets; that one
+   * IS inert in this mode, because there is nothing to roll back.
    */
   observe: {
     strategy: "patch",
     mode: "observe",
-    minimumRecommendation: "proceed",
+    minimumRecommendation: "proceedWithCaution",
     autoRollback: true,
   },
 
@@ -162,12 +197,14 @@ const PRESET_SEMANTICS: Record<
    * "minor" on purpose: where the brief allowed a choice, the narrower reading
    * wins, and an operator who wants minor movement has a preset that says so.
    *
-   * The strictest recommendation floor, for the reason in the file header.
+   * The caution floor, for the measured reason in the file header: this
+   * ceiling permits `digest`, and a republished mutable tag reaches the
+   * `medium` band on caution factors alone.
    */
   safeAutomatic: {
     strategy: "patch",
     mode: "automatic",
-    minimumRecommendation: "proceed",
+    minimumRecommendation: "proceedWithCaution",
     autoRollback: true,
   },
 
@@ -182,7 +219,7 @@ const PRESET_SEMANTICS: Record<
   followCurrentTag: {
     strategy: "digestOnly",
     mode: "automatic",
-    minimumRecommendation: "proceed",
+    minimumRecommendation: "proceedWithCaution",
     autoRollback: true,
   },
 
@@ -197,10 +234,28 @@ const PRESET_SEMANTICS: Record<
   automaticMinor: {
     strategy: "minor",
     mode: "automatic",
-    minimumRecommendation: "proceed",
+    minimumRecommendation: "proceedWithCaution",
     autoRollback: true,
   },
 };
+
+/**
+ * The outcome a new policy opens on, and the fields it opens with.
+ *
+ * Exported as a pair, and read by the editor for BOTH, because the alternative
+ * is what this replaced: the editor selected a preset radio and then
+ * initialised its fields from separate literals that had drifted away from it.
+ * The form showed "Observe only" and would have sent a `digestOnly` ceiling,
+ * so a policy saved without a single edit came back labelled Custom.
+ *
+ * Non-null by construction -- indexing the table directly rather than going
+ * through `presetSemantics`, whose signature admits Custom and therefore null.
+ */
+export const NEW_POLICY_PRESET = "observe" as const;
+
+/** The fields `NEW_POLICY_PRESET` opens with. See above. */
+export const NEW_POLICY_SEMANTICS: PresetSemantics =
+  PRESET_SEMANTICS[NEW_POLICY_PRESET];
 
 /** The semantics a preset writes, or null for Custom. */
 export function presetSemantics(

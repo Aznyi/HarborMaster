@@ -6,6 +6,11 @@
  * or an `ApiError` -- never a raw `Response` or an unparsed body.
  */
 
+import type { PlanApprovalResponse } from "./planApproval";
+import type {
+  AutomationReadinessRequest,
+  AutomationReadinessResponse,
+} from "./automationReadiness";
 import type {
   ContainerDependencies,
   DependencyCreateRequest,
@@ -2252,6 +2257,75 @@ export function deleteDependency(
 ): Promise<void> {
   return request<void>(
     `/dependencies/${encodeURIComponent(dependencyId)}`,
+    options,
+    "DELETE",
+  );
+}
+
+/**
+ * POST /api/v1/automation/readiness — needs `automation:read`.
+ *
+ * A POST that changes nothing: the question is about a policy CONFIGURATION,
+ * which does not fit in a query string. The server writes no policy, no run, no
+ * decision, and makes no Docker call.
+ */
+export function previewAutomationReadiness(
+  body: AutomationReadinessRequest,
+  options?: RequestOptions,
+): Promise<AutomationReadinessResponse> {
+  return request<AutomationReadinessResponse>(
+    "/automation/readiness",
+    options,
+    "POST",
+    body,
+  );
+}
+
+/**
+ * GET /api/v1/plan-approvals/{id} — needs `plan:read`.
+ *
+ * Reports whether a person has reviewed one immutable change plan, and whether
+ * that approval still authorises it. An approval can stand and authorise
+ * nothing: the plan may have been superseded, or already applied.
+ */
+export function getPlanApproval(
+  planId: string,
+  options?: RequestOptions,
+): Promise<PlanApprovalResponse> {
+  return request<PlanApprovalResponse>(
+    "/plan-approvals/" + encodeURIComponent(planId),
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/plan-approvals/{id} — needs `plan:approve`.
+ *
+ * Records that a person reviewed this exact plan. Sends NO body: every fact
+ * about the change is read from the plan the URL names, so there is nowhere for
+ * a caller to substitute a different image or digest.
+ *
+ * It approves; it does not apply. No container changes until the operator asks
+ * for the update separately, and every preflight still runs then.
+ */
+export function approvePlan(
+  planId: string,
+  options?: RequestOptions,
+): Promise<PlanApprovalResponse> {
+  return request<PlanApprovalResponse>(
+    "/plan-approvals/" + encodeURIComponent(planId),
+    options,
+    "POST",
+  );
+}
+
+/** DELETE /api/v1/plan-approvals/{id} — needs `plan:approve`. */
+export function revokePlanApproval(
+  planId: string,
+  options?: RequestOptions,
+): Promise<void> {
+  return request<void>(
+    "/plan-approvals/" + encodeURIComponent(planId),
     options,
     "DELETE",
   );

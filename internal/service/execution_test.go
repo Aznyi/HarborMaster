@@ -637,6 +637,10 @@ type execHarness struct {
 	// written against; the snapshot-assurance tests wire one in through tune.
 	assurance *service.SnapshotAssurance
 
+	// approvals answers whether a person reviewed a plan. NIL by default, which
+	// is the pre-Phase-17.7 behaviour: a manualReview plan is refused.
+	approvals service.PlanApprovals
+
 	// requireSnapshot overrides EXECUTION_REQUIRE_SNAPSHOT. Nil leaves it at
 	// true, which is both the default and what every existing test assumes.
 	requireSnapshot *bool
@@ -725,6 +729,7 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		Lineage:      harness.lineage,
 		Hasher:       service.NewHasher(key),
 		Assurance:    harness.assurance,
+		Approvals:    harness.approvals,
 		Config: config.Execution{
 			Enabled:               true,
 			RequireSnapshot:       requireSnapshot,
@@ -925,7 +930,15 @@ func TestEveryPreflightRefusalIsReachable(t *testing.T) {
 				h.evidence.current.Risk.Recommendation = domain.RecommendUnknown
 			}},
 
-		{"the plan asks for manual review", domain.ExecutionRefusalRecommendation,
+		// Phase 17.7: a plan that asks for review and has not had one is
+		// refused as approvalMissing rather than `recommendation`.
+		//
+		// The distinction is the point. `recommendation` means the verdict can
+		// never be acted on; this means the plan IS approvable and nobody has
+		// approved it, which is a state with a remedy the operator can carry
+		// out. No approval service is wired into this harness, which is also
+		// the pre-17.7 behaviour: refused.
+		{"the plan asks for manual review", domain.ExecutionRefusalApprovalMissing,
 			func(h *execHarness) {
 				h.evidence.plan.Risk.Recommendation = domain.RecommendManualReview
 				h.evidence.current.Risk.Recommendation = domain.RecommendManualReview

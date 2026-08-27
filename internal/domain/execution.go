@@ -514,6 +514,21 @@ const (
 	// the evidence in the plan being executed, and after a configuration change
 	// it no longer is.
 	ExecutionRefusalSnapshotChanged ExecutionRefusal = "snapshotChanged"
+	// ExecutionRefusalApprovalMissing means the plan asks for human review and
+	// no valid approval of THIS plan exists.
+	//
+	// # Why this is not "recommendation"
+	//
+	// `recommendation` means the verdict can never be acted on: `notRecommended`
+	// is the model arguing against the change, and `unknown` is a gap in
+	// evidence, which is not something a person can vouch for. Neither has a
+	// remedy an operator can carry out.
+	//
+	// This one does. The plan is approvable, and the remedy is to review it.
+	// Collapsing the two would leave an operator reading a reason that points at
+	// no action -- the same mistake migration 0030's header records for
+	// snapshotChanged.
+	ExecutionRefusalApprovalMissing ExecutionRefusal = "approvalMissing"
 	// ExecutionRefusalPolicyViolation means the container has an unresolved
 	// critical policy violation.
 	ExecutionRefusalPolicyViolation ExecutionRefusal = "policyViolation"
@@ -581,6 +596,7 @@ var ExecutionRefusals = []ExecutionRefusal{
 	ExecutionRefusalContainerState, ExecutionRefusalInventoryStale,
 	ExecutionRefusalSnapshotMissing, ExecutionRefusalRestoreReadiness,
 	ExecutionRefusalSnapshotChanged,
+	ExecutionRefusalApprovalMissing,
 	ExecutionRefusalPolicyViolation, ExecutionRefusalPolicyStale,
 	ExecutionRefusalRegistryStale, ExecutionRefusalImageMissing,
 	ExecutionRefusalDigestMismatch, ExecutionRefusalPlatformMismatch,
@@ -645,6 +661,9 @@ func (r ExecutionRefusal) Explain() string {
 		return "this container has no configuration snapshot, so there would be no record of what it looked like beforehand"
 	case ExecutionRefusalRestoreReadiness:
 		return "this container has no usable configuration snapshot to refer back to"
+	case ExecutionRefusalApprovalMissing:
+		return "this update needs a person to review the plan before it can be applied, " +
+			"and no review has been recorded for this exact plan"
 	case ExecutionRefusalSnapshotChanged:
 		return "this container's configuration has changed since this update was assessed; " +
 			"HarborMaster captured the new configuration and will assess the update again against it"

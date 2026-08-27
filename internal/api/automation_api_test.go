@@ -50,6 +50,13 @@ type fakeAutomation struct {
 	decisions []domain.AutomationDecision
 	pauses    []domain.PausedContainer
 
+	// The readiness answer, and the candidate the handler assembled to ask
+	// for it. Recorded because the whole point of the endpoint is what the
+	// SERVER builds from the request body.
+	readiness          domain.AutomationReadinessReport
+	readinessErr       error
+	readinessCandidate *domain.UpdatePolicy
+
 	// What the API asked for. The point of the whole file.
 	decisionFilters []store.AutomationDecisionFilter
 	runCalls        []bool // dryRun flags
@@ -123,6 +130,22 @@ func (f *fakeAutomation) Pauses(
 
 func (f *fakeAutomation) Upcoming(context.Context) ([]domain.AutomationDecision, error) {
 	return f.decisions, nil
+}
+
+// Readiness records the candidate it was asked about, so a test can assert
+// what the handler assembled from the request body rather than only what came
+// back out.
+func (f *fakeAutomation) Readiness(
+	_ context.Context, candidate *domain.UpdatePolicy,
+) (domain.AutomationReadinessReport, []domain.AutomationDecision, error) {
+	if candidate != nil {
+		copied := *candidate
+		f.readinessCandidate = &copied
+	}
+	if f.readinessErr != nil {
+		return domain.AutomationReadinessReport{}, nil, f.readinessErr
+	}
+	return f.readiness, f.decisions, nil
 }
 
 func (f *fakeAutomation) RunNow(

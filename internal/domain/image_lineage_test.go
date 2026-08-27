@@ -195,9 +195,19 @@ func TestNoUpdateWhenTheTagResolvesToWhatIsRunning(t *testing.T) {
 
 // A newer tag is preferred over a bare digest move, because the policy ceiling
 // an operator wrote is about version size.
+//
+// Stage 17.9 made that preference CONDITIONAL: it applies once the container is
+// current on the tag it follows. While it applied unconditionally, a container
+// behind on its own tag never saw that tag's movement proposed at all, and the
+// Follow-current-tag preset could not act. See
+// TestATagThatMovedIsFollowedBeforeAnyNewerTag for the case that changed.
+//
+// Here the tracking tag has NOT moved -- the registry reports for `nginx:1.27`
+// exactly the digest the container is running -- so the only question left is
+// how far a version may move, and the newer tag wins as it always did.
 func TestANewerTagIsPreferredOverADigestMove(t *testing.T) {
 	lineage := trackedLineage(t, "nginx:1.27", digestA)
-	intel := intelFor(t, lineage, digestB)
+	intel := intelFor(t, lineage, digestA)
 	intel.Update = domain.UpdateMinor
 	intel.LatestTag = "1.28"
 	intel.LatestDigest = digestC
@@ -389,4 +399,141 @@ func TestRollbackReturnsLineageToTheRestoredDigest(t *testing.T) {
 	if next.Update != domain.UpdateDigest || next.Digest != digestB {
 		t.Errorf("after a rollback the next cycle did not re-offer the update: %+v", next)
 	}
+}
+
+// TestATagThatMovedIsFollowedBeforeAnyNewerTag is the Stage 17.9 regression.
+//
+// # What live acceptance found
+//
+// A container configured `alpine:3.22`, running the digest that tag used to
+// resolve to, on a host where `alpine:3.22` had since been republished AND a
+// newer `alpine:3.24` existed. The Follow-current-tag preset -- the one offered
+// to operators arriving from Watchtower -- refused it:
+//
+//	reason=strategyCeiling
+//	"the change is a minor update and the policy permits at most digestOnly"
+//
+// The planner had proposed `alpine:3.24`, because a newer tag was preferred
+// unconditionally. The republished digest of the tag the container actually
+// follows was knowable and never proposed.
+//
+// # Why the preference had to become conditional
+//
+// Preferring a newer tag is right when the container is CURRENT on its own tag:
+// the operator's ceiling is about version size, and the bigger move is the one
+// worth assessing. It is wrong when the container is BEHIND on its own tag,
+// because then the newer tag silently suppresses the only update a
+// digest-ceiling policy could ever accept -- and "stay on this tag, follow its
+// content" stops meaning anything.
+//
+// Following the tag first is also the smaller, safer step. It does not lose the
+// version move: once the container is current on its tag, the next pass sees no
+// digest movement and proposes the newer tag exactly as before.
+func TestATagThatMovedIsFollowedBeforeAnyNewerTag(t *testing.T) {
+	lineage := trackedLineage(t, "alpine:3.22", digestA)
+	// The tracking tag itself moved, AND a newer tag exists.
+	intel := intelFor(t, lineage, digestB)
+	intel.Update = domain.UpdateMinor
+	intel.LatestTag = "3.24"
+	intel.LatestDigest = digestC
+
+	got := domain.EvaluateLineage(lineage, intel, digestA)
+
+	if !got.Usable {
+		t.Fatalf("verdict is not usable: %+v", got)
+	}
+	if got.Update != domain.UpdateDigest {
+		t.Fatalf("Update = %q, want digest\n"+
+			"\tthe tag this container follows moved; proposing the newer tag instead "+
+			"makes the Follow-current-tag preset unable to act on any container that "+
+			"is not already on the newest tag", got.Update)
+	}
+	if got.Digest != digestB {
+		t.Errorf("Digest = %q, want the tracking tag's current digest", got.Digest)
+	}
+	if got.Reference != "docker.io/library/alpine:3.22" {
+		t.Errorf("Reference = %q, want the tracking reference unchanged\n"+
+			"\tfollowing a tag must never change which tag is followed", got.Reference)
+	}
+}
+
+// TestTheNewerTagIsStillProposedOnceTheContainerIsCurrentOnItsOwnTag is the
+// other half, and the reason this is a reordering rather than a removal.
+func TestTheNewerTagIsStillProposedOnceTheContainerIsCurrentOnItsOwnTag(t *testing.T) {
+	// Same estate one pass later: the digest move has been applied, so the
+	// container is running exactly what its tracking tag resolves to.
+	lineage := trackedLineage(t, "alpine:3.22", digestB)
+	intel := intelFor(t, lineage, digestB)
+	intel.Update = domain.UpdateMinor
+	intel.LatestTag = "3.24"
+	intel.LatestDigest = digestC
+
+	got := domain.EvaluateLineage(lineage, intel, digestB)
+
+	if got.Update != domain.UpdateMinor {
+		t.Fatalf("Update = %q, want minor\n"+
+			"\tfollowing the tag first must DEFER the version move, never lose it",
+			got.Update)
+	}
+	if got.Digest != digestC {
+		t.Errorf("Digest = %q, want the newer tag's digest", got.Digest)
+	}
+}
+
+// TestAContainerAlreadyRunningTheNewestContentIsNotMovedBackwards is the
+// regression for a defect Stage 17.9 INTRODUCED and then caught live.
+//
+// # What happened
+//
+// Making the tracking tag's movement win over a newer tag (so that
+// Follow-current-tag could act at all) put that check ahead of an older and
+// more important one: if the newest tag already resolves to the digest this
+// container is running, there is nothing to do.
+//
+// The window where that matters is real and routine. HarborMaster updates a
+// container from `alpine:3.21` to `alpine:3.24`; for the moment before its
+// lineage advances, the container is RUNNING 3.24's content while still
+// TRACKING `alpine:3.21`. The tracking tag therefore "moved" -- 3.21 resolves
+// to something other than what is running -- and the planner proposed moving
+// the container back onto `alpine:3.21`.
+//
+// A downgrade, proposed unattended, on a container that had just been updated
+// successfully. Observed on the live rig as:
+//
+//	alpine@sha256:28bd5fe8... -> alpine:3.21    (type: digest)
+//
+// # The ordering that is actually correct
+//
+//  1. already running the newest tag's content -> nothing to do
+//  2. the tracking tag moved                   -> follow it
+//  3. a newer tag exists                       -> propose the version move
+//
+// Step 1 has to be first: it is the only one that can say "this container is
+// finished", and both of the others will happily propose something otherwise.
+func TestAContainerAlreadyRunningTheNewestContentIsNotMovedBackwards(t *testing.T) {
+	// Mid-advance: running 3.24's digest, still tracking 3.21.
+	lineage := trackedLineage(t, "alpine:3.21", digestC)
+	intel := intelFor(t, lineage, digestA) // 3.21 still resolves to its own digest
+	intel.Update = domain.UpdateMinor
+	intel.LatestTag = "3.24"
+	intel.LatestDigest = digestC // which is exactly what is running
+
+	got := domain.EvaluateLineage(lineage, intel, digestC)
+
+	if got.Update != domain.UpdateNone {
+		t.Fatalf("Update = %q (proposing %s -> %s), want none\n"+
+			"\tthis container already runs the newest tag's content; proposing "+
+			"anything here moves it BACKWARDS onto an older digest",
+			got.Update, got.Familiar, got.Digest[:min(len(got.Digest), 18)])
+	}
+	if !got.Usable {
+		t.Error("a completed check that found nothing is a usable verdict")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

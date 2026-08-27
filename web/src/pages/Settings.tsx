@@ -207,6 +207,28 @@ function FeatureSections({ features }: { features?: Features }) {
             dangerous
           />
         </dl>
+
+        {/* The two read-only engines an operator asks about when the automation
+          * page says nothing is happening.
+          *
+          * Neither touches the host, so they sit below the four that do and
+          * carry no danger styling. They are here because "assessment is
+          * switched off" and "nothing needs updating" look identical from the
+          * automation page, and this is where the difference is settled.
+          */}
+        <h4 className="mt-5 font-semibold">What it needs before it may act</h4>
+        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+          <Feature
+            label="Assess updates"
+            on={features.planner}
+            note="Works out whether a newer image exists and how large the change would be. Without it there is nothing for a policy to act on, and no container is ever reported as eligible."
+          />
+          <Feature
+            label="Record configuration"
+            on={features.snapshots}
+            note="Captures what a container looked like before it is changed. An update with no baseline to compare against is refused rather than performed."
+          />
+        </dl>
       </section>
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">

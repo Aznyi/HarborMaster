@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func scaleEstate(t *testing.T, n int) (dependencyView, []string, []domain.Worklo
 	if err != nil {
 		t.Fatalf("build graph at %d containers: %v", n, err)
 	}
-	return dependencyView{view: service.DependencyView{
+	return dependencyView{views: &atomic.Int64{}, view: service.DependencyView{
 		Graph:    graph,
 		Problems: map[string][]domain.DependencyProblem{},
 	}}, names, edges

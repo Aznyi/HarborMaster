@@ -17,6 +17,11 @@ import {
   AutomationWarningNotice,
   SelfUpdateNotice,
 } from "../components/AutomationBadges";
+import { AutomationOnboarding } from "../components/AutomationOnboarding";
+import type { FirstRunFacts } from "../api/firstRun";
+import { useHealth } from "../hooks/useHealth";
+import { useInventory } from "../hooks/useContainers";
+import { usePlans } from "../hooks/usePlans";
 import { PageIntro } from "../components/PageIntro";
 import {
   DisconnectedState,
@@ -59,7 +64,43 @@ export function Automation() {
   const runs = useAutomationRuns({ page: 1, pageSize: 10 });
   const upcoming = useAutomationUpcoming();
 
+  // The three extra reads the onboarding panel needs, each requested once.
+  //
+  // None of them is per-container: `inventory` reports one generation number,
+  // `plans` carries the planner's own status alongside the first page, and the
+  // health report is the app-wide capability read every page already makes.
+  const inventory = useInventory();
+  const plans = usePlans({ page: 1, pageSize: 1 });
+  const health = useHealth();
+
+  const session = useSession();
   const engine = status.data?.status;
+
+  // Every fact below comes from a server response. Nothing here decides
+  // whether a container may be updated; see web/src/api/firstRun.ts.
+  const facts: FirstRunFacts = {
+    features: health.data?.features
+      ? {
+          planner: health.data.features.planner,
+          automation: health.data.features.automation,
+        }
+      : null,
+    // "0 means none yet" -- the repository's own words for this field. Not
+    // inferred from a container count, which is legitimately zero on an empty
+    // host.
+    inventoryEstablished: (inventory.data?.generation ?? 0) > 0,
+    assessed: Boolean(plans.data?.planner?.lastRunAt),
+    policies: engine?.policies ?? 0,
+    actingPolicies: engine?.actingPolicies ?? 0,
+    pausedContainers: engine?.pausedContainers ?? 0,
+    // Grouping decisions the SERVER produced, not re-deciding them.
+    manualReviews: (upcoming.data?.items ?? []).filter(
+      (decision) => decision.recommendation === "manualReview",
+    ).length,
+    eligible: upcoming.data?.eligible ?? 0,
+    // A preview that did not answer is not a count of zero.
+    readinessKnown: upcoming.status === "ready" && !upcoming.error,
+  };
 
   return (
     <div className="space-y-6">
@@ -70,6 +111,15 @@ export function Automation() {
           "when it may next act. Every change it makes goes through the same " +
           "checks an operator's own update would."
         }
+      />
+
+      <AutomationOnboarding
+        facts={facts}
+        features={health.data?.features ?? null}
+        requiredCapabilities={engine?.requiredCapabilities ?? []}
+        mayManagePolicies={Boolean(
+          session.user?.permissions.includes("automation:manage"),
+        )}
       />
 
       <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />

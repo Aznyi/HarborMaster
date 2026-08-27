@@ -192,13 +192,29 @@ function DecisionList({
                   <RecordLinks decision={decision} />
                 </td>
                 <td className="px-3 py-2">
-                  {decision.verdict === "awaitingApproval" ? (
+                  {/* A held decision whose PLAN asks for manual review cannot be
+                    * released from here.
+                    *
+                    * Every major version update measures as `manualReview`, and
+                    * the deployment-wide major rule holds it for a person BEFORE
+                    * the recommendation is consulted -- so this row used to
+                    * offer an Approve button that downloaded an image and then
+                    * refused to replace anything. Releasing a policy decision
+                    * and reviewing a change plan are different acts, and only
+                    * the second one can authorise this.
+                    *
+                    * The distinction is server-supplied: `recommendation` is
+                    * set on the decision by the decision function itself.
+                    */}
+                  {decision.verdict !== "awaitingApproval" ? null : (
                     <ApproveButton
                       runId={runId}
                       containerName={decision.containerName}
+                      containerId={decision.containerId}
+                      recommendation={decision.recommendation}
                       onApproved={onChanged}
                     />
-                  ) : null}
+                  )}
                 </td>
               </tr>
             ))}
@@ -257,13 +273,37 @@ function RecordLinks({ decision }: { decision: AutomationDecision }) {
  * what will actually happen. Approving is not a preference â€” it stops a
  * container and starts a different one in its place.
  */
+/**
+ * The action offered for a held automation decision.
+ *
+ * # Why the manual-review case lives HERE and not at the call site
+ *
+ * It used to be written into the run page's JSX. The pending-approvals page
+ * renders the same control and did not repeat it, so the one page whose entire
+ * job is holding decisions for a person still offered an Approve button for a
+ * plan that needs review -- releasing it downloaded an image and the recreation
+ * was then refused. Stage 17.9 found it live.
+ *
+ * A rule that decides whether an action may be offered belongs in the thing
+ * that offers it. Every call site now gets it by construction.
+ */
 export function ApproveButton({
   runId,
   containerName,
+  containerId,
+  recommendation,
   onApproved,
 }: {
   runId: string;
   containerName: string;
+  /** For the plan link. Absent means the link is omitted, never that the
+   *  Approve button comes back. */
+  containerId?: string;
+  /**
+   * The planner's verdict, set on the decision by the decision function.
+   * `manualReview` means no automation approval can authorise this.
+   */
+  recommendation?: string | null;
   onApproved: () => void;
 }) {
   const session = useSession();
@@ -292,6 +332,28 @@ export function ApproveButton({
       setBusy(false);
     }
   }, [approve, containerName, onApproved, runId]);
+
+  // Releasing a policy decision and reviewing a change plan are different
+  // acts, and only the second one can authorise this update. Checked before
+  // the permission, because "no action is possible here" is true for everyone.
+  if (recommendation === "manualReview") {
+    return (
+      <span className="space-y-1">
+        <span className="block text-xs font-medium">Manual review required</span>
+        <span className="block text-xs text-content-muted">
+          This update needs review of the plan before it can be applied.
+        </span>
+        {containerId ? (
+          <Link
+            to={`/plans/container/${encodeURIComponent(containerId)}`}
+            className="text-xs text-accent hover:underline"
+          >
+            Review plan
+          </Link>
+        ) : null}
+      </span>
+    );
+  }
 
   if (!mayApprove) return null;
 

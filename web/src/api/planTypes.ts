@@ -173,10 +173,33 @@ export interface PlannerStatus {
 }
 
 /** GET /plans */
+/** The planner's own state, carried alongside the plans it produced. */
+export interface PlannerStatus {
+  enabled: boolean;
+  plannerVersion: string;
+  /** A generation pass is in flight right now. */
+  running: boolean;
+  /** A pass is owed. */
+  pending: boolean;
+  /**
+   * When the planner last completed a pass.
+   *
+   * Absent means it never has. That is what separates "this estate is settled"
+   * from "nothing has looked at this estate yet" -- an empty plan list is both,
+   * and rendering the second as the first tells an operator their containers
+   * are up to date when nothing has assessed them.
+   */
+  lastRunAt?: string;
+  lastGenerated: number;
+  lastUnchanged: number;
+  lastSkipped: number;
+}
+
 export interface PlanListResponse {
   items: ChangePlan[];
   pagination: Pagination;
   summary: ChangePlanSummary;
+  planner: PlannerStatus;
 }
 
 /** GET /plans/container/{id} */

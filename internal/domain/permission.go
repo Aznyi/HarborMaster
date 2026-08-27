@@ -119,6 +119,28 @@ const (
 	PermExecutionCreate Permission = "execution:create"
 	// PermExecutionCancel stops a recreation that has not yet changed anything.
 	PermExecutionCancel Permission = "execution:cancel"
+	// PermPlanApprove records that a person reviewed a change plan the planner
+	// asked a human to look at.
+	//
+	// # Why this is an operator permission, and not an administrator one
+	//
+	// An operator already holds execution:create and automation:approve -- they
+	// may recreate a container by hand, and they may release a decision a policy
+	// held. Plan approval is NARROWER than either: one human, one immutable
+	// plan, one digest, no standing authority over anything else.
+	//
+	// The administrator permissions are the ones that grant STANDING authority
+	// -- writing an update policy is dangerous precisely because it is an
+	// unattended version of execution:create. A one-off judgement about one
+	// assessment is not that.
+	//
+	// # Why it is separate from execution:create
+	//
+	// Approving a plan and applying it are two acts, and a deployment may want
+	// to keep them apart. Holding this permission grants no ability to change a
+	// container: the apply still needs acquisition:create and execution:create,
+	// and every preflight still runs.
+	PermPlanApprove Permission = "plan:approve"
 
 	// PermRollbackRead covers rollback history.
 	PermRollbackRead Permission = "rollback:read"
@@ -247,7 +269,7 @@ var AllPermissions = []Permission{
 	PermImageRefresh,
 	PermInventoryRead, PermInventoryRefresh,
 	PermNotificationManage, PermNotificationRead,
-	PermPlanGenerate, PermPlanRead,
+	PermPlanApprove, PermPlanGenerate, PermPlanRead,
 	PermPolicyAnnotate, PermPolicyEvaluate, PermPolicyManage, PermPolicyRead,
 	PermSnapshotCreate, PermSnapshotRead,
 	PermUserManage,
@@ -458,6 +480,7 @@ var operatorPermissions = []Permission{
 	PermRollbackCreate,
 	PermRollbackCancel,
 	PermExecutionCancel,
+	PermPlanApprove,
 	PermAutomationRun,
 	PermAutomationApprove,
 	PermAutomationPause,

@@ -86,6 +86,16 @@ const (
 	AuditPolicyAnnotated    AuditAction = "policy.annotated"
 	AuditImageRefreshed     AuditAction = "image.refreshed"
 	AuditPlanGenerated      AuditAction = "plan.generated"
+	// AuditPlanApproved is a person recording that they reviewed one immutable
+	// change plan the planner asked a human to look at.
+	//
+	// A security event in its own right: it is the only thing in HarborMaster
+	// that lets a `manualReview` assessment reach a container, and the question
+	// "who said yes to this exact digest" has to stay answerable long after the
+	// approval row itself is pruned with its plan.
+	AuditPlanApproved AuditAction = "plan.approved"
+	// AuditPlanApprovalRevoked is a person withdrawing that authorisation.
+	AuditPlanApprovalRevoked AuditAction = "plan.approvalRevoked"
 
 	// The two that change the Docker host.
 	//
@@ -230,6 +240,7 @@ var AuditActions = []AuditAction{
 	AuditPolicyCreated, AuditPolicyUpdated, AuditPolicyArchived,
 	AuditPolicyEvaluated, AuditPolicyAnnotated,
 	AuditImageRefreshed, AuditPlanGenerated,
+	AuditPlanApproved, AuditPlanApprovalRevoked,
 	AuditAcquisitionRequested, AuditAcquisitionCancelled,
 	AuditAcquisitionCompleted, AuditAcquisitionFailed,
 	AuditExecutionRequested, AuditExecutionCancelled,

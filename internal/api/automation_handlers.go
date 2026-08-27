@@ -62,6 +62,7 @@ type AutomationService interface {
 	Summary(ctx context.Context) (domain.AutomationRunSummary, error)
 	Pauses(ctx context.Context, activeOnly bool, page store.Page) ([]domain.PausedContainer, int, error)
 	Upcoming(ctx context.Context) ([]domain.AutomationDecision, error)
+	Readiness(ctx context.Context, candidate *domain.UpdatePolicy) (domain.AutomationReadinessReport, []domain.AutomationDecision, error)
 
 	RunNow(ctx context.Context, dryRun bool, requestedBy domain.Requester) (domain.AutomationRun, []domain.AutomationDecision, error)
 	Approve(ctx context.Context, runID, containerName string, by domain.Requester, actor service.Actor) (domain.AutomationDecision, error)

@@ -383,18 +383,64 @@ func EvaluateLineage(lineage ImageLineage, intel ImageIntel, runningDigest strin
 			Reason: "the digest this container is running could not be established, so there is nothing to compare"}
 	}
 
+	// FIRST: is this container already running the newest content there is?
+	//
+	// If the newest tag in the series resolves to exactly what is running, there
+	// is nothing to propose, whatever any other reference says. This has to be
+	// asked before either of the moves below, because both of them will propose
+	// something otherwise -- and Stage 17.9 saw what that costs.
+	//
+	// The window is routine. HarborMaster moves a container from `alpine:3.21`
+	// to `alpine:3.24`; until its lineage advances it is RUNNING 3.24 while
+	// still TRACKING 3.21, so the tracking tag has "moved" relative to what is
+	// running. Asking the tracking tag first proposed moving the container back
+	// onto `alpine:3.21` -- a downgrade, unattended, on a container that had
+	// just been updated successfully.
+	if intel.LatestTag != "" && intel.LatestDigest != "" &&
+		strings.EqualFold(intel.LatestDigest, running) {
+		return LineageProposal{Update: UpdateNone, Usable: true,
+			Reason: "the newest tag already resolves to the digest this container is running"}
+	}
+
+	// The tag this container follows moved: same reference, different content.
+	//
+	// Checked BEFORE any newer tag, and the order is the whole meaning of
+	// "follow this tag". A container that is behind on its own tag is behind on
+	// the thing its operator named; a newer tag in the series is a different
+	// question, and answering it first suppresses this one entirely.
+	//
+	// Stage 17.9 found what that costs. The Follow-current-tag preset -- the
+	// answer offered to operators arriving from Watchtower -- permits a digest
+	// move and nothing else. While a newer tag won unconditionally, that preset
+	// could not act on any container that was not already on the newest tag in
+	// its series, which is most of them. The republished digest of the tag the
+	// container actually follows was knowable on every pass and never proposed.
+	//
+	// Following the tag first is also the smaller step, and it loses nothing:
+	// once the container is current on its own tag there is no digest movement
+	// left to report, and the newer-tag branch below proposes the version move
+	// exactly as it always did.
+	if intel.RemoteDigest != "" && !strings.EqualFold(intel.RemoteDigest, running) {
+		return LineageProposal{
+			Update:    UpdateDigest,
+			Reference: lineage.TrackingReference,
+			Familiar:  lineage.TrackingFamiliar,
+			Digest:    intel.RemoteDigest,
+			Usable:    true,
+			Reason:    "the tracking tag now resolves to a different digest than this container is running",
+		}
+	}
+
 	// A newer tag in the same series, when the check found one and resolved it.
 	// Both halves are required: a tag with no digest cannot be acquired, and
 	// pairing a tag with a digest resolved for a different one is the mistake
 	// the acquisition path refuses anyway.
+	//
+	// Reached only when the container is already current on its own tag, so the
+	// operator's ceiling is being asked the question it is actually about: how
+	// far a VERSION may move.
 	if intel.LatestTag != "" && intel.LatestDigest != "" &&
 		intel.Update != UpdateNone && intel.Update != UpdateUnknown {
-		if strings.EqualFold(intel.LatestDigest, running) {
-			// The newer tag already resolves to what is running. Moving would
-			// change the reference and nothing else.
-			return LineageProposal{Update: UpdateNone, Usable: true,
-				Reason: "the newest tag already resolves to the digest this container is running"}
-		}
 		reference, familiar := retagged(lineage, intel.LatestTag)
 		return LineageProposal{
 			Update:    intel.Update,
@@ -406,17 +452,6 @@ func EvaluateLineage(lineage ImageLineage, intel ImageIntel, runningDigest strin
 		}
 	}
 
-	// The tag itself moved: same reference, different content.
-	if intel.RemoteDigest != "" && !strings.EqualFold(intel.RemoteDigest, running) {
-		return LineageProposal{
-			Update:    UpdateDigest,
-			Reference: lineage.TrackingReference,
-			Familiar:  lineage.TrackingFamiliar,
-			Digest:    intel.RemoteDigest,
-			Usable:    true,
-			Reason:    "the tracking tag now resolves to a different digest than this container is running",
-		}
-	}
 	if intel.RemoteDigest == "" {
 		return LineageProposal{Update: UpdateUnknown, Usable: false,
 			Reason: "the registry did not report a digest for the tracking reference"}

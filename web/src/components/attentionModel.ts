@@ -4,7 +4,7 @@ import type { DriftSummary } from "../api/driftTypes";
 import type { EventEngineStatus } from "../api/eventTypes";
 import type { ExecutionSummary } from "../api/executionTypes";
 import type { InventoryStatus } from "../api/inventoryTypes";
-import type { ChangePlanSummary } from "../api/planTypes";
+import type { ChangePlanSummary, PlannerStatus } from "../api/planTypes";
 import type { PolicySummary } from "../api/policyTypes";
 import type { RollbackSummary } from "../api/rollbackTypes";
 import type { HealthReport } from "../api/types";
@@ -73,6 +73,14 @@ export interface AttentionInputs {
   events?: EventEngineStatus | null;
   automation?: AutomationStatus | null;
   plans?: ChangePlanSummary | null;
+  /**
+   * The planner's own state, from the same plan read the summary comes from.
+   *
+   * Needed because "no policy yet" is only worth an operator's attention once
+   * the estate has actually been assessed. Raising it while HarborMaster is
+   * still starting up asks somebody to fix something that is not broken.
+   */
+  planner?: PlannerStatus | null;
   executions?: ExecutionSummary | null;
   rollbacks?: RollbackSummary | null;
   policy?: PolicySummary | null;
@@ -110,6 +118,57 @@ const LEVEL_ORDER: Record<AttentionLevel, number> = {
 export function buildAttention(inputs: AttentionInputs): AttentionItem[] {
   const items: AttentionItem[] = [];
   const add = (item: AttentionItem) => items.push(item);
+
+  // ---------------------------------------------------------- onboarding --
+  //
+  // Two states, and only two, are worth an operator's attention here. Both
+  // clear themselves as soon as they are addressed, so neither becomes a
+  // permanent fixture on a configured installation.
+  //
+  // Everything else a fresh install can be -- starting up, assessing, observing
+  // deliberately, configured with nothing currently eligible -- is either
+  // waiting on HarborMaster or working as asked. An item for any of those would
+  // be telling somebody to fix something that is not broken, which is how an
+  // attention list stops being read.
+  if (inputs.health?.features && inputs.automation && inputs.canReadAutomation) {
+    const assessed = Boolean(inputs.planner?.lastRunAt);
+    const acting = inputs.automation.actingPolicies ?? 0;
+    const policies = inputs.automation.policies ?? 0;
+
+    if (!assessed) {
+      // Nothing below is meaningful yet: an estate nobody has assessed has no
+      // opinion about policies. Deliberately silent rather than informational,
+      // because this window is normally seconds long.
+    } else if (!inputs.health.features.automation && acting > 0) {
+      // The genuinely confusing state: somebody wrote a policy that says
+      // "automatic" on an installation where the engine cannot run it. Saving
+      // the policy did not enable anything, and nothing else on the interface
+      // says so.
+      add({
+        id: "automation-engine-disabled",
+        level: "watch",
+        title: "Automatic policies cannot run",
+        detail:
+          "An update policy is set to update containers automatically, but the " +
+          "automation engine is disabled on this installation. Saving the " +
+          "policy does not enable it.",
+        to: "/automation",
+        count: acting,
+      });
+    } else if (inputs.health.features.automation && policies === 0) {
+      // The first-run item. Clears on the first policy of any kind, including
+      // an observe-only one.
+      add({
+        id: "automation-not-configured",
+        level: "info",
+        title: "Automatic updates are not configured",
+        detail:
+          "The update engine is running and no policy tells it what to do. " +
+          "HarborMaster is assessing containers and will not change any of them.",
+        to: "/automation",
+      });
+    }
+  }
 
   // ------------------------------------------------- HarborMaster itself --
   //

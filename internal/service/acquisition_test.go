@@ -732,9 +732,28 @@ func TestThePreflightRefusesEachUnsafeSituation(t *testing.T) {
 		// The newer tag is still on offer but can no longer be pinned. An
 		// unpinnable target must refuse rather than fall back to the current
 		// tag's digest, which is exactly what the old code did.
+		// The plan named a newer tag that can no longer be pinned, but the
+		// tracking reference still resolves. Something IS on offer -- just not
+		// what this plan was assessed against -- so the honest refusal is that
+		// the offer changed, not that nothing could be pinned.
+		//
+		// Before Stage 17.9 the check re-derived the planner's choice and this
+		// read as digestUnavailable. It now compares the plan against every
+		// target the registry currently serves, which is what makes the planner
+		// and the check unable to disagree.
 		"the proposed tag can no longer be pinned": {
 			mutate: func(h *acquisitionHarness) { h.evidence.intel.LatestDigest = "" },
-			want:   domain.AcquisitionRefusalDigestUnavailable,
+			want:   domain.AcquisitionRefusalDigestChanged,
+		},
+		// Nothing at all resolves: no newer tag, and the tracking reference has
+		// no digest either. This is what digestUnavailable means, and it keeps
+		// the refusal reachable.
+		"nothing the registry serves can be pinned": {
+			mutate: func(h *acquisitionHarness) {
+				h.evidence.intel.LatestDigest = ""
+				h.evidence.intel.RemoteDigest = ""
+			},
+			want: domain.AcquisitionRefusalDigestUnavailable,
 		},
 		"the registry has never been checked": {
 			mutate: func(h *acquisitionHarness) {

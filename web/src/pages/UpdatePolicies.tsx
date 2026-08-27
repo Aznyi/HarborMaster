@@ -11,6 +11,8 @@ import type {
 import type { Recommendation } from "../api/planTypes";
 import {
   AUTOMATION_PRESETS,
+  NEW_POLICY_PRESET,
+  NEW_POLICY_SEMANTICS,
   PRESET_DESCRIPTIONS,
   PRESET_LABELS,
   compilePreset,
@@ -42,6 +44,7 @@ import {
   UpdateStrategyBadge,
 } from "../components/AutomationBadges";
 import { ContainerPicker } from "../components/ContainerPicker";
+import { ReadinessPanel } from "../components/ReadinessPanel";
 import { PageIntro } from "../components/PageIntro";
 import {
   DisconnectedState,
@@ -438,12 +441,24 @@ function PolicyEditor({
   );
 
   // 2. How far may updates go?
+  //
+  // # Why a NEW policy takes its defaults from a preset
+  //
+  // The editor opens with a preset radio already selected, so the fields it
+  // opens with must be the fields that preset compiles. When they were separate
+  // literals they drifted: the form showed "Observe only" while holding a
+  // `digestOnly` ceiling, so a policy saved without a single edit was stored as
+  // something the label did not describe and came back as Custom on reopening.
+  //
+  // Reading both from `NEW_POLICY_*` is what makes that unrepresentable.
   const [strategy, setStrategy] = useState<UpdateStrategy>(
-    policy?.strategy ?? "digestOnly",
+    policy?.strategy ?? NEW_POLICY_SEMANTICS.strategy,
   );
 
   // 3. How should updates happen?
-  const [mode, setMode] = useState<AutomationMode>(policy?.mode ?? "observe");
+  const [mode, setMode] = useState<AutomationMode>(
+    policy?.mode ?? NEW_POLICY_SEMANTICS.mode,
+  );
 
   // The recommendation floor.
   //
@@ -452,7 +467,7 @@ function PolicyEditor({
   // it, and sending it explicitly makes the stored policy match what the
   // summary said rather than what the server chose.
   const [floor, setFloor] = useState<Recommendation>(
-    policy?.minimumRecommendation ?? "proceed",
+    policy?.minimumRecommendation ?? NEW_POLICY_SEMANTICS.minimumRecommendation,
   );
 
   // 4. When may updates happen?
@@ -465,7 +480,7 @@ function PolicyEditor({
 
   // 5. What happens if an update fails?
   const [autoRollback, setAutoRollback] = useState(
-    policy?.failure?.autoRollback ?? true,
+    policy?.failure?.autoRollback ?? NEW_POLICY_SEMANTICS.autoRollback,
   );
   const [pauseEnabled, setPauseEnabled] = useState(
     (policy?.failure?.pauseAfterFailures ?? 2) > 0,
@@ -574,7 +589,7 @@ function PolicyEditor({
           minimumRecommendation: policy.minimumRecommendation,
           failure: policy.failure,
         })
-      : "observe",
+      : NEW_POLICY_PRESET,
   );
 
   /**
@@ -781,6 +796,21 @@ function PolicyEditor({
           </Field>
         </div>
       </details>
+
+      {/* What this policy could do against the estate as it stands.
+        *
+        * Measured on the server from the SAME request object the summary
+        * describes and the save button sends, so the count cannot be a reading
+        * of a different policy than the one on screen.
+        *
+        * Rendered ABOVE the summary deliberately: "what this policy does" is a
+        * description of the rule, and "what it could do right now" is a fact
+        * about the estate. An operator deciding whether to save wants the
+        * second one first.
+        */}
+      <ReadinessPanel
+        request={policy ? { ...request, policyId: policy.policyId } : request}
+      />
 
       {/* The summary: the request that is about to be sent, in words. */}
       <div className="rounded-lg border border-accent/40 bg-accent-soft px-3 py-2">

@@ -184,6 +184,14 @@ type ExecutionOptions struct {
 	// makes preservation UNVERIFIABLE, which fails closed rather than passing.
 	Hasher *Hasher
 
+	// Approvals answers ONE question: has a person reviewed this exact plan.
+	//
+	// Consulted only for a `manualReview` recommendation, and only to replace
+	// one refusal with one permission. It is not a capability -- it reads a
+	// plan and an approval row and holds no Docker interface -- and nil leaves
+	// the gate exactly as it was before Phase 17.7: refused.
+	Approvals PlanApprovals
+
 	// Assurance establishes, immediately before the mutation, that the snapshot
 	// describing this container is the one the plan was assessed against.
 	//
@@ -239,6 +247,9 @@ type ExecutionService struct {
 	// assurance establishes the current baseline in the preflight. Holds no
 	// Docker capability.
 	assurance *SnapshotAssurance
+	// approvals reports whether a person reviewed a plan. Holds no Docker
+	// capability and cannot submit work.
+	approvals PlanApprovals
 	// self reports HarborMaster's own container. Read on every preflight.
 	notifier Notifier
 	self     SelfReporter
@@ -323,6 +334,7 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		mutator:      opts.Mutator,
 		hasher:       opts.Hasher,
 		assurance:    opts.Assurance,
+		approvals:    opts.Approvals,
 		notifier:     opts.Notify,
 		self:         opts.Self,
 		dependencies: opts.Dependencies,
@@ -721,4 +733,14 @@ func (e *executionEvidence) LastRefresh(ctx context.Context) (*domain.RefreshRec
 
 func (e *executionEvidence) Intel(ctx context.Context, reference string) (domain.ImageIntel, error) {
 	return e.intel.Get(ctx, reference)
+}
+
+// PlanApprovals is the ONE question the execution preflight asks about human
+// review.
+//
+// A single method returning a refusal. Deliberately not the approval service
+// itself: the preflight must not be able to CREATE an approval, only to ask
+// whether one stands. There is nothing on this interface that writes.
+type PlanApprovals interface {
+	ApprovalFor(ctx context.Context, plan domain.ChangePlan) (domain.PlanApprovalRefusal, error)
 }

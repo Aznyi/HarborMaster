@@ -60,6 +60,8 @@ func TestEveryExecutionRefusalIsAcceptedByTheSchema(t *testing.T) {
 		// row per vocabulary entry, and a value dropped from the vocabulary
 		// would silently stop being covered.
 		domain.ExecutionRefusalSnapshotChanged,
+		// Added by Phase 17.7 with migration 0031, for the same reason.
+		domain.ExecutionRefusalApprovalMissing,
 	} {
 		var found bool
 		for _, refusal := range domain.ExecutionRefusals {

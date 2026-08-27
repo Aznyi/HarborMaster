@@ -509,9 +509,27 @@ type AutomationStatus struct {
 	// Running reports a pass in flight right now.
 	Running bool `json:"running"`
 
-	Policies         int `json:"policies"`
-	EnabledPolicies  int `json:"enabledPolicies"`
-	PausedContainers int `json:"pausedContainers"`
+	Policies        int `json:"policies"`
+	EnabledPolicies int `json:"enabledPolicies"`
+	// ActingPolicies counts the enabled policies whose mode may actually change
+	// a container.
+	//
+	// Reported because "policies exist" and "a policy may act" are different
+	// facts with different remedies, and a client that worked the second one
+	// out for itself would be reimplementing AutomationMode.Mutates.
+	ActingPolicies int `json:"actingPolicies"`
+	// RequiredCapabilities names the deployment capabilities an acting policy
+	// needs, from RequiredForAutomation.
+	//
+	// The RULE lives here rather than in the browser: rollback is required only
+	// when a policy asks for automatic rollback, and telling an operator to
+	// enable a capability their policies never use would be telling them to
+	// widen what HarborMaster may do for no reason. A client compares these
+	// names against the capability flags it already has from the health report.
+	//
+	// Empty when no policy acts: nothing is required to do nothing.
+	RequiredCapabilities []string `json:"requiredCapabilities,omitempty"`
+	PausedContainers     int      `json:"pausedContainers"`
 	// AwaitingApproval counts decisions a person has to release.
 	AwaitingApproval int `json:"awaitingApproval"`
 

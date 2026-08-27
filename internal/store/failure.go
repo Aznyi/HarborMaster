@@ -258,3 +258,27 @@ func Remedy(kind FailureKind) string {
 // remounted. Corruption does not clear, and continuing on a malformed image
 // risks writing more damage over the operator's history.
 func IsFatal(kind FailureKind) bool { return kind == FailureCorrupt }
+
+// isForeignKeyViolation reports a foreign-key constraint failure specifically.
+//
+// # Why this is separate from isUniqueViolation
+//
+// That function ends by treating ANY constraint failure as a unique violation,
+// which is right for the callers it was written for -- they insert into tables
+// whose only constraint that fires in practice is a unique index. It is wrong
+// for a table with a foreign key: an insert naming a parent row that does not
+// exist would be reported as "this already exists", which is the opposite of
+// what happened and sends the caller to the wrong answer.
+//
+// So this checks the EXTENDED code, and callers that can hit both must ask this
+// one first.
+func isForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+}

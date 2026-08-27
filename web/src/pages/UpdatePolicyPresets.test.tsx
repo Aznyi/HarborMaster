@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TestSessionProvider, testSession, testUser } from "../test/session";
+import { presetSemantics } from "../api/automationPresets";
 import { UpdatePolicies } from "./UpdatePolicies";
 
 /**
@@ -70,7 +71,7 @@ function storedPolicy(overrides: Record<string, unknown> = {}) {
     scope: "allEligible",
     selector: { exclude: ["database"] },
     strategy: "digestOnly",
-    minimumRecommendation: "proceed",
+    minimumRecommendation: "proceedWithCaution",
     mode: "automatic",
     window: { alwaysOpen: true },
     failure: { autoRollback: true, pauseAfterFailures: 2 },
@@ -87,6 +88,25 @@ beforeEach(() => {
 
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    // Readiness is a POST that changes nothing, and the editor fires one as
+    // the form changes. Answered BEFORE the write branch and deliberately NOT
+    // recorded in `posted`, so the assertions below still read the policy the
+    // operator saved rather than whichever request happened to land last.
+    if (url.includes("/automation/readiness")) {
+      return jsonResponse({
+        readiness: {
+          evaluatedAt: "2026-03-01T03:00:00Z",
+          truncated: false,
+          considered: 1,
+          governed: 1,
+          eligible: 1,
+          observing: 0,
+          awaitingApproval: 0,
+          groups: [],
+        },
+        engineEnabled: true,
+      });
+    }
     if (init?.method === "POST" || init?.method === "PATCH") {
       posted.push({
         url,
@@ -205,6 +225,30 @@ describe("choosing an outcome", () => {
     }
   });
 
+  it("sends the fields of the preset it is showing, when nothing is edited", async () => {
+    // The editor opens with a preset already selected. Whatever that preset
+    // is, the fields the form would send must be the fields that preset
+    // compiles.
+    //
+    // When they disagree the label is a lie in both directions: the operator
+    // is shown "Observe only" but stores something else, and reopening the
+    // policy reports Custom without anybody having edited anything. The
+    // detector is doing its job in that second step -- the form is the part
+    // that was wrong.
+    const user = await openNewEditor();
+    expect(presets().getByRole("radio", { name: /Observe only/ })).toBeChecked();
+
+    const body = await saveAs(user, "untouched");
+    const semantics = presetSemantics("observe")!;
+
+    expect(body.mode).toBe(semantics.mode);
+    expect(body.strategy).toBe(semantics.strategy);
+    expect(body.minimumRecommendation).toBe(semantics.minimumRecommendation);
+    expect(
+      (body.failure as { autoRollback?: boolean } | undefined)?.autoRollback,
+    ).toBe(semantics.autoRollback);
+  });
+
   it("starts a new policy on Observe only, which cannot change a host", async () => {
     const user = await openNewEditor();
 
@@ -226,7 +270,7 @@ describe("what a preset sends", () => {
 
     expect(body.strategy).toBe("digestOnly");
     expect(body.mode).toBe("automatic");
-    expect(body.minimumRecommendation).toBe("proceed");
+    expect(body.minimumRecommendation).toBe("proceedWithCaution");
     expect((body.failure as Record<string, unknown>).autoRollback).toBe(true);
   });
 
@@ -376,12 +420,12 @@ describe("opening an existing policy", () => {
   });
 
   it("selects Custom for a policy that differs in one safety field", async () => {
-    // Digest-only and automatic, but with the looser recommendation floor. It
-    // permits strictly more than Follow current tag does, so labelling it
-    // Follow current tag would tell the operator something untrue.
-    await openEditorFor(
-      storedPolicy({ minimumRecommendation: "proceedWithCaution" }),
-    );
+    // Digest-only and automatic, but with the stricter recommendation floor.
+    // It permits strictly LESS than Follow current tag does -- it refuses a
+    // republished mutable tag, which is the workload the preset exists for --
+    // so labelling it Follow current tag would tell the operator something
+    // untrue.
+    await openEditorFor(storedPolicy({ minimumRecommendation: "proceed" }));
 
     expect(presets().getByRole("radio", { name: /^Custom/ })).toBeChecked();
     expect(
@@ -405,15 +449,18 @@ describe("opening an existing policy", () => {
 
   it("does not rewrite an existing policy merely by opening it", async () => {
     const user = await openEditorFor(
-      storedPolicy({ minimumRecommendation: "proceedWithCaution" }),
+      storedPolicy({ minimumRecommendation: "proceed" }),
     );
 
     await user.click(screen.getByRole("button", { name: "Save policy" }));
     await waitFor(() => expect(posted.length).toBeGreaterThan(0));
 
     // Opening a Custom policy and saving it unchanged must not quietly
-    // tighten or loosen it into a preset.
-    expect(posted[0]!.body.minimumRecommendation).toBe("proceedWithCaution");
+    // tighten or loosen it into a preset. This is the case that matters most
+    // after the floor was measured: every policy written by the earlier
+    // editor carries `proceed`, and opening one must not silently recompile
+    // it to the preset's floor.
+    expect(posted[0]!.body.minimumRecommendation).toBe("proceed");
     expect(posted[0]!.body.strategy).toBe("digestOnly");
   });
 });
@@ -455,8 +502,11 @@ describe("the before-save summary", () => {
     const user = await openNewEditor();
     await user.click(presets().getByRole("radio", { name: /Follow current tag/ }));
 
+    // The caution floor's own sentence, not the strict one's. An operator is
+    // told which of the two verdicts their preset acts on, in words, without
+    // having to open Custom to find the field.
     expect(
-      screen.getByText(/acts only on the ones it rates as straightforward/i),
+      screen.getByText(/will also act on ones it has flagged for caution/i),
     ).toBeInTheDocument();
   });
 });
@@ -577,6 +627,32 @@ runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] },
     expect(
       presets().getByRole("radio", { name: /Keep containers safely updated/ }),
     ).toBeChecked();
+  });
+
+  it("keeps the preset rows shrinkable and touchable at a narrow width", async () => {
+    // Class mechanism rather than measured width, for the reason
+    // NarrowViewport.test.tsx documents: jsdom implements no layout, so the
+    // symptom is unobservable here and only the cause can be pinned.
+    //
+    // Two one-token mistakes would each break this group on a phone:
+    //
+    //   - dropping `min-w-0` from the text column. Its content is a heading
+    //     plus a full sentence of description, and a flex item keeps
+    //     `min-width: auto` by default -- so it would refuse to shrink below
+    //     its widest word run and push the row, and the page, sideways.
+    //   - dropping `min-h-11`, which is the 44px touch target the rest of the
+    //     editor's controls carry.
+    await openNewEditor();
+
+    for (const radio of presets().getAllByRole("radio")) {
+      const label = radio.closest("label");
+      expect(label?.className).toContain("min-h-11");
+
+      // The column holding the name and the description, not the input.
+      const text = label?.querySelector("span.min-w-0");
+      expect(text).not.toBeNull();
+      expect(text?.textContent).toBeTruthy();
+    }
   });
 
   it("gives the preset radios unique accessible names", async () => {

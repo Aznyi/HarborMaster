@@ -155,6 +155,9 @@ function AttentionPanel({
       // "no evidence" rather than as "nothing wrong".
       automation: automation.error ? null : (automation.data?.status ?? null),
       plans: plans.data?.summary ?? null,
+      // From the SAME read the summary comes from: the plan listing carries
+      // the planner's own state, so this costs no extra request.
+      planner: plans.data?.planner ?? null,
       executions: executions.data?.summary ?? null,
       rollbacks: rollbacks.data?.summary ?? null,
       policy: policy.data,

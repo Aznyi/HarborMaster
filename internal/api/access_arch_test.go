@@ -126,6 +126,27 @@ var writeMethods = map[string]bool{
 // reason has to say. Each of these services takes a service.Actor built by
 // s.actorFrom(r) and calls RecordAction with it, so the actor still comes from
 // the request.
+// readOnlyWrites lists routes that use a write METHOD and change no state.
+//
+// A third category, and a deliberately small one. `auditedElsewhere` says "the
+// record is written somewhere else"; this says "there is nothing to record",
+// which is a stronger claim and therefore has to be declared rather than
+// inferred from the absence of an audit call.
+//
+// A route belongs here only when it needs a request BODY and answers a
+// question. It still gets every guard a POST gets -- CSRF, the size bound, the
+// strict decoder, the write rate limiter -- because the method is what the
+// middleware sees, and because the rate limiter is what bounds the cost of
+// asking an expensive question repeatedly.
+//
+// Not auditing them is a deliberate choice rather than an omission: the policy
+// editor asks for a readiness preview on every edit, and a row per keystroke
+// would bury the records of things that actually changed the host.
+var readOnlyWrites = map[string]string{
+	APIPrefix + "/automation/readiness": "previews a policy configuration against the current estate; " +
+		"writes no run, decision, policy, acquisition or execution, and makes no Docker call",
+}
+
 var auditedElsewhere = map[string]string{
 	APIPrefix + "/auth/login":                "AuthService.Login records success, failure, and the reason",
 	APIPrefix + "/auth/logout":               "AuthService.Logout records the revocation",
@@ -142,6 +163,9 @@ var auditedElsewhere = map[string]string{
 	APIPrefix + "/automation/approve":   "AutomationService.Approve records the release, and the refusal when the plan moved on",
 	APIPrefix + "/automation/pause":     "AutomationService.PauseContainer records the pause",
 	APIPrefix + "/automation/resume":    "AutomationService.Resume records who cleared it",
+
+	APIPrefix + "/plan-approvals/{id}": "PlanApprovalService records the approval and the withdrawal, " +
+		"and the refusal when the plan is superseded or does not ask for review",
 
 	APIPrefix + "/notifications/destinations": "NotificationAdminService.CreateDestination records the channel, never the URL",
 	APIPrefix + "/notifications/destinations/{id}": "NotificationAdminService.UpdateDestination and ArchiveDestination record the edit, " +
@@ -173,6 +197,27 @@ func TestEveryWriteRouteIsAudited(t *testing.T) {
 		if reason, ok := auditedElsewhere[r.pattern]; ok {
 			if reason == "" {
 				t.Errorf("route %s %s is exempted without a reason", r.method, r.pattern)
+			}
+			continue
+		}
+		if reason, ok := readOnlyWrites[r.pattern]; ok {
+			if reason == "" {
+				t.Errorf("route %s %s is declared read-only without a reason", r.method, r.pattern)
+			}
+			// Declared, and then CHECKED: a route that claims to change nothing
+			// must not call a write path. Cheap to state and easy to violate
+			// later, which is exactly what makes it worth asserting.
+			name := handlerName(r.handler)
+			if body, found := bodies[name]; found {
+				for _, forbidden := range []string{
+					"s.auditWrite(", "Create(", "Update(", "Archive(", "Delete(",
+					"RunNow(", "Approve(", "Resume(", "PauseContainer(",
+				} {
+					if strings.Contains(body, forbidden) {
+						t.Errorf("route %s %s is declared read-only but its handler calls %s",
+							r.method, r.pattern, forbidden)
+					}
+				}
 			}
 			continue
 		}

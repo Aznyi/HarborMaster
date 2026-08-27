@@ -398,3 +398,65 @@ it("keeps its screen-reader-only header text inside the scrolling table", () => 
 
   expect(offenders).toEqual([]);
 });
+
+/**
+ * The Stage 17.9 regression, at the page where it was found.
+ *
+ * Stage 17.7 stopped offering an Approve button for a decision whose PLAN needs
+ * manual review -- releasing one downloaded an image and the recreation was
+ * then refused, so the button was an action that could not work. That guard was
+ * written into the automation RUN page's markup.
+ *
+ * This page renders the same control and did not repeat it. So the one screen
+ * whose entire job is holding decisions for a person still offered the dead
+ * button, for the case that reaches it most often: every major version update
+ * measures as manualReview, and the deployment-wide major rule holds it here.
+ *
+ * The guard now lives inside the control, which is why both pages have it.
+ */
+it("offers review, not approval, when the plan needs manual review", async () => {
+  mockApi([
+    ["/automation/approvals", {
+      items: [decision({
+        containerName: "hm17-bash",
+        currentImage: "bash:4.4",
+        proposedImage: "bash:5.3",
+        updateType: "major",
+        recommendation: "manualReview",
+      })],
+      pagination: pagination(1),
+    }],
+  ]);
+
+  renderQueue();
+
+  const row = (await screen.findByText("hm17-bash")).closest("tr");
+  expect(row).not.toBeNull();
+
+  // The action that cannot work must not be offered.
+  expect(
+    within(row as HTMLElement).queryByRole("button", { name: /approve/i }),
+  ).not.toBeInTheDocument();
+
+  // And the one that can is named, with somewhere to do it.
+  expect(within(row as HTMLElement).getByText(/Manual review required/i)).toBeInTheDocument();
+  const link = within(row as HTMLElement).getByRole("link", { name: /Review plan/i });
+  expect(link).toHaveAttribute("href", `/plans/container/${containerID}`);
+});
+
+/** An ordinary held decision still gets the approve control. */
+it("still offers approval for a decision a person may release", async () => {
+  mockApi([
+    ["/automation/approvals", {
+      items: [decision({ recommendation: "proceed" })],
+      pagination: pagination(1),
+    }],
+  ]);
+
+  renderQueue();
+
+  const row = (await screen.findByText("web")).closest("tr");
+  expect(
+    within(row as HTMLElement).getByRole("button", { name: /approve/i }),
+  ).toBeInTheDocument();
+});

@@ -742,6 +742,27 @@ func run() error {
 		Notifier: notifications.Notifier,
 	})
 
+	// Plan approval.
+	//
+	// # Constructed here, above the executor that consults it
+	//
+	// A plan whose recommendation is `manualReview` asks for a person. Until
+	// Phase 17.7 nothing could record that the person had looked, so the
+	// execution preflight refused it forever -- "the review has not happened",
+	// with no way for it to happen.
+	//
+	// This records the second fact next to the planner's, and changes nothing
+	// about the first: the plan keeps its score, its factors and its
+	// recommendation exactly as written. It reaches a plan READER and an
+	// approval table, holds no Docker capability, and cannot acquire or execute
+	// anything -- architecture tests hold all three.
+	planApprovals := service.NewPlanApprovalService(service.PlanApprovalOptions{
+		Store:  db.PlanApprovals,
+		Plans:  db.Plans,
+		Audit:  auditRecorder,
+		Logger: logger,
+	})
+
 	executions := service.NewExecutionService(service.ExecutionOptions{
 		Lineage: db.Lineage,
 		Store:   db.Executions,
@@ -757,6 +778,10 @@ func run() error {
 		// The new baseline is kept for the next planner pass; it does not
 		// authorise the plan already in flight.
 		Assurance: assurance,
+		// Whether a person reviewed a plan that asks for one. Consulted ONLY
+		// for a manualReview recommendation, and only to replace one refusal
+		// with one permission: every other preflight below it still runs.
+		Approvals: planApprovals,
 		// The LAST line of the self-update defence, and the one that matters
 		// most: this is the layer that actually stops a container.
 		Self: self,
@@ -958,64 +983,45 @@ func run() error {
 	// point the runtime gives up and sends SIGKILL -- which is a worse ending
 	// than an orderly abandonment, because it happens at an arbitrary instant.
 	var background sync.WaitGroup
-	background.Add(13)
 
-	go func() {
-		defer background.Done()
-		inventory.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		events.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		retention.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		drift.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		policies.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		imageIntel.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		planner.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		acquisitions.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		executions.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		rollbacks.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		automation.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		auth.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		auditRecorder.Run(ctx)
-	}()
-	go func() {
-		defer background.Done()
-		notifications.Service.Run(ctx)
-	}()
+	// start runs one background service and accounts for it.
+	//
+	// The count used to be written by hand -- `background.Add(13)` above a list
+	// of goroutines -- and by Stage 17.9 the list had fourteen entries. The
+	// fourteenth Done() drove the counter negative and the process died with
+	// `panic: sync: negative WaitGroup counter` on EVERY shutdown, which is how
+	// live acceptance found it.
+	//
+	// The panic was the visible half. The dangerous half is that Wait() returns
+	// as soon as the counter reaches zero, so awaitBackgroundServices could
+	// return while a service was still running -- and the deferred db.Close()
+	// below it would then close the handle underneath a final event flush,
+	// which is exactly the ordering the comment above exists to guarantee.
+	//
+	// Adding as each goroutine starts makes the number unmaintained, so it
+	// cannot be wrong.
+	start := func(run func(context.Context)) {
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			run(ctx)
+		}()
+	}
+
+	start(inventory.Run)
+	start(events.Run)
+	start(retention.Run)
+	start(drift.Run)
+	start(policies.Run)
+	start(imageIntel.Run)
+	start(planner.Run)
+	start(acquisitions.Run)
+	start(executions.Run)
+	start(rollbacks.Run)
+	start(automation.Run)
+	start(auth.Run)
+	start(auditRecorder.Run)
+	start(notifications.Service.Run)
 	defer awaitBackgroundServices(logger, &background, shutdownGrace)
 
 	// The startup integrity verdict, raised once the engine that can deliver it
@@ -1069,6 +1075,7 @@ func run() error {
 
 		Automation:     automation,
 		UpdatePolicies: updatePolicies,
+		PlanApprovals:  planApprovals,
 		// The same reader the execution service consults for invariant A. One
 		// instance, so what the API shows and what the recreation path enforces
 		// are derived from the same evidence.

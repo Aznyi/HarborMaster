@@ -2729,6 +2729,114 @@ paths:
         "503":
           $ref: "#/components/responses/ImageIntelUnavailable"
 
+  /api/v1/plan-approvals/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: The CHANGE PLAN identifier the approval is bound to.
+    get:
+      tags: [Change plans]
+      summary: Whether a person has reviewed this change plan
+      operationId: getPlanApproval
+      description: |
+        Reports the standing approval for one immutable change plan, and whether
+        it currently authorises anything.
+
+        Those are two different questions. An approval can exist and no longer
+        authorise the plan — a newer plan may have replaced it, or an execution
+        may already have applied it — so `valid` and `refusal` are returned
+        alongside the record rather than instead of it.
+
+        Needs `plan:read`: an operator deciding what to do about a container
+        should be able to see that somebody already reviewed it.
+      responses:
+        "200":
+          description: The approval, and whether it still authorises the plan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanApprovalResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: This change plan has not been approved.
+    post:
+      tags: [Change plans]
+      summary: Record that a person reviewed this change plan
+      operationId: approvePlan
+      description: |
+        Records that an authorised person reviewed one exact, immutable change
+        plan and approved it.
+
+        **It changes nothing about the plan.** The risk score, the risk factors
+        and the recommendation stay exactly as the planner wrote them. A plan is
+        insert-only, so the assessment an operator reviewed remains the
+        assessment that authorised the change — which is the only way the audit
+        trail means anything.
+
+        **It applies nothing.** Approving is not updating: no image is
+        downloaded and no container is touched. The operator drives the ordinary
+        acquisition and execution afterwards, and every preflight still runs.
+        An approval satisfies exactly one fact — that the required human review
+        happened — and nothing else. Self-update protection, snapshot assurance,
+        dependency ordering, digest pinning, policy compliance, preservation and
+        verification all still hold.
+
+        **There is no request body.** Not an empty object accepted for future
+        use — none. The image, the digests, the input digest, the container, the
+        recommendation and the risk score are all read from the plan this URL
+        names. A caller able to supply any of them could approve a different
+        change from the one they were shown.
+
+        Only a plan whose recommendation is `manualReview` may be approved.
+        `proceed` and `proceedWithCaution` need no approval; `notRecommended`
+        and `unknown` cannot be made safe by one, and both are refused.
+
+        Approving an already-approved plan returns the standing approval rather
+        than creating a second one.
+      responses:
+        "201":
+          description: The approval that now stands.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanApprovalResponse" }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such change plan.
+        "409":
+          description: |
+            This plan cannot be approved: it does not ask for human review, or a
+            newer plan has replaced it.
+    delete:
+      tags: [Change plans]
+      summary: Withdraw the approval of this change plan
+      operationId: revokePlanApproval
+      description: |
+        Withdraws a standing approval. The plan itself is untouched, and the
+        withdrawn decision stays in the history.
+
+        A later attempt to apply the plan is then refused as `approvalMissing`.
+        It does **not** stop a recreation that has already begun changing the
+        host: there is no safe cancellation of one in flight, and claiming
+        otherwise would be worse than saying so.
+      responses:
+        "204":
+          description: The approval was withdrawn.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: This change plan has no approval to withdraw.
+
   /api/v1/plans:
     get:
       tags: [Change plans]
@@ -2801,13 +2909,23 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items, pagination, summary]
+                required: [items, pagination, summary, planner]
                 properties:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/ChangePlan" }
                   pagination: { $ref: "#/components/schemas/Pagination" }
                   summary: { $ref: "#/components/schemas/ChangePlanSummary" }
+                  planner:
+                    allOf:
+                      - $ref: "#/components/schemas/PlannerStatus"
+                    description: |
+                      The state of the thing that produced these plans.
+
+                      Carried on the listing because "there are no plans" has two
+                      different meanings that the list alone cannot separate: a
+                      settled estate has none, and an estate nobody has assessed
+                      yet also has none. `lastRunAt` is what tells them apart.
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "405":
@@ -4705,6 +4823,79 @@ paths:
                   eligible:
                     type: integer
                     description: How many containers would be updated, approved, or previewed.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AutomationUnavailable"
+
+  /api/v1/automation/readiness:
+    post:
+      tags: [Automation]
+      summary: What one policy configuration could do right now
+      operationId: previewAutomationReadiness
+      description: |
+        Answers "if I enable this policy, which containers can HarborMaster
+        actually manage automatically right now, and why not the others".
+
+        **A POST that changes nothing.** The question is about a policy
+        CONFIGURATION — a selector, a ceiling, a mode, a window, limits, a
+        failure plan — which does not fit in a query string, so it needs a body
+        and therefore a write method. It still writes nothing: no policy row, no
+        run, no decision, no acquisition, no execution, and no Docker call. The
+        permission is `automation:read`, and CSRF, the size bound, the strict
+        decoder and the write rate limiter all apply anyway.
+
+        **The answer comes from the real decision code.** The estate is
+        evaluated by the same two phases a scheduled pass runs — the decision
+        function and the dependency gate — so the counts cannot drift from what
+        automation will actually do. There is no second eligibility model.
+
+        **The caller supplies configuration only.** There is nowhere in the body
+        for a recommendation, a verdict, an update type, an eligibility, a
+        dependency state, a snapshot status, or a risk score. Every one of those
+        is a fact about the estate that HarborMaster establishes itself.
+
+        The body is the same shape `POST /update-policies` takes, so what is
+        previewed is what would be saved, and it goes through the same
+        `Normalise` and `Validate`. A configuration the API would refuse to
+        store is refused here too.
+
+        Send `policyId` when previewing an edit to a stored policy: the
+        candidate then REPLACES that policy in the set rather than competing
+        with it. Omit it for a new one, in which case an exact tie on both
+        priority and breadth is resolved in the existing policy's favour, so the
+        preview understates rather than overstates what a new policy takes over.
+
+        **Advisory, and immediately stale.** `evaluatedAt` marks the state
+        described. Nothing is locked, and the automation engine is never blocked
+        to produce a count.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationReadinessRequest"
+      responses:
+        "200":
+          description: What this configuration could do, against the current estate.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [readiness, engineEnabled]
+                properties:
+                  readiness:
+                    $ref: "#/components/schemas/AutomationReadinessReport"
+                  engineEnabled:
+                    type: boolean
+                    description: |
+                      Whether the update engine would act at all. A policy can be
+                      perfectly ready on a deployment whose engine is switched
+                      off, and a count means something different in each case.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -9976,6 +10167,7 @@ components:
         - snapshotMissing
         - restoreReadiness
         - snapshotChanged
+        - approvalMissing
         - policyViolation
         - policyStale
         - registryStale
@@ -11713,6 +11905,152 @@ components:
         startedAt: { type: string, format: date-time }
         completedAt: { type: string, format: date-time }
         durationMs: { type: integer }
+
+    PlanApproval:
+      type: object
+      description: |
+        One human authorisation of one immutable change plan.
+
+        It carries no image, digest, container or recommendation: those are
+        properties of the PLAN, and duplicating them here would create a second
+        place for them to disagree.
+      required: [planId, state, approvedAt]
+      properties:
+        planId:
+          type: string
+          description: The immutable plan this approval is bound to. The authority.
+        state:
+          type: string
+          enum: [active, revoked]
+        approvedBy: { $ref: "#/components/schemas/Requester" }
+        approvedAt: { type: string, format: date-time }
+        revokedBy: { $ref: "#/components/schemas/Requester" }
+        revokedAt: { type: string, format: date-time }
+
+    PlanApprovalResponse:
+      type: object
+      description: |
+        An approval, and whether it currently authorises its plan.
+
+        The two are separate because an approval can stand and authorise
+        nothing: the plan may have been superseded, or already applied.
+      required: [approval, valid]
+      properties:
+        approval: { $ref: "#/components/schemas/PlanApproval" }
+        valid:
+          type: boolean
+          description: Whether this approval currently authorises the plan.
+        refusal:
+          type: string
+          enum: [notApprovable, superseded, revoked, evidenceChanged, alreadyActed]
+          description: Why it does not, from the closed vocabulary. Absent when valid.
+        explanation:
+          type: string
+          description: HarborMaster's own sentence for the refusal.
+
+    AutomationReadinessRequest:
+      type: object
+      description: |
+        A policy configuration to measure. The same shape `POST /update-policies`
+        takes, plus an optional `policyId` naming the stored policy this is an
+        edit of.
+
+        It carries CONFIGURATION only. There is deliberately no field for a
+        recommendation, a verdict, an update type, an eligibility, a dependency
+        state, a snapshot status, or a risk score: those are facts about the
+        estate, and a caller able to supply one could manufacture the answer.
+      required: [strategy, mode]
+      additionalProperties: false
+      properties:
+        policyId:
+          type: string
+          description: |
+            The stored policy being edited, when there is one. The candidate
+            replaces it in the set rather than competing with it.
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        scope: { $ref: "#/components/schemas/UpdateScope" }
+        selector: { $ref: "#/components/schemas/UpdateSelector" }
+        strategy: { $ref: "#/components/schemas/UpdateStrategy" }
+        minimumRecommendation: { $ref: "#/components/schemas/Recommendation" }
+        mode: { $ref: "#/components/schemas/AutomationMode" }
+        window: { $ref: "#/components/schemas/MaintenanceWindow" }
+        limits: { $ref: "#/components/schemas/UpdateLimits" }
+        failure: { $ref: "#/components/schemas/UpdateFailureHandling" }
+
+    AutomationReadinessGroup:
+      type: object
+      description: |
+        One reason, and how many of this policy's containers carry it. The
+        reason is the same closed vocabulary a real decision uses; the
+        explanation is HarborMaster's own sentence for it, so a client with no
+        mapping still renders something true rather than an enum.
+      required: [reason, explanation, count]
+      properties:
+        reason: { $ref: "#/components/schemas/AutomationReason" }
+        explanation: { type: string }
+        count: { type: integer }
+        containers:
+          type: array
+          description: |
+            A bounded sample of the containers in this group, not the whole set.
+            The response is otherwise proportional to an estate size HarborMaster
+            did not choose.
+          items: { type: string }
+
+    AutomationReadinessReport:
+      type: object
+      description: |
+        What one policy could do against the estate as currently assessed.
+
+        Every number is derived from decisions the real decision function and
+        the real dependency gate produced. Advisory: it describes the state at
+        `evaluatedAt` and may be stale immediately.
+      required:
+        - evaluatedAt
+        - truncated
+        - considered
+        - governed
+        - eligible
+        - observing
+        - awaitingApproval
+        - groups
+      properties:
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: The moment this describes.
+        truncated:
+          type: boolean
+          description: |
+            The estate was cut at the target bound, so every count below
+            describes a prefix of it rather than all of it.
+        considered:
+          type: integer
+          description: Containers evaluated, whichever policy governs them.
+        governed:
+          type: integer
+          description: Containers this policy is the chosen policy for.
+        eligible:
+          type: integer
+          description: |
+            Containers this policy would update now. The headline number, and a
+            statement about the present rather than a promise about the future.
+        observing:
+          type: integer
+          description: |
+            Containers a non-acting mode would have updated. Kept apart from
+            `eligible` because "would, but the mode forbids it" and "will" are
+            different answers.
+        awaitingApproval:
+          type: integer
+          description: Containers held for a person by mode or by the major-version rule.
+        groups:
+          type: array
+          description: Why the rest are not eligible, most common first.
+          items: { $ref: "#/components/schemas/AutomationReadinessGroup" }
 
     AutomationDecision:
       type: object

@@ -621,6 +621,22 @@ export interface AutomationStatus {
   running: boolean;
   policies?: number;
   enabledPolicies?: number;
+  /**
+   * Enabled policies whose mode may actually change a container.
+   *
+   * Decided by the server: "policies exist" and "a policy may act" are
+   * different facts, and working the second one out here would be
+   * reimplementing AutomationMode.Mutates in the browser.
+   */
+  actingPolicies?: number;
+  /**
+   * The deployment capabilities an acting policy needs.
+   *
+   * The RULE is the server's -- rollback appears only when a policy asks for
+   * automatic rollback. The client compares these names against capability
+   * flags it already has, and decides nothing.
+   */
+  requiredCapabilities?: string[];
   pausedContainers?: number;
   awaitingApproval?: number;
   lastRunAt?: string;

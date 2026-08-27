@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -25,9 +26,28 @@ import (
 type dependencyView struct {
 	view service.DependencyView
 	err  error
+	// views counts how many times the graph was asked for. A pointer so the
+	// value receiver below still records, and so a copy handed to the engine
+	// shares the counter. Nil in the literals that do not measure.
+	views *atomic.Int64
+}
+
+// calls reports how many times the graph was read.
+//
+// The scale tests use it to establish that the gate builds the graph ONCE per
+// evaluation rather than once per container, which is the difference between
+// linear and quadratic.
+func (d dependencyView) calls() int64 {
+	if d.views == nil {
+		return 0
+	}
+	return d.views.Load()
 }
 
 func (d dependencyView) View(context.Context) (service.DependencyView, error) {
+	if d.views != nil {
+		d.views.Add(1)
+	}
 	if d.err != nil {
 		return service.DependencyView{}, d.err
 	}
@@ -42,7 +62,7 @@ func graphOver(t *testing.T, names []string, edges ...domain.WorkloadDependency)
 	if err != nil {
 		t.Fatalf("build graph: %v", err)
 	}
-	return dependencyView{view: service.DependencyView{
+	return dependencyView{views: &atomic.Int64{}, view: service.DependencyView{
 		Graph:    graph,
 		Problems: map[string][]domain.DependencyProblem{},
 	}}

@@ -254,6 +254,27 @@ func (s *Server) routeTable() []route {
 		{http.MethodGet, p + "/plans/{id}", requires(domain.PermPlanRead), s.handlePlanDetail, ""},
 		{"", p + "/plans/{id}", requires(domain.PermPlanRead), nil, "GET, HEAD"},
 
+		// Plan approval: the record that a person reviewed one immutable plan.
+		//
+		// # Why this is not /plans/{id}/approval
+		//
+		// It was, and Go's router refuses it: "/plans/container/{id}" already
+		// exists, and "/plans/{id}/approval" is ambiguous with it -- the path
+		// "/plans/container/approval" matches both and neither is more
+		// specific. Any "/plans/{id}/..." route has the same problem.
+		//
+		// So the resource gets its own collection, named the way
+		// "/update-policies" is. The identifier is still a PLAN id, which is
+		// what makes the approval plan-bound.
+		//
+		// Reading an approval needs only plan:read: an operator deciding what
+		// to do about a container should be able to see that somebody already
+		// reviewed it. Recording or withdrawing one needs plan:approve.
+		{http.MethodGet, p + "/plan-approvals/{id}", requires(domain.PermPlanRead), s.handlePlanApprovalDetail, ""},
+		{http.MethodPost, p + "/plan-approvals/{id}", requires(domain.PermPlanApprove), s.handlePlanApprovalCreate, ""},
+		{http.MethodDelete, p + "/plan-approvals/{id}", requires(domain.PermPlanApprove), s.handlePlanApprovalDelete, ""},
+		{"", p + "/plan-approvals/{id}", requires(domain.PermPlanRead), nil, "GET, HEAD, POST, DELETE"},
+
 		// ---- image acquisition --------------------------------------------
 		//
 		// The first of the two permissions that reach a privileged socket.
@@ -356,6 +377,13 @@ func (s *Server) routeTable() []route {
 		// decisions, no request to any service.
 		{http.MethodGet, p + "/automation/upcoming", requires(domain.PermAutomationRead), s.handleAutomationUpcoming, ""},
 		{"", p + "/automation/upcoming", requires(domain.PermAutomationRead), nil, "GET, HEAD"},
+
+		// Readiness previews a policy CONFIGURATION, so it needs a body and
+		// therefore a POST. The permission stays a READ one: the handler writes
+		// nothing, and granting automation:manage to ask a question would make
+		// the answer unavailable to the operators who need it most.
+		{http.MethodPost, p + "/automation/readiness", requires(domain.PermAutomationRead), s.handleAutomationReadiness, ""},
+		{"", p + "/automation/readiness", requires(domain.PermAutomationRead), nil, "POST"},
 
 		{http.MethodGet, p + "/automation/runs", requires(domain.PermAutomationRead), s.handleAutomationRuns, ""},
 		{"", p + "/automation/runs", requires(domain.PermAutomationRead), nil, "GET, HEAD"},

@@ -178,10 +178,50 @@ func (s *ExecutionService) preflight(
 	//
 	// Stricter than acquisition's, deliberately. Downloading an image on a plan
 	// that asks for manual review is reasonable -- the operator is reviewing.
-	// Replacing a running container on one is not: the review has not happened.
+	// Replacing a running container on one is not, UNLESS the review has
+	// actually happened and was recorded against this exact immutable plan.
 	switch plan.Risk.Recommendation {
 	case domain.RecommendProceed, domain.RecommendCaution:
+		// Unchanged.
+
+	case domain.RecommendManualReview:
+		// The plan asks for a person. Stage 17.7 gives that request an answer:
+		// a plan-bound approval is evidence the review HAPPENED, and it
+		// satisfies exactly that one fact.
+		//
+		// It is not a bypass. Nothing below this line is skipped -- the
+		// container, the snapshot, the dependencies, the digest, the policy,
+		// the self-update refusal and every preservation check all still run,
+		// in the same order, immediately before anything is stopped. The
+		// approval replaces one refusal with one permission and changes nothing
+		// else.
+		//
+		// A deployment with no approval service configured behaves exactly as
+		// it did before: refused.
+		if s.approvals == nil {
+			decision.Refusal = domain.ExecutionRefusalApprovalMissing
+			return decision, nil
+		}
+		refusal, err := s.approvals.ApprovalFor(ctx, plan)
+		if err != nil {
+			// Could not establish that a review happened. That establishes
+			// nothing, and nothing is not permission -- so this becomes a
+			// REFUSAL rather than an error: the caller gets a decision that
+			// names why the recreation will not proceed, and the host is
+			// untouched either way.
+			decision.Refusal = domain.ExecutionRefusalApprovalMissing
+			//nolint:nilerr // Fails closed: the error IS the refusal.
+			return decision, nil
+		}
+		if refusal != domain.PlanApprovalRefusalNone {
+			decision.Refusal = domain.ExecutionRefusalApprovalMissing
+			return decision, nil
+		}
+
 	default:
+		// notRecommended and unknown. Refused whatever anybody approved: the
+		// first is the model arguing against the change, and the second is a
+		// gap in evidence, which is not a thing a person can vouch for.
 		decision.Refusal = domain.ExecutionRefusalRecommendation
 		return decision, nil
 	}

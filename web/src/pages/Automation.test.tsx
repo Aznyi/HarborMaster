@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import axe from "axe-core";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -10,6 +11,8 @@ import type {
   PausedContainer,
   UpdatePolicy,
 } from "../api/automationTypes";
+import { NEW_POLICY_SEMANTICS } from "../api/automationPresets";
+import { UPDATE_STRATEGY_LABELS } from "../api/automationTypes";
 import { Automation } from "./Automation";
 import { AutomationPaused } from "./AutomationPaused";
 import { AutomationRun as AutomationRunPage } from "./AutomationRun";
@@ -144,6 +147,62 @@ function stub(options: StubOptions = {}) {
         body: typeof init?.body === "string" ? init.body : "",
       });
 
+      // Readiness: a POST that changes nothing, fired by the policy editor as
+      // the form changes. Answered explicitly so the panel renders a real
+      // state rather than falling through to the catch-all `{}`.
+      if (url.includes("/automation/readiness")) {
+        return jsonResponse({
+          readiness: {
+            evaluatedAt: "2026-08-06T12:00:00Z",
+            truncated: false,
+            considered: 1,
+            governed: 1,
+            eligible: 0,
+            observing: 1,
+            awaitingApproval: 0,
+            groups: [],
+          },
+          engineEnabled: true,
+        });
+      }
+      // The three extra reads the onboarding panel makes. Stubbed explicitly
+      // so the panel renders a REAL state rather than falling through to the
+      // catch-all and reporting "unknown" for the wrong reason.
+      if (url.includes("/inventory")) {
+        return jsonResponse({ enabled: true, generation: 7, counts: {}, warnings: [] });
+      }
+      if (url.includes("/plans")) {
+        return jsonResponse({
+          items: [],
+          pagination: pagination(0),
+          summary: {},
+          planner: {
+            enabled: true,
+            plannerVersion: "1",
+            running: false,
+            pending: false,
+            lastRunAt: "2026-08-06T02:00:00Z",
+            lastGenerated: 0,
+            lastUnchanged: 0,
+            lastSkipped: 0,
+          },
+        });
+      }
+      if (url.includes("/health")) {
+        return jsonResponse({
+          status: "healthy",
+          checkedAt: "2026-08-06T12:00:00Z",
+          uptimeSeconds: 60,
+          database: { status: "healthy" },
+          docker: { status: "healthy" },
+          features: {
+            inventory: true, events: true, snapshots: true, drift: true,
+            policy: true, planner: true, imageIntel: true,
+            acquisition: true, execution: true, rollback: true, automation: true,
+            notifications: false, notificationsAllowPrivate: false,
+          },
+        });
+      }
       if (url.includes("/automation/upcoming")) {
         const items = options.upcoming ?? [];
         return jsonResponse({
@@ -447,12 +506,28 @@ it("warns that resuming resets the failure count", async () => {
   });
   renderPage(<AutomationPaused />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Resume" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Resume automatic updates" }),
+  );
 
-  const warning = await screen.findByText(/resets/i);
-  expect(warning.textContent).toMatch(/failure count to zero/i);
+  // The confirmation has to say what resume is NOT, because "resume" reads as
+  // "retry" and that is the misreading with consequences.
+  expect(await screen.findByText("Resume automatic updates?")).toBeInTheDocument();
+  expect(
+    screen.getByText(/does not retry the failed update or change the container now/i),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/evaluate it again using current snapshots/i),
+  ).toBeInTheDocument();
+  // And the consequence for the count the card above reports.
+  expect(screen.getByText(/failure count is reset to zero/i)).toBeInTheDocument();
 
-  await userEvent.click(screen.getByRole("button", { name: /Yes, resume automation/i }));
+  // Never framed as a retry.
+  expect(document.body.textContent).not.toMatch(/force update|run update/i);
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Resume automatic updates" }),
+  );
 
   await waitFor(() => {
     const post = requests.find((r) => r.url.includes("/automation/resume"));
@@ -515,7 +590,11 @@ it("defaults a new policy to the safe settings", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "New policy" }));
 
-  // Observe and same-tag-only: the two settings that change the least.
+  // The setting that makes a new policy safe is the MODE. `observe` is the one
+  // value of the four that cannot change a host -- `Mutates()` is true for
+  // `automatic` alone -- so nothing this form arrives at by itself can stop,
+  // replace, or pull anything.
+  //
   // Scoped to the mode group. The preset group above it also offers an option
   // headed "Observe only" -- the preset that compiles to this very mode -- and
   // the two are told apart by their fieldset rather than by their heading.
@@ -523,8 +602,22 @@ it("defaults a new policy to the safe settings", async () => {
     screen.getByText("How should updates happen?").closest("fieldset") as HTMLElement,
   );
   expect(modes.getByRole("radio", { name: /Observe only/ })).toBeChecked();
+
+  // The ceiling is whatever the opening preset compiles, and it is asserted
+  // through that preset rather than as a literal.
+  //
+  // It used to be pinned to "same tag only" independently, which is how the
+  // form came to show "Observe only" while holding a ceiling that preset does
+  // not write. Under `observe` the ceiling decides what is REPORTED, not what
+  // may happen, and reporting under the ceiling that "Keep containers safely
+  // updated" would apply is what makes the observe policy a preview of it.
+  expect(NEW_POLICY_SEMANTICS.mode).toBe("observe");
   expect(
-    screen.getByRole("radio", { name: /Same tag only, when it is republished/ }),
+    screen.getByRole("radio", {
+      name: new RegExp(
+        "^" + UPDATE_STRATEGY_LABELS[NEW_POLICY_SEMANTICS.strategy],
+      ),
+    }),
   ).toBeChecked();
 
   // And the breadth defaults to a choice that governs nothing until the
@@ -593,4 +686,162 @@ it("says nothing about self-update when there is no identity", async () => {
 
   await screen.findAllByText(/update engine/i);
   expect(screen.queryByText(/will not update itself/i)).toBeNull();
+});
+
+// ------------------------------------------------------- pause accessibility --
+
+it("lets a keyboard user answer the resume confirmation either way", async () => {
+  stub({
+    pauses: [
+      {
+        containerName: "web",
+        reason: "automaticRollback",
+        failures: 2,
+        detail: "the replacement failed verification and the previous container was restored",
+        pausedAt: "2026-08-06T02:05:00Z",
+      },
+    ],
+  });
+  renderPage(<AutomationPaused />);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Resume automatic updates" }),
+  );
+
+  // The confirmation is a labelled group, so a screen reader announces what is
+  // being confirmed rather than reading two unattached buttons.
+  const group = screen.getByRole("group", {
+    name: /Resume automatic updates for web\?/i,
+  });
+  expect(group).toBeInTheDocument();
+
+  // Focus lands on the action the operator asked for.
+  const confirm = within(group).getByRole("button", {
+    name: "Resume automatic updates",
+  });
+  expect(confirm).toHaveFocus();
+
+  // Escape answers "no". A control that asks a question must be answerable
+  // without reaching for the mouse.
+  await userEvent.keyboard("{Escape}");
+  expect(
+    screen.queryByRole("group", { name: /Resume automatic updates for web\?/i }),
+  ).not.toBeInTheDocument();
+
+  // Nothing was sent by opening and dismissing the confirmation.
+  expect(requests.find((r) => r.url.includes("/automation/resume"))).toBeUndefined();
+});
+
+it("explains a pause without relying on colour", async () => {
+  stub({
+    pauses: [
+      {
+        containerName: "hm13-failguard",
+        reason: "automaticRollback",
+        failures: 2,
+        detail: "the replacement failed verification and the previous container was restored",
+        pausedAt: "2026-08-06T02:05:00Z",
+      },
+    ],
+  });
+  renderPage(<AutomationPaused />);
+
+  await screen.findByText("hm13-failguard");
+
+  // The reason, the count and the recorded detail are all TEXT. An operator who
+  // cannot distinguish the badge's colour still gets the whole answer.
+  expect(screen.getByText("Rolled back")).toBeInTheDocument();
+  expect(screen.getByText("2")).toBeInTheDocument();
+  expect(
+    screen.getByText(/replacement failed verification/i),
+  ).toBeInTheDocument();
+});
+
+it("has no serious or critical axe findings on the paused view", async () => {
+  stub({
+    pauses: [
+      {
+        containerName: "web",
+        reason: "repeatedFailure",
+        failures: 3,
+        pausedAt: "2026-08-06T02:05:00Z",
+      },
+    ],
+  });
+  renderPage(<AutomationPaused />);
+  await screen.findByText("web");
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Resume automatic updates" }),
+  );
+
+  const results = await axe.run(document.body, {
+    resultTypes: ["violations"],
+    runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] },
+  });
+  const serious = results.violations.filter(
+    (violation) => violation.impact === "serious" || violation.impact === "critical",
+  );
+  expect(serious.map((violation) => `${violation.id}: ${violation.help}`)).toEqual([]);
+});
+
+// --------------------------------------------------- onboarding side effects --
+
+// TestOpeningTheAutomationPageChangesNothing is Stage 17.8b §18.
+//
+// Onboarding reads. An operator opening a page to find out what HarborMaster is
+// doing must not, by opening it, cause HarborMaster to do something -- and the
+// most dangerous version of that would be a page that "helpfully" generated
+// plans, created a policy, or resumed a pause on load.
+it("changes nothing when the automation page is opened", async () => {
+  stub({ status: sampleStatus({ enabled: true, policies: 0 }) });
+  renderPage(<Automation />);
+
+  await screen.findByTestId("automation-onboarding");
+
+  // Every request the page made was a READ.
+  const writes = requests.filter((r) => r.method !== "GET" && r.method !== "HEAD");
+  expect(writes.map((r) => `${r.method} ${r.url}`)).toEqual([]);
+
+  // And specifically none of the things that would change the estate.
+  for (const path of [
+    "/plans/generate",
+    "/update-policies",
+    "/automation/run",
+    "/automation/approve",
+    "/automation/resume",
+    "/automation/pause",
+    "/acquisitions",
+    "/executions",
+    "/plan-approvals",
+  ]) {
+    expect(
+      requests.some((r) => r.url.includes(path) && r.method !== "GET"),
+    ).toBe(false);
+  }
+});
+
+// The request budget, asserted rather than assumed.
+it("reads each endpoint once and never per container", async () => {
+  stub({ status: sampleStatus({ enabled: true }) });
+  renderPage(<Automation />);
+
+  await screen.findByTestId("automation-onboarding");
+
+  const counts = new Map<string, number>();
+  for (const request of requests) {
+    // Group by path, ignoring query strings.
+    const path = request.url.split("?")[0]!;
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+  }
+
+  for (const [path, count] of counts) {
+    expect(
+      count,
+      `${path} was requested ${count} times; each endpoint is read once per cycle`,
+    ).toBeLessThanOrEqual(1);
+  }
+
+  // No per-container reads: nothing addresses a single container by id.
+  expect(requests.some((r) => /\/containers\/[^/?]+/.test(r.url))).toBe(false);
 });

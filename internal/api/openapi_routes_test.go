@@ -65,6 +65,7 @@ var routedPaths = []string{
 	APIPrefix + "/automation/runs",
 	APIPrefix + "/automation/runs/{id}",
 	APIPrefix + "/automation/upcoming",
+	APIPrefix + "/automation/readiness",
 	APIPrefix + "/auth/bootstrap",
 	APIPrefix + "/auth/login",
 	APIPrefix + "/auth/logout",
@@ -107,6 +108,7 @@ var routedPaths = []string{
 	APIPrefix + "/notifications/destinations/{id}/test",
 	APIPrefix + "/notifications/rules",
 	APIPrefix + "/notifications/rules/{id}",
+	APIPrefix + "/plan-approvals/{id}",
 	APIPrefix + "/plans",
 	APIPrefix + "/plans/container/{id}",
 	APIPrefix + "/plans/generate",
@@ -252,6 +254,8 @@ func TestEveryDocumentedPathIsReachable(t *testing.T) {
 			APIPrefix + "/automation/approve",
 			APIPrefix + "/automation/pause",
 			APIPrefix + "/automation/resume",
+			// Read-only, but it needs a body: see readOnlyWrites.
+			APIPrefix + "/automation/readiness",
 			APIPrefix + "/notifications/destinations/{id}/test":
 			method = http.MethodPost
 

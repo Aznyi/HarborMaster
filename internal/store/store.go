@@ -86,6 +86,10 @@ type DB struct {
 	// policy compliance, and image intelligence. A plan is analysis, never an
 	// instruction -- nothing executes one, and nothing behind this can.
 	Plans *PlanRepository
+	// PlanApprovals records that a person reviewed one immutable plan. Separate
+	// from Plans because a plan is insert-only evidence and an approval is live
+	// authorisation state with its own lifecycle.
+	PlanApprovals *PlanApprovalRepository
 
 	// Acquisitions holds the audit records for image acquisition -- the one
 	// operation in HarborMaster that changes the Docker host. Every row is a
@@ -386,14 +390,15 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Networks:   &NetworkRepository{db: sqlDB},
 		Volumes:    &VolumeRepository{db: sqlDB},
 
-		DockerEvents: &DockerEventRepository{db: sqlDB},
-		Drift:        &DriftRepository{db: sqlDB},
-		Policies:     &PolicyRepository{db: sqlDB},
-		ImageIntel:   &ImageIntelRepository{db: sqlDB},
-		Plans:        &PlanRepository{db: sqlDB},
-		Acquisitions: &AcquisitionRepository{db: sqlDB},
-		Executions:   &ExecutionRepository{db: sqlDB},
-		Rollbacks:    &RollbackRepository{db: sqlDB},
+		DockerEvents:  &DockerEventRepository{db: sqlDB},
+		Drift:         &DriftRepository{db: sqlDB},
+		Policies:      &PolicyRepository{db: sqlDB},
+		ImageIntel:    &ImageIntelRepository{db: sqlDB},
+		Plans:         &PlanRepository{db: sqlDB},
+		PlanApprovals: &PlanApprovalRepository{db: sqlDB},
+		Acquisitions:  &AcquisitionRepository{db: sqlDB},
+		Executions:    &ExecutionRepository{db: sqlDB},
+		Rollbacks:     &RollbackRepository{db: sqlDB},
 
 		UpdatePolicies:       &UpdatePolicyRepository{db: sqlDB},
 		Automation:           &AutomationRepository{db: sqlDB},

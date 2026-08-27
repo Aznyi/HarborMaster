@@ -43,6 +43,7 @@ export type Permission =
   | "policy:annotate"
   | "image:refresh"
   | "plan:generate"
+  | "plan:approve"
   | "acquisition:create"
   | "acquisition:cancel"
   | "execution:create"

@@ -42,7 +42,7 @@ describe("the preset compiler", () => {
 
     expect(request.strategy).toBe("digestOnly");
     expect(request.mode).toBe("automatic");
-    expect(request.minimumRecommendation).toBe("proceed");
+    expect(request.minimumRecommendation).toBe("proceedWithCaution");
     expect(request.failure?.autoRollback).toBe(true);
   });
 
@@ -60,7 +60,7 @@ describe("the preset compiler", () => {
 
     expect(request.strategy).toBe("patch");
     expect(request.mode).toBe("automatic");
-    expect(request.minimumRecommendation).toBe("proceed");
+    expect(request.minimumRecommendation).toBe("proceedWithCaution");
     expect(request.failure?.autoRollback).toBe(true);
   });
 
@@ -81,15 +81,38 @@ describe("the preset compiler", () => {
     }
   });
 
-  it("never compiles a recommendation floor below proceed", () => {
-    // `proceed` is the stricter of the two automatable verdicts. A preset
-    // choosing the looser one would be widening what automation may act on,
-    // which is not a thing a configuration shortcut may do.
+  it("never compiles a recommendation floor automation cannot act on", () => {
+    // The real invariant, which survived the floor being measured.
+    //
+    // `Validate` admits exactly two floors: `proceed` and `proceedWithCaution`.
+    // `manualReview`, `notRecommended` and `unknown` are refused, because the
+    // first two mean a person has to look and the third means the model argued
+    // against it. A preset that wrote one of those would produce a policy the
+    // API rejects, or -- worse, if validation ever loosened -- one that claimed
+    // to automate what nobody may automate.
+    //
+    // Which of the two admitted values each preset uses is a measurement, and
+    // it lives in the floor contract test rather than here:
+    // internal/service/automation_preset_floor_test.go
     for (const preset of AUTOMATION_PRESETS) {
       const semantics = presetSemantics(preset);
       if (!semantics) continue;
-      expect(semantics.minimumRecommendation).toBe("proceed");
+      expect(["proceed", "proceedWithCaution"]).toContain(
+        semantics.minimumRecommendation,
+      );
     }
+  });
+
+  it("gives every preset the same recommendation floor", () => {
+    // Observe included. An observe policy previews the acting presets, and
+    // `DecideAutomation` reads the floor at step 8 and the mode at step 11 --
+    // so a preview with a different floor is a preview of a policy nobody has.
+    const floors = AUTOMATION_PRESETS.map(presetSemantics)
+      .filter((semantics) => semantics !== null)
+      .map((semantics) => semantics.minimumRecommendation);
+
+    expect(new Set(floors).size).toBe(1);
+    expect(floors[0]).toBe("proceedWithCaution");
   });
 
   it("leaves Custom entirely alone", () => {
@@ -209,22 +232,41 @@ describe("exact preset detection", () => {
   });
 
   it("treats an omitted recommendation as proceed, matching the server", () => {
-    // Every policy written by the pre-preset editor omitted this field, and
-    // the create handler stored `proceed`. Reading those back as Custom would
-    // mislabel every existing policy on the estate.
+    // The default still resolves the way the server resolves it: a request
+    // without the field is stored as `proceed`, so that is what the detector
+    // must read.
+    //
+    // What that now means has changed. `proceed` is no longer any preset's
+    // floor, so a policy written by the pre-preset editor reports Custom --
+    // and that is the correct answer rather than a regression. Such a policy
+    // really does behave differently from Follow current tag: it refuses a
+    // republished mutable tag, which is the workload the preset exists for.
+    // Labelling it with the preset's name would tell the operator it does
+    // something it does not do, which is the one thing this detector must
+    // never do.
+    //
+    // The remedy is in the operator's hands and takes one click: re-selecting
+    // the preset recompiles the floor. Nothing about the stored policy changes
+    // until they save.
     const legacy: UpdatePolicyRequest = {
       strategy: "digestOnly",
       mode: "automatic",
       failure: { autoRollback: true },
     };
-    expect(detectPreset(legacy)).toBe("followCurrentTag");
+    expect(detectPreset(legacy)).toBe("custom");
+
+    // The same policy carrying the field explicitly reads the same way, which
+    // is what proves the omission is being resolved rather than special-cased.
+    expect(detectPreset({ ...legacy, minimumRecommendation: "proceed" })).toBe(
+      "custom",
+    );
   });
 
   describe("near misses, one field at a time", () => {
     const cases: { name: string; change: Partial<UpdatePolicyRequest> }[] = [
       {
-        name: "a looser recommendation floor",
-        change: { minimumRecommendation: "proceedWithCaution" },
+        name: "a stricter recommendation floor",
+        change: { minimumRecommendation: "proceed" },
       },
       { name: "a wider strategy", change: { strategy: "minor" } },
       { name: "a different mode", change: { mode: "approvalRequired" } },
@@ -243,15 +285,21 @@ describe("exact preset detection", () => {
       });
     }
 
-    it("a digest-only automatic policy with a caution floor is Custom", () => {
-      // The brief's worked example. It permits strictly more than Follow
-      // current tag does, so labelling it Follow current tag would tell the
-      // operator something untrue.
+    it("a digest-only automatic policy with a strict floor is Custom", () => {
+      // The brief's worked example, in the direction the measured floor puts
+      // it. This policy permits strictly LESS than Follow current tag does --
+      // it refuses every update that lands in the medium band on caution
+      // factors alone -- so labelling it Follow current tag would tell the
+      // operator something untrue in the other direction.
+      //
+      // Detection is equality over the owned fields, not compatibility, which
+      // is what makes both directions come out as Custom without a rule for
+      // each.
       expect(
         detectPreset({
           strategy: "digestOnly",
           mode: "automatic",
-          minimumRecommendation: "proceedWithCaution",
+          minimumRecommendation: "proceed",
           failure: { autoRollback: true },
         }),
       ).toBe("custom");

@@ -606,12 +606,26 @@ func (s *AcquisitionService) preflight(
 		targetReference, targetDigest = plan.ProposedImage, plan.ProposedDigest
 	} else {
 		// THE TOCTOU CHECK, for a plan that moves an image.
-		onOffer := proposedChange(intel)
-		if !onOffer.Valid() {
+		//
+		// The plan's pair must be one the registry is serving RIGHT NOW. Both
+		// candidates come from the same freshly-checked evidence, so a plan that
+		// matches either names an image that has not moved underneath it; a plan
+		// that matches neither is assessed against a registry that has since
+		// changed, and is refused.
+		offered := offeredTargets(intel)
+		if len(offered) == 0 {
 			decision.Refusal = domain.AcquisitionRefusalDigestUnavailable
 			return decision, nil
 		}
-		if onOffer.Reference() != plan.ProposedImage || onOffer.Digest() != plan.ProposedDigest {
+		var onOffer domain.ProposedTarget
+		for _, candidate := range offered {
+			if candidate.Reference() == plan.ProposedImage &&
+				candidate.Digest() == plan.ProposedDigest {
+				onOffer = candidate
+				break
+			}
+		}
+		if !onOffer.Valid() {
 			decision.Refusal = domain.AcquisitionRefusalDigestChanged
 			return decision, nil
 		}

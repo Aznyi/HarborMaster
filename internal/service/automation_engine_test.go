@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,6 +419,18 @@ type autoEvidence struct {
 	inFlight map[string]bool
 	total    int
 
+	// truncated reports the estate being cut at the target bound, the way the
+	// repository reports it. Default false: every existing test relies on that.
+	truncated bool
+
+	// Read counters, atomic so the race detector is happy if a future test
+	// evaluates concurrently.
+	targetReads      atomic.Int64
+	planReads        atomic.Int64
+	acquisitionReads atomic.Int64
+	executionReads   atomic.Int64
+	assessmentReads  atomic.Int64
+
 	// assessments are HarborMaster's positive "needs no update" findings, by
 	// container name. Absent means UNKNOWN, which is the fail-closed default
 	// every test that does not set it relies on.
@@ -430,17 +443,33 @@ type autoEvidence struct {
 func (f *autoEvidence) CurrentAssessments(
 	context.Context, time.Time,
 ) (map[string]domain.CurrentAssessment, error) {
+	f.assessmentReads.Add(1)
 	if f.assessErr != nil {
 		return nil, f.assessErr
 	}
 	return f.assessments, nil
 }
 
+// Query counters. Read by the scale test to establish how the cost of one
+// evaluation grows with the estate -- the per-container reads are the ones
+// that decide whether opening a policy editor is cheap or is an N+1.
+func (f *autoEvidence) reads() map[string]int64 {
+	return map[string]int64{
+		"targets":     f.targetReads.Load(),
+		"plan":        f.planReads.Load(),
+		"acquisition": f.acquisitionReads.Load(),
+		"execution":   f.executionReads.Load(),
+		"assessments": f.assessmentReads.Load(),
+	}
+}
+
 func (f *autoEvidence) Targets(context.Context) ([]store.AutomationTarget, bool, error) {
-	return f.targets, false, nil
+	f.targetReads.Add(1)
+	return f.targets, f.truncated, nil
 }
 
 func (f *autoEvidence) CurrentPlan(_ context.Context, containerID string) (domain.ChangePlan, error) {
+	f.planReads.Add(1)
 	plan, ok := f.plans[containerID]
 	if !ok {
 		return domain.ChangePlan{}, store.ErrNotFound
@@ -449,10 +478,14 @@ func (f *autoEvidence) CurrentPlan(_ context.Context, containerID string) (domai
 }
 
 func (f *autoEvidence) AcquisitionActive(_ context.Context, containerID string) (bool, error) {
+	f.acquisitionReads.Add(1)
 	return f.inFlight[containerID], nil
 }
 
-func (f *autoEvidence) ExecutionActive(context.Context, string) (bool, error) { return false, nil }
+func (f *autoEvidence) ExecutionActive(context.Context, string) (bool, error) {
+	f.executionReads.Add(1)
+	return false, nil
+}
 
 func (f *autoEvidence) InFlightTotal(context.Context) (int, error) { return f.total, nil }
 

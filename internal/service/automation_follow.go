@@ -154,8 +154,29 @@ func (s *AutomationService) advanceAcquisition(ctx context.Context, decision dom
 	if err != nil {
 		var refused ErrExecutionRefused
 		if errors.As(err, &refused) {
-			// The preflight refused. The host is unchanged, so this is a
-			// failure to count and not one to undo.
+			// A CONFLICT is not a failure. It says another recreation is
+			// already running for this container, which means the work is
+			// happening -- just not under this decision.
+			//
+			// Counting it found a live workload in Stage 17.9: a scheduled pass
+			// decided a container a manual pass had already submitted, the
+			// second recreation was correctly refused, and the refusal was
+			// counted toward pauseAfterFailures. The container was paused while
+			// its update was still progressing, and the pause then reported
+			// "another recreation is already running" as the reason -- hiding
+			// that what actually happened next was a failed health check and a
+			// rollback.
+			//
+			// The redundant decision is settled instead, so it neither counts
+			// against the container nor comes back on the next tick to submit a
+			// second recreation. Whatever the in-flight execution does is
+			// recorded against ITS decision, including a real failure.
+			if refused.Refusal == domain.ExecutionRefusalConflict {
+				s.settle(ctx, decision)
+				return
+			}
+			// Any other refusal. The host is unchanged, so this is a failure to
+			// count and not one to undo.
 			s.recordFailure(ctx, decision,
 				"the recreation preflight refused: "+refused.Refusal.Explain())
 			return

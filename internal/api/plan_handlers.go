@@ -76,6 +76,18 @@ type planListResponse struct {
 	Items      []domain.ChangePlan      `json:"items"`
 	Pagination Pagination               `json:"pagination"`
 	Summary    domain.ChangePlanSummary `json:"summary"`
+	// Planner is the state of the thing that produced these plans.
+	//
+	// Carried on the LISTING because "there are no plans" has two completely
+	// different meanings and the list alone cannot tell them apart: a settled
+	// estate legitimately has none, and an estate nobody has assessed yet also
+	// has none. `lastRunAt` is what separates them, and reporting the second as
+	// the first would tell an operator their containers are up to date when
+	// nothing has looked at them.
+	//
+	// Read from the planner's own status rather than inferred from the rows or
+	// from elapsed time, both of which would be guesses.
+	Planner domain.PlannerStatus `json:"planner"`
 }
 
 // handlePlans lists change plans.
@@ -108,6 +120,7 @@ func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
 		Items:      plans,
 		Pagination: newPagination(query.Page, query.PageSize, total),
 		Summary:    summary,
+		Planner:    s.planner.Status(),
 	})
 }
 

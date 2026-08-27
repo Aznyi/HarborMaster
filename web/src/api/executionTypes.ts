@@ -116,6 +116,10 @@ export type ExecutionRefusal =
   | "snapshotMissing"
   | "restoreReadiness"
   | "snapshotChanged"
+  // Phase 17.7. The plan asks for a person to review it, and no valid review
+  // has been recorded for this exact plan. Deliberately distinct from
+  // `recommendation`: that one can never be acted on, this one has a remedy.
+  | "approvalMissing"
   | "policyViolation"
   | "policyStale"
   | "registryStale"

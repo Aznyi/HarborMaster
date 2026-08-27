@@ -72,7 +72,58 @@ func (s *AutomationService) Status(ctx context.Context) (domain.AutomationStatus
 	}
 
 	s.fillWindowStatus(ctx, &status)
+	s.fillCapabilityStatus(ctx, &status)
 	return status, nil
+}
+
+// fillCapabilityStatus reports what the operator's policies would need.
+//
+// # Why the RULE lives here and not in the browser
+//
+// Two facts a client must not work out for itself: whether a policy may act
+// (AutomationMode.Mutates) and which deployment capabilities an acting policy
+// needs (RequiredForAutomation). Both are policy semantics, and a second
+// implementation of either would drift.
+//
+// The list is what an operator must set for the process to START with
+// automation on -- see RequiredForAutomation for why rollback is in it whether
+// or not a policy asks for automatic rollback.
+//
+// Best-effort, like the window status: a policy read that fails leaves the
+// fields empty rather than failing the whole status. Nothing decides safety
+// from these -- they are a display, and every real gate is elsewhere.
+func (s *AutomationService) fillCapabilityStatus(
+	ctx context.Context,
+	status *domain.AutomationStatus,
+) {
+	policies, err := s.policies.ActivePolicies(ctx)
+	if err != nil {
+		return
+	}
+
+	for _, policy := range policies {
+		if policy.Mode.Mutates() {
+			status.ActingPolicies++
+		}
+	}
+	if status.ActingPolicies == 0 {
+		// Nothing is required to do nothing.
+		return
+	}
+
+	required := domain.RequiredForAutomation()
+	if required.Acquisition {
+		status.RequiredCapabilities = append(status.RequiredCapabilities, "acquisition")
+	}
+	if required.Execution {
+		status.RequiredCapabilities = append(status.RequiredCapabilities, "execution")
+	}
+	if required.Automation {
+		status.RequiredCapabilities = append(status.RequiredCapabilities, "automation")
+	}
+	if required.Rollback {
+		status.RequiredCapabilities = append(status.RequiredCapabilities, "rollback")
+	}
 }
 
 // fillWindowStatus reports whether any enabled policy admits work now, and when
@@ -192,53 +243,39 @@ func (s *AutomationService) Pauses(
 // an operator should be able to ask without leaving a trace, and because the
 // answer must come from the same code that will make the real decision rather
 // than from a second implementation that can drift from it.
+// Both phases, not one. Until Stage 17.4 this ran phase 1 only, so a container
+// the pass would hold for its dependencies was reported here as eligible --
+// over-reporting, in the direction that tells an operator automation will
+// handle something it will not. Sharing evaluateEstate with the pass is what
+// makes the two unable to disagree.
 func (s *AutomationService) Upcoming(ctx context.Context) ([]domain.AutomationDecision, error) {
+	decisions, _, err := s.UpcomingAt(ctx)
+	return decisions, err
+}
+
+// UpcomingAt is Upcoming, and also says whether the estate was truncated.
+//
+// A separate method rather than a changed signature: `Upcoming` has callers,
+// and the truncation flag matters to exactly one of them -- the readiness
+// surface, which reports counts and must say when a count describes a prefix
+// of the estate rather than all of it.
+func (s *AutomationService) UpcomingAt(
+	ctx context.Context,
+) ([]domain.AutomationDecision, bool, error) {
 	if !s.Readable() {
-		return nil, ErrAutomationDisabled
+		return nil, false, ErrAutomationDisabled
 	}
 
 	policies, err := s.policies.ActivePolicies(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("load update policies: %w", err)
-	}
-	targets, _, err := s.evidence.Targets(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load automation targets: %w", err)
-	}
-	pauses, err := s.store.ActivePauses(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load automation pauses: %w", err)
-	}
-	pausedBy := make(map[string]domain.PausedContainer, len(pauses))
-	for _, pause := range pauses {
-		pausedBy[pause.ContainerName] = pause
+		return nil, false, fmt.Errorf("load update policies: %w", err)
 	}
 
-	now := s.now().UTC()
-	self := s.selfIdentity()
-	decisions := make([]domain.AutomationDecision, 0, len(targets))
-	for index, target := range targets {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		input := AutomationInput{
-			Target:                  target.Selection,
-			ContainerID:             target.ContainerID,
-			Policies:                policies,
-			Now:                     now,
-			RequireApprovalForMajor: s.cfg.RequireApprovalForMajor,
-			Self:                    self,
-		}
-		if pause, paused := pausedBy[target.Selection.Name]; paused {
-			input.Pause, input.IsPaused = pause, true
-		}
-		s.loadContainerEvidence(ctx, &input, pausedBy, policies)
-
-		outcome := DecideAutomation(input)
-		outcome.Decision.Position = index
-		decisions = append(decisions, outcome.Decision)
+	evaluation, err := s.evaluateEstate(ctx, policies, s.now().UTC())
+	if err != nil {
+		return nil, false, err
 	}
-	return decisions, nil
+	return evaluation.Decisions(), evaluation.Truncated, nil
 }
 
 // ------------------------------------------------------------ commands --
@@ -328,6 +365,34 @@ func (s *AutomationService) Approve(
 			"the container's change plan moved on after the decision was made")
 		return domain.AutomationDecision{}, fmt.Errorf(
 			"%w: a newer change plan supersedes the one it named", ErrDecisionNotApprovable)
+	}
+
+	// The plan asks for a person to review it.
+	//
+	// # Why this check exists here, and what it fixes
+	//
+	// DecideAutomation returns awaitingApproval at step 7 for a major version
+	// -- BEFORE step 8 looks at the recommendation. Every major update measures
+	// as `manualReview`, so releasing one used to succeed, submit an
+	// acquisition, download an image, and then be refused by the execution
+	// preflight. The operator approved something that could never complete.
+	//
+	// Releasing a policy decision and reviewing a change plan are different
+	// acts. This one cannot substitute for the other, so it says so and points
+	// at the workflow that can, rather than forwarding a request it can already
+	// see will be refused.
+	//
+	// It reads the PLAN. It does not read, create, or consult a plan approval:
+	// automation must not consume one, which is what keeps a manual review from
+	// becoming standing unattended authority.
+	if domain.PlanApprovable(current.Risk.Recommendation) {
+		s.recordAudit(ctx, domain.AuditAutomationRejected, domain.AuditDenied,
+			decision.ContainerName, actor,
+			"the change plan for this container needs a person to review it")
+		return domain.AutomationDecision{}, fmt.Errorf(
+			"%w: this update needs review of the change plan before it can be "+
+				"applied; approving it here would not be enough",
+			ErrDecisionNotApprovable)
 	}
 
 	// HarborMaster itself. Re-checked here, not inherited from the decision.

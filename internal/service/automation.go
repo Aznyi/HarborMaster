@@ -656,28 +656,6 @@ func (s *AutomationService) decide(
 	if err != nil {
 		return nil, counts, fmt.Errorf("load update policies: %w", err)
 	}
-	targets, truncated, err := s.evidence.Targets(ctx)
-	if err != nil {
-		return nil, counts, fmt.Errorf("load automation targets: %w", err)
-	}
-	if truncated {
-		// Said out loud rather than silently covering a prefix of the estate.
-		counts.Message = "this host has more containers than one pass may consider; " +
-			"some were not examined"
-		s.logger.WarnContext(ctx, "automation pass truncated the estate",
-			slog.String("runId", run.RunID),
-			slog.Int("limit", store.MaxAutomationTargets))
-	}
-
-	pauses, err := s.store.ActivePauses(ctx)
-	if err != nil {
-		return nil, counts, fmt.Errorf("load automation pauses: %w", err)
-	}
-	pausedBy := make(map[string]domain.PausedContainer, len(pauses))
-	for _, pause := range pauses {
-		pausedBy[pause.ContainerName] = pause
-	}
-
 	inFlight, err := s.evidence.InFlightTotal(ctx)
 	if err != nil {
 		return nil, counts, fmt.Errorf("count outstanding work: %w", err)
@@ -687,64 +665,45 @@ func (s *AutomationService) decide(
 	// by a millisecond must not get different answers because time moved
 	// between them.
 	now := s.now().UTC()
-	// And one identity reading, for the same reason: a refresh landing mid-pass
-	// must not make the engine exclude a container it already considered.
-	self := s.selfIdentity()
+	// The identity is read once too, for the same reason -- inside
+	// evaluateEstate, which is the only place that needs it.
 
 	budget := NewAutomationBudget(s.cfg.MaxPerRun, s.cfg.MaxConcurrent, inFlight, registryOfReference)
 
-	// ---- phase 1: decide every container ---------------------------------
+	// ---- phases 1 and 2: decide, then gate -------------------------------
 	//
-	// DECIDING and SUBMITTING were one loop until Phase 16. They are separated
-	// now for one reason: ordering. Whether a container may be submitted YET
-	// depends on what the pass decided about the containers it depends on, and
-	// that cannot be known while still deciding them.
+	// Shared with the readiness query, and shared deliberately. Both answer the
+	// same question over the same evidence, and the moment they answered it in
+	// two places they disagreed: the preview reported a container as eligible
+	// that the pass held for its dependencies. One implementation cannot do
+	// that. See automation_readiness.go.
 	//
-	// This phase is unchanged in every other respect. DecideAutomation is the
-	// same pure function, reads the same inputs, and reaches the same verdicts
-	// it always did.
-	outcomes := make([]AutomationOutcome, 0, len(targets))
-	for index, target := range targets {
-		if ctx.Err() != nil {
-			return collectDecisions(outcomes), counts, ctx.Err()
-		}
-		counts.Considered++
+	// Phase 1 is DecideAutomation, the same pure function reading the same
+	// inputs. Phase 2 is the dependency gate, which may do exactly one thing to
+	// a decision: turn an eligible one into a held or blocked one. A pass with
+	// no dependency evidence, or one whose graph could not be built, leaves
+	// every decision exactly as it was.
+	evaluation, err := s.evaluateEstate(ctx, policies, now)
+	if err != nil {
+		return nil, counts, err
+	}
+	outcomes, order := evaluation.Outcomes, evaluation.Order
+	counts.Considered = len(outcomes)
 
-		input := AutomationInput{
-			Target:                  target.Selection,
-			ContainerID:             target.ContainerID,
-			Policies:                policies,
-			Now:                     now,
-			RequireApprovalForMajor: s.cfg.RequireApprovalForMajor,
-			Self:                    self,
-		}
-		if pause, paused := pausedBy[target.Selection.Name]; paused {
-			input.Pause, input.IsPaused = pause, true
-		}
-
-		// The plan and the in-flight check are the only per-container reads,
-		// and both are indexed point lookups. Skipped entirely for a container
-		// that a cheaper check has already declined -- see loadContainerEvidence.
-		s.loadContainerEvidence(ctx, &input, pausedBy, policies)
-
-		outcome := DecideAutomation(input)
-		outcome.Decision.RunID = run.RunID
-		outcome.Decision.Position = index
-		// The lifecycle state the pass saw, so a dependent can tell "needs no
-		// update" from "needs no update AND is up".
-		outcome.Decision.ContainerState = target.State
-		outcomes = append(outcomes, outcome)
+	if evaluation.Truncated {
+		// Said out loud rather than silently covering a prefix of the estate.
+		counts.Message = "this host has more containers than one pass may consider; " +
+			"some were not examined"
+		s.logger.WarnContext(ctx, "automation pass truncated the estate",
+			slog.String("runId", run.RunID),
+			slog.Int("limit", store.MaxAutomationTargets))
 	}
 
-	// ---- phase 2: the dependency gate ------------------------------------
-	//
-	// Applied to the decisions phase 1 produced, and able to do exactly one
-	// thing to them: turn an eligible decision into a held or blocked one.
-	//
-	// A pass with no dependency evidence, or one whose graph could not be built,
-	// leaves every decision exactly as it was -- see applyDependencyGate for why
-	// that is the correct direction rather than a fail-open.
-	order := s.applyDependencyGate(ctx, outcomes)
+	// The run each decision belongs to. Set here rather than inside the shared
+	// evaluation because a readiness query has no run to belong to.
+	for index := range outcomes {
+		outcomes[index].Decision.RunID = run.RunID
+	}
 
 	// ---- phase 3: submit, in stage order ---------------------------------
 	//

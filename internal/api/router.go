@@ -78,6 +78,12 @@ type Server struct {
 	// API that can cause a host change nobody is watching. Nil in a deployment
 	// that has not opted in, which yields a 503 rather than a broken route.
 	automation AutomationService
+	// planApprovals records that a person reviewed one immutable change plan.
+	//
+	// Deliberately NOT part of AutomationService: approving a plan is a manual
+	// act and must work with the update engine switched off. Nil in a
+	// deployment without it, which yields 503 rather than a broken route.
+	planApprovals PlanApprovalService
 	// updatePolicies answers the automation-rule endpoints. Separate from
 	// `policies` above, which is compliance: one reports, the other acts, and
 	// conflating them would let one edit turn a reporting rule into a mutation
@@ -266,6 +272,12 @@ type Options struct {
 	// able to write and review their rules before switching automation on,
 	// which is the order those two things should be done in.
 	UpdatePolicies UpdatePolicyService
+	// PlanApprovals records human review of change plans. Nil disables the
+	// three approval routes, which yields 503 rather than a broken route.
+	//
+	// Reachable with the update engine off: reviewing and applying a plan by
+	// hand is not automation.
+	PlanApprovals PlanApprovalService
 	// Dependencies answers the workload-dependency endpoints. Nil disables them.
 	Dependencies DependencyService
 	// Notifications answers the delivery-history endpoints. Nil disables them.
@@ -350,6 +362,7 @@ func NewServer(opts Options) *Server {
 		automation:        opts.Automation,
 		dependencies:      opts.Dependencies,
 		updatePolicies:    opts.UpdatePolicies,
+		planApprovals:     opts.PlanApprovals,
 		notifications:     opts.Notifications,
 		notificationAdmin: opts.NotificationAdmin,
 
