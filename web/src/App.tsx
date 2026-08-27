@@ -37,7 +37,7 @@ import { ContainerPolicy } from "./pages/ContainerPolicy";
 import { Policies } from "./pages/Policies";
 import { PolicyViolations } from "./pages/PolicyViolations";
 import { Settings } from "./pages/Settings";
-import { UpdatesSection } from "./pages/UpdatesSection";
+import { Updates } from "./pages/Updates";
 import { SignIn } from "./pages/SignIn";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
@@ -106,14 +106,13 @@ function AuthenticatedApp() {
       <Routes>
         <Route path="/" element={<Dashboard health={health} />} />
 
-        {/* Section landings. Transitional signposts, not implementations: they
-          * link to the pages below and hold no state of their own. Every route
-          * they point at still exists and is still reachable directly, so an
-          * existing bookmark is unaffected by this grouping.
+        {/* /updates is the consolidated update workspace (Phase 2). /activity
+          * is still a transitional signpost. Every specialised route below
+          * remains, unredirected, so existing bookmarks are unaffected.
           */}
         <Route
           path="/updates"
-          element={<Guard permission="inventory:read"><UpdatesSection /></Guard>}
+          element={<Guard permission="plan:read"><Updates /></Guard>}
         />
         <Route
           path="/activity"

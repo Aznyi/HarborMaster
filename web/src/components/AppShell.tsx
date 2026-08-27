@@ -51,7 +51,7 @@ export const PRIMARY_NAV: readonly NavItem[] = [
   { label: "Containers", path: "/containers", permission: "inventory:read" },
   // The section landings gate on the permission their FIRST destination needs,
   // so the sidebar never offers a section whose contents are all refused.
-  { label: "Updates", path: "/updates", permission: "inventory:read" },
+  { label: "Updates", path: "/updates", permission: "plan:read" },
   { label: "Automation", path: "/automation", permission: "automation:read" },
   { label: "Activity", path: "/activity", permission: "event:read" },
   { label: "Settings", path: "/settings" },

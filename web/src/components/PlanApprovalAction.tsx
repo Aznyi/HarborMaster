@@ -36,10 +36,20 @@ import { useSession } from "../hooks/useSession";
 export function PlanApprovalAction({
   plan,
   onChanged,
+  onApprovalKnown,
 }: {
   plan: ChangePlan;
   /** Called after an approval or withdrawal, for a caller that wants to refresh. */
   onChanged?: () => void;
+  /**
+   * Reports whether a VALID approval stands, whenever that becomes known.
+   *
+   * The Updates workspace needs it to decide whether to offer the next step.
+   * It cannot read the recommendation instead: approving deliberately does not
+   * change the assessment, so a reviewed plan still says `manualReview` and
+   * would otherwise be offered the review control forever.
+   */
+  onApprovalKnown?: (approved: boolean) => void;
 }) {
   const session = useSession();
   const mayApprove = Boolean(session.user?.permissions.includes("plan:approve"));
@@ -82,6 +92,15 @@ export function PlanApprovalAction({
     load();
   }, [needsReview, load]);
 
+  const approved = state.status === "known" && state.data.valid;
+
+  // Reported from an effect rather than during render: a caller that stores it
+  // would otherwise be set during this component's render pass.
+  useEffect(() => {
+    if (state.status === "loading") return;
+    onApprovalKnown?.(approved);
+  }, [approved, onApprovalKnown, state.status]);
+
   const act = useCallback(
     async (what: "approve" | "revoke") => {
       setBusy(true);
@@ -109,8 +128,6 @@ export function PlanApprovalAction({
   );
 
   if (!needsReview) return null;
-
-  const approved = state.status === "known" && state.data.valid;
 
   return (
     <div

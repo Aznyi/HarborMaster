@@ -251,26 +251,25 @@ it("keeps the section highlighted on a nested route", async () => {
 
 // --------------------------------------------------------- the landings --
 
-it("routes the section landings to the tools they name, without reimplementing them", async () => {
+it("routes /updates to the consolidated workspace, not a landing page", async () => {
+  // Phase 2 replaced the transitional landing. The property Phase 1 cared
+  // about -- that the sidebar entry leads somewhere useful -- now means the
+  // workspace itself rather than a menu of five other pages.
   renderAt("/updates");
 
   const main = await screen.findByRole("main");
   expect(
     within(main).getByRole("heading", { name: "Updates", level: 2 }),
   ).toBeInTheDocument();
+  expect(
+    within(main).getByRole("tablist", { name: /update views/i }),
+  ).toBeInTheDocument();
 
-  for (const [name, href] of [
-    ["Available updates", "/images/updates"],
-    ["Update reviews", "/plans"],
-    ["Image downloads", "/acquisitions"],
-    ["Update history", "/executions"],
-    ["Rollbacks", "/rollbacks"],
-  ] as const) {
-    expect(within(main).getByRole("link", { name: new RegExp(name, "i") })).toHaveAttribute(
-      "href",
-      href,
-    );
-  }
+  // And it is not the old signpost: no card linking onwards to a separate
+  // "Update reviews" application.
+  expect(
+    within(main).queryByRole("link", { name: /^Update reviews$/i }),
+  ).not.toBeInTheDocument();
 });
 
 it("routes the activity landing the same way", async () => {
