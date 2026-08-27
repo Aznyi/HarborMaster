@@ -74,7 +74,10 @@ export type AcquisitionRefusal =
   | "limit"
   | "targetRefused"
   | "disabled"
-  | "containerMissing";
+  | "containerMissing"
+  // In the Go vocabulary and the published schema before it was here: the
+  // refusal that stops HarborMaster downloading an image for its own container.
+  | "selfUpdate";
 
 /** The immutable image an acquisition names. Derived entirely from a plan. */
 export interface AcquisitionTarget {

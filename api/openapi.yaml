@@ -9372,7 +9372,12 @@ components:
         publisher republished it. It is the only update type available for a tag
         that carries no version, which is why "latest" never reports a version
         change.
-      enum: [none, digest, patch, minor, major, prerelease, unknown]
+
+        `rebind` is not a registry finding at all. It is a plan to recreate a
+        container onto the digest it is ALREADY running, so that it can be
+        reattached to a network namespace whose provider was replaced. The
+        proposed digest is the observed one, so no version moves.
+      enum: [none, digest, patch, minor, major, prerelease, rebind, unknown]
 
     CheckStatus:
       type: string
@@ -9649,6 +9654,7 @@ components:
         - targetRefused
         - disabled
         - containerMissing
+        - selfUpdate
 
     AcquisitionRefusalResponse:
       type: object
@@ -9969,6 +9975,7 @@ components:
         - inventoryStale
         - snapshotMissing
         - restoreReadiness
+        - snapshotChanged
         - policyViolation
         - policyStale
         - registryStale
@@ -9980,6 +9987,9 @@ components:
         - dockerUnavailable
         - secretUnavailable
         - nameUnavailable
+        - selfUpdate
+        - namespaceProviderMissing
+        - dependentsNotRebindable
 
     ExecutionRefusalResponse:
       type: object

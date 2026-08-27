@@ -542,6 +542,43 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Snapshot assurance.
+	//
+	// # Why this is constructed here, above the planner
+	//
+	// A change plan records the configuration snapshot it was assessed against,
+	// and a plan is immutable. So the only moment a baseline can enter a plan is
+	// BEFORE the plan is written -- which makes the start of a planner pass the
+	// one correct place to capture the ones that are missing.
+	//
+	// Capturing later, at acquisition or execution time, would produce evidence
+	// the plan does not contain, and reading it into that plan would mean the
+	// assessment an operator reviewed was not the assessment that authorised the
+	// change. That is the load-bearing invariant of Phase 17.2.
+	//
+	// # It holds no Docker capability
+	//
+	// Assurance reaches one method on the snapshot service, which reads
+	// HarborMaster's own container repository and never a socket. There is
+	// nowhere on either options struct to wire a Docker interface, and two
+	// architecture tests hold that.
+	assurance := service.NewSnapshotAssurance(service.SnapshotAssuranceOptions{
+		Capturer: snapshots,
+		Logger:   logger,
+	})
+
+	// The bulk half: baselines for containers an update policy governs but that
+	// have never been snapshotted. Bounded per pass, four queries, and free on a
+	// deployment with no policies -- it returns before reading the estate.
+	snapshotPreparer := service.NewSnapshotPreparer(service.SnapshotPreparerOptions{
+		Assurance: assurance,
+		Policies:  db.UpdatePolicies,
+		Targets:   db.Containers,
+		Baselines: db.Snapshots,
+		Self:      self,
+		Logger:    logger,
+	})
+
 	// Change planning.
 	//
 	// The synthesis layer: it combines the inventory, snapshots, restore
@@ -554,6 +591,9 @@ func run() error {
 	planner := service.NewPlannerService(service.PlannerOptions{
 		Lineage: db.Lineage,
 		Store:   db.Plans,
+		// Baselines first, so a plan written moments later CONTAINS the
+		// snapshot evidence rather than needing a second pass to notice it.
+		Prepare: snapshotPreparer,
 		Config:  cfg.Planner,
 		Notify:  notifications.Notifier,
 		Logger:  logger,
@@ -711,6 +751,12 @@ func run() error {
 		Runtime:  dockerClient,
 		Capturer: capturer,
 		Mutator:  mutator,
+		// The last safe point. Assurance runs here as a MEASUREMENT: if the
+		// snapshot describing this container is not the one the plan was
+		// assessed against, the plan is stale and the recreation is refused.
+		// The new baseline is kept for the next planner pass; it does not
+		// authorise the plan already in flight.
+		Assurance: assurance,
 		// The LAST line of the self-update defence, and the one that matters
 		// most: this is the layer that actually stops a container.
 		Self: self,

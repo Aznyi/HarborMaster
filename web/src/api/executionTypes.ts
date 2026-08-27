@@ -115,6 +115,7 @@ export type ExecutionRefusal =
   | "inventoryStale"
   | "snapshotMissing"
   | "restoreReadiness"
+  | "snapshotChanged"
   | "policyViolation"
   | "policyStale"
   | "registryStale"
@@ -125,7 +126,14 @@ export type ExecutionRefusal =
   | "limit"
   | "dockerUnavailable"
   | "secretUnavailable"
-  | "nameUnavailable";
+  | "nameUnavailable"
+  // The three below were in the Go vocabulary and in the published schema long
+  // before they were in this union, so a refused recreation naming one of them
+  // was typed as an impossible value here. They are the self-update refusal and
+  // the two namespace refusals -- the most safety-critical in the set.
+  | "selfUpdate"
+  | "namespaceProviderMissing"
+  | "dependentsNotRebindable";
 
 /**
  * The outcome of one proof.

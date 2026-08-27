@@ -516,7 +516,13 @@ it("defaults a new policy to the safe settings", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "New policy" }));
 
   // Observe and same-tag-only: the two settings that change the least.
-  expect(screen.getByRole("radio", { name: /Observe only/ })).toBeChecked();
+  // Scoped to the mode group. The preset group above it also offers an option
+  // headed "Observe only" -- the preset that compiles to this very mode -- and
+  // the two are told apart by their fieldset rather than by their heading.
+  const modes = within(
+    screen.getByText("How should updates happen?").closest("fieldset") as HTMLElement,
+  );
+  expect(modes.getByRole("radio", { name: /Observe only/ })).toBeChecked();
   expect(
     screen.getByRole("radio", { name: /Same tag only, when it is republished/ }),
   ).toBeChecked();

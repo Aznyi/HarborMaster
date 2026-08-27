@@ -184,6 +184,15 @@ type ExecutionOptions struct {
 	// makes preservation UNVERIFIABLE, which fails closed rather than passing.
 	Hasher *Hasher
 
+	// Assurance establishes, immediately before the mutation, that the snapshot
+	// describing this container is the one the plan was assessed against.
+	//
+	// NOT a capability. It reaches one capture method against HarborMaster's own
+	// container repository and holds no Docker interface -- an architecture test
+	// pins that by reflection. Nil leaves the snapshot block exactly as it was
+	// before Phase 17: the existing baseline lookup and the existing gate.
+	Assurance *SnapshotAssurance
+
 	// Self reports which container HarborMaster is running in. The LAST line of
 	// the self-update defence, and the one that matters most: this is the layer
 	// that actually stops a container.
@@ -227,6 +236,9 @@ type ExecutionService struct {
 	capturer docker.ConfigCapturer
 	mutator  docker.ContainerMutator
 	hasher   *Hasher
+	// assurance establishes the current baseline in the preflight. Holds no
+	// Docker capability.
+	assurance *SnapshotAssurance
 	// self reports HarborMaster's own container. Read on every preflight.
 	notifier Notifier
 	self     SelfReporter
@@ -310,6 +322,7 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		capturer:     opts.Capturer,
 		mutator:      opts.Mutator,
 		hasher:       opts.Hasher,
+		assurance:    opts.Assurance,
 		notifier:     opts.Notify,
 		self:         opts.Self,
 		dependencies: opts.Dependencies,

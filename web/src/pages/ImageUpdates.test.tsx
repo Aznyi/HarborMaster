@@ -246,8 +246,13 @@ describe("Image updates dashboard", () => {
         intel({
           updateType: "unknown",
           latestTag: undefined,
+          // The sentence the backend actually sends for this state: version
+          // discovery ran out of budget and the configured tag's digest had
+          // NOT moved, so nothing at all was established.
           updateReason:
-            "the tag listing exceeded its budget, so a newer tag may exist",
+            "HarborMaster could not finish version discovery within the " +
+            "configured registry search limit, so it cannot determine whether " +
+            "a newer version tag exists",
         }),
       ]),
     );
@@ -262,7 +267,7 @@ describe("Image updates dashboard", () => {
     expect(within(row as HTMLElement).queryByText("Up to date")).toBeNull();
 
     expect(
-      screen.getByText(/tag listing exceeded its budget/),
+      screen.getByText(/could not finish version discovery/),
     ).toBeInTheDocument();
   });
 

@@ -55,6 +55,11 @@ func TestEveryExecutionRefusalIsAcceptedByTheSchema(t *testing.T) {
 		domain.ExecutionRefusalSelfUpdate,
 		domain.ExecutionRefusalNamespaceProviderMissing,
 		domain.ExecutionRefusalDependentsNotRebindable,
+		// Added by Phase 17.2 with migration 0030. Listed here for the same
+		// reason as the three above: this test's value is that it writes a real
+		// row per vocabulary entry, and a value dropped from the vocabulary
+		// would silently stop being covered.
+		domain.ExecutionRefusalSnapshotChanged,
 	} {
 		var found bool
 		for _, refusal := range domain.ExecutionRefusals {

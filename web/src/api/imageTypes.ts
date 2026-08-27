@@ -33,6 +33,9 @@ export type UpdateType =
   | "minor"
   | "major"
   | "prerelease"
+  // Not a registry finding: a recreation onto the digest the container is
+  // already running, so it can be reattached to a replaced network namespace.
+  | "rebind"
   | "unknown";
 
 /**
@@ -247,6 +250,7 @@ export const UPDATE_TYPE_ORDER = [
   "patch",
   "prerelease",
   "digest",
+  "rebind",
   "unknown",
   "none",
 ] as const satisfies readonly UpdateType[];
@@ -258,6 +262,7 @@ export const UPDATE_TYPE_LABELS: Record<UpdateType, string> = {
   patch: "Patch",
   prerelease: "Pre-release",
   digest: "Digest moved",
+  rebind: "Reattachment",
   unknown: "Undetermined",
   none: "Up to date",
 };
@@ -271,6 +276,8 @@ export const UPDATE_TYPE_MEANINGS: Record<UpdateType, string> = {
     "The only newer tag in this series is a pre-release, not a stable release.",
   digest:
     "The tag has not changed, but the publisher has republished it — the same tag now points at different content.",
+  rebind:
+    "HarborMaster would recreate this container on the image it is already running, so it can be reattached to a network namespace whose provider was replaced. No version changes.",
   unknown:
     "HarborMaster could not determine whether an update exists. This is not the same as being up to date.",
   none: "The tag resolves to the image already in use, and no newer tag is published in this series.",

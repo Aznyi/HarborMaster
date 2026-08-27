@@ -144,24 +144,57 @@ type fakeRegistry struct {
 	truncated bool
 	tagsErr   error
 
+	// digestByTag and errByTag answer PER TAG, so a test can distinguish the
+	// configured reference's manifest lookup from the candidate tag's.
+	//
+	// Both are nil by default and every existing test is unaffected: an absent
+	// entry falls back to the single digest above. They exist because "a newer
+	// tag was found but its digest cannot be resolved" is a real registry state
+	// and the only way to reach it is to make the SECOND lookup behave
+	// differently from the first.
+	digestByTag map[string]string
+	errByTag    map[string]error
+
 	manifestCalls int
 	tagCalls      int
+	// manifestTags records which tag each manifest lookup asked for, in order.
+	// It is what proves the exact-tag digest is fetched once and not re-fetched.
+	manifestTags []string
 }
 
-func (f *fakeRegistry) Manifest(_ context.Context, _ registry.ManifestRequest) (registry.ManifestResult, error) {
+func (f *fakeRegistry) Manifest(
+	_ context.Context, request registry.ManifestRequest,
+) (registry.ManifestResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.manifestCalls++
+	f.manifestTags = append(f.manifestTags, request.Ref.Tag)
+
+	if err, scripted := f.errByTag[request.Ref.Tag]; scripted {
+		return registry.ManifestResult{}, err
+	}
 	if f.manifestErr != nil {
 		return registry.ManifestResult{}, f.manifestErr
 	}
+
+	digest := f.digest
+	if scripted, ok := f.digestByTag[request.Ref.Tag]; ok {
+		digest = scripted
+	}
 	return registry.ManifestResult{
 		NotModified: f.notModified,
-		Digest:      f.digest,
+		Digest:      digest,
 		ETag:        f.etag,
 		Platforms:   f.platforms,
 		Annotations: f.annotations,
 	}, nil
+}
+
+// lookedUp returns the tags whose manifests were requested, in order.
+func (f *fakeRegistry) lookedUp() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.manifestTags...)
 }
 
 func (f *fakeRegistry) Tags(_ context.Context, _ domain.NormalizedRef, _ int) (registry.TagsResult, error) {

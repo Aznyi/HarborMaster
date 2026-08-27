@@ -162,6 +162,178 @@ func TestAutomationReasonsMatchThePublishedSchema(t *testing.T) {
 	samePublishedVocabulary(t, "AutomationReason", values)
 }
 
+// TestExecutionRefusalsMatchThePublishedSchema closes the gap that let three
+// refusals ship unpublished.
+//
+// # This drift was already shipping, for the second time
+//
+// Migration 0028 found `selfUpdate`, `namespaceProviderMissing`, and
+// `dependentsNotRebindable` in the Go vocabulary and REJECTED by the database
+// CHECK, and wrote a store-level test so it could not recur there. The same
+// three values were also absent from this schema and from the TypeScript union,
+// and nothing checked that -- so a client mapping each refusal to a sentence had
+// no entry for the three most safety-critical ones and would have rendered the
+// raw identifier to an operator.
+//
+// The store now has TestEveryExecutionRefusalIsAcceptedByTheSchema. This is the
+// same guard for the published contract, and adding it is what makes Phase
+// 17.2's new `snapshotChanged` value the last one that can be added without
+// updating both.
+func TestExecutionRefusalsMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.ExecutionRefusals))
+	for _, refusal := range domain.ExecutionRefusals {
+		values = append(values, string(refusal))
+	}
+	sameRefusalVocabulary(t, "ExecutionRefusal", values)
+}
+
+// sameRefusalVocabulary compares a refusal vocabulary against its schema enum,
+// ignoring the "no refusal" sentinel.
+//
+// The sentinel is a ZERO VALUE rather than a refusal: it is absent from the Go
+// lists by design, and the two published enums disagree about whether to carry
+// it -- ExecutionRefusal declares `- ""` and AcquisitionRefusal does not. That
+// disagreement is cosmetic and not what these tests are for, so it is filtered
+// on both sides rather than being allowed to mask the real comparison.
+func sameRefusalVocabulary(t *testing.T, schema string, goValues []string) {
+	t.Helper()
+
+	published := enumValues(t, schema)
+	real := make([]string, 0, len(published))
+	for _, value := range published {
+		// YAML's `- ""` reaches the extractor with its quotes intact.
+		if value == "" || value == `""` {
+			continue
+		}
+		real = append(real, value)
+	}
+	if len(real) == 0 {
+		t.Fatalf("no refusal values were extracted for %q; the check would pass "+
+			"vacuously", schema)
+	}
+
+	inSchema := make(map[string]bool, len(real))
+	for _, value := range real {
+		inSchema[value] = true
+	}
+	inGo := make(map[string]bool, len(goValues))
+	for _, value := range goValues {
+		inGo[value] = true
+	}
+
+	for _, value := range goValues {
+		if !inSchema[value] {
+			t.Errorf("%s: Go defines %q and the schema does not\n"+
+				"\tthe API already returns this value. A client mapping each value "+
+				"to a sentence has no entry for it and will render the raw enum.",
+				schema, value)
+		}
+	}
+	for _, value := range real {
+		if !inGo[value] {
+			t.Errorf("%s: the schema publishes %q and Go does not define it\n"+
+				"\ta value no server can produce is a promise to clients that "+
+				"cannot be kept", schema, value)
+		}
+	}
+}
+
+// TestAcquisitionRefusalsMatchThePublishedSchema is the same guard for the
+// download path, where `selfUpdate` was unpublished for the same reason.
+func TestAcquisitionRefusalsMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.AcquisitionRefusals))
+	for _, refusal := range domain.AcquisitionRefusals {
+		values = append(values, string(refusal))
+	}
+	sameRefusalVocabulary(t, "AcquisitionRefusal", values)
+}
+
+// TestEveryExecutionRefusalExplainsItself.
+//
+// Explain has a default arm that returns the raw identifier, so a refusal added
+// without a sentence degrades silently into an operator reading `snapshotChanged`
+// in a browser. This is the same check TestEveryAutomationReasonExplainsItself
+// makes for the automation vocabulary.
+func TestEveryExecutionRefusalExplainsItself(t *testing.T) {
+	t.Parallel()
+
+	if len(domain.ExecutionRefusals) < 25 {
+		t.Fatalf("found %d execution refusals; the vocabulary is not where this "+
+			"test thinks it is", len(domain.ExecutionRefusals))
+	}
+	for _, refusal := range domain.ExecutionRefusals {
+		explanation := refusal.Explain()
+		if explanation == "" || explanation == string(refusal) {
+			t.Errorf("%q has no sentence of its own; an operator would read the "+
+				"raw identifier", refusal)
+		}
+	}
+}
+
+// TestUpdateTypesMatchThePublishedSchema closes the gap that let `rebind` ship
+// unpublished.
+//
+// # The third occurrence of this defect's shape
+//
+// Migration 0027 taught the change_plans CHECK about `rebind` when Phase 16
+// introduced it. Migration 0028 did the same for three execution refusals.
+// Phase 17.2 found those three refusals also missing from this schema and from
+// the TypeScript unions, and added guards.
+//
+// `rebind` was the one nobody had checked. It is in domain.UpdateTypes, it is
+// accepted by the database, it is permitted by every update strategy, and the
+// planner produces it -- but the published enum did not list it and the
+// TypeScript union did not admit it. A client mapping each update type to a
+// label had no entry, so a reattachment plan rendered as a bare identifier.
+//
+// One guard per vocabulary is the only thing that stops this recurring, so this
+// is that guard for update types.
+func TestUpdateTypesMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.UpdateTypes))
+	for _, update := range domain.UpdateTypes {
+		values = append(values, string(update))
+	}
+	samePublishedVocabulary(t, "UpdateType", values)
+}
+
+// TestUpdateStrategiesMatchThePublishedSchema and the two below cover the rest
+// of the policy vocabulary, for the same reason.
+func TestUpdateStrategiesMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.UpdateStrategies))
+	for _, strategy := range domain.UpdateStrategies {
+		values = append(values, string(strategy))
+	}
+	samePublishedVocabulary(t, "UpdateStrategy", values)
+}
+
+func TestAutomationModesMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.AutomationModes))
+	for _, mode := range domain.AutomationModes {
+		values = append(values, string(mode))
+	}
+	samePublishedVocabulary(t, "AutomationMode", values)
+}
+
+func TestUpdateScopesMatchThePublishedSchema(t *testing.T) {
+	t.Parallel()
+
+	values := make([]string, 0, len(domain.UpdateScopes))
+	for _, scope := range domain.UpdateScopes {
+		values = append(values, string(scope))
+	}
+	samePublishedVocabulary(t, "UpdateScope", values)
+}
+
 func TestDependencyStatesMatchThePublishedSchema(t *testing.T) {
 	t.Parallel()
 

@@ -17,12 +17,21 @@ const (
 	SnapshotTriggerManual SnapshotTrigger = "manual"
 	// SnapshotTriggerAPI is a direct API call.
 	SnapshotTriggerAPI SnapshotTrigger = "api"
-	// SnapshotTriggerScheduled is reserved for a future scheduler. Nothing
-	// produces it in Phase 3.
+	// SnapshotTriggerScheduled is snapshot assurance running ahead of a planner
+	// pass, so that a container HarborMaster may be asked to update has a
+	// baseline before it is assessed rather than after.
+	//
+	// No update is in flight when one of these is taken. It is the difference
+	// between "a container has no baseline" and "a container is about to be
+	// changed", and the two are worth telling apart in the snapshot list.
 	SnapshotTriggerScheduled SnapshotTrigger = "scheduled"
-	// SnapshotTriggerPreUpdate is reserved for the future update phase, which
-	// will capture a baseline before changing anything. Nothing produces it in
-	// Phase 3.
+	// SnapshotTriggerPreUpdate is snapshot assurance running immediately before
+	// a recreation, to establish that the baseline the plan was assessed against
+	// is still the baseline that describes the container.
+	//
+	// A capture here that writes a NEW row is not a preparation; it is the
+	// discovery that the container changed after it was assessed, and it makes
+	// the plan stale. See service.SnapshotAssurance.
 	SnapshotTriggerPreUpdate SnapshotTrigger = "pre_update"
 )
 

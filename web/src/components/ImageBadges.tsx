@@ -26,6 +26,8 @@ const updateTones: Record<UpdateType, BadgeTone> = {
   patch: "warn",
   prerelease: "neutral",
   digest: "warn",
+  // A reattachment moves no version: the proposed digest is the observed one.
+  rebind: "neutral",
   // Deliberately NOT "ok". "Undetermined" is not good news, and colouring it
   // green would invite reading a gap in knowledge as a clean bill of health.
   unknown: "neutral",

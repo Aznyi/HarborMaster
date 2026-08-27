@@ -64,6 +64,25 @@ type PlanStore interface {
 	PruneOrphans(ctx context.Context, batch int) (int64, error)
 }
 
+// PlanPreparer establishes evidence a pass will read, immediately before it
+// reads it.
+//
+// One method, returning nothing the planner acts on. This is deliberately not a
+// general extension point: the only thing a preparer may do is make the world
+// more completely described before it is assessed, and the planner neither
+// inspects nor branches on the result.
+//
+// It exists because a change plan's snapshot evidence is IMMUTABLE, so the only
+// moment a baseline can enter a plan is before the plan is written. See
+// service.SnapshotPreparer.
+//
+// Implementations MUST be bounded: this runs inside the pass budget, on the
+// pass goroutine, and a preparer that took the whole budget would starve the
+// planning it exists to serve.
+type PlanPreparer interface {
+	PrepareForPlanning(ctx context.Context) PrepareReport
+}
+
 // PlannerOptions configures a PlannerService.
 type PlannerOptions struct {
 	Store PlanStore
@@ -72,6 +91,11 @@ type PlannerOptions struct {
 	// pre-Phase-13.1 behaviour, in which a container running an immutable
 	// digest has nothing to assess and is skipped forever.
 	Lineage LineageReader
+
+	// Prepare establishes snapshot baselines before the pass assesses the
+	// estate. Nil skips preparation entirely, which is exactly the behaviour
+	// every build had before Phase 17.
+	Prepare PlanPreparer
 
 	Config config.Planner
 	// Notify raises operator notifications. Nil sends none, which is the default:
@@ -87,6 +111,7 @@ type PlannerOptions struct {
 type PlannerService struct {
 	store   PlanStore
 	lineage LineageReader
+	prepare PlanPreparer
 
 	cfg      config.Planner
 	notifier Notifier
@@ -143,6 +168,7 @@ func NewPlannerService(opts PlannerOptions) *PlannerService {
 	return &PlannerService{
 		store:    opts.Store,
 		lineage:  opts.Lineage,
+		prepare:  opts.Prepare,
 		cfg:      cfg,
 		notifier: opts.Notify,
 		logger:   logger,
@@ -194,10 +220,33 @@ func (s *PlannerService) Generate(ctx context.Context) (GenerateResult, error) {
 	s.setRunning(true)
 	defer s.setRunning(false)
 
+	// BASELINES FIRST, and inside the pass rather than beside it.
+	//
+	// A plan records the snapshot evidence it was assessed against, immutably.
+	// So a container that gains a baseline after its plan is written has a plan
+	// that does not know about it -- and no later capture may be read into that
+	// plan, because then the assessment an operator reviewed would not be the
+	// assessment that authorised the change.
+	//
+	// Running preparation here, immediately before Candidates and GatherInputs,
+	// is what closes that gap: a baseline captured on this line is read by the
+	// grouped baseline query a few lines below, so the plan CONTAINS it.
+	//
+	// Bounded by the preparer itself and by this pass's context. A preparer that
+	// fails prepares nothing and the pass continues: a container without a
+	// baseline is planned as having none, which the acquisition preflight then
+	// refuses exactly as it always has.
+	if s.prepare != nil {
+		s.prepare.PrepareForPlanning(ctx)
+	}
+
 	// The clock is read ONCE for the whole pass and threaded through every
 	// assessment. Reading it per container would make two containers assessed a
 	// millisecond apart use different "now" values, which for the image-age
 	// rule means two identical estates could produce different plans.
+	//
+	// Read AFTER preparation, so a plan's evaluation time is not older than the
+	// baseline it was assessed against.
 	evaluatedAt := s.now().UTC()
 
 	for offset := 0; offset < s.cfg.MaxContainers; offset += s.cfg.BatchSize {

@@ -493,6 +493,27 @@ const (
 	// ExecutionRefusalRestoreReadiness means the snapshot cannot serve as a
 	// reference point under the documented policy.
 	ExecutionRefusalRestoreReadiness ExecutionRefusal = "restoreReadiness"
+	// ExecutionRefusalSnapshotChanged means the container's configuration has
+	// moved since the plan was assessed.
+	//
+	// # Why this is not "snapshotMissing" and not "containerChanged"
+	//
+	// A snapshot exists, so nothing is missing. The container is still running
+	// the image the plan assessed, so nothing containerChanged would catch has
+	// happened. What moved is the container's CONFIGURATION -- an environment
+	// value, a mount, a network, a restart policy -- and the plan's risk
+	// assessment was computed against the baseline that described it before.
+	//
+	// The plan is not wrong about anything it recorded. It is wrong about the
+	// world, and the remedy is a new plan rather than an override: HarborMaster
+	// captured the new baseline when it noticed, so the next planner pass
+	// assesses against it and produces one.
+	//
+	// Refusing here rather than proceeding is what keeps the immutable-evidence
+	// invariant true: the snapshot evidence that authorises a recreation must be
+	// the evidence in the plan being executed, and after a configuration change
+	// it no longer is.
+	ExecutionRefusalSnapshotChanged ExecutionRefusal = "snapshotChanged"
 	// ExecutionRefusalPolicyViolation means the container has an unresolved
 	// critical policy violation.
 	ExecutionRefusalPolicyViolation ExecutionRefusal = "policyViolation"
@@ -559,6 +580,7 @@ var ExecutionRefusals = []ExecutionRefusal{
 	ExecutionRefusalContainerMissing, ExecutionRefusalContainerChanged,
 	ExecutionRefusalContainerState, ExecutionRefusalInventoryStale,
 	ExecutionRefusalSnapshotMissing, ExecutionRefusalRestoreReadiness,
+	ExecutionRefusalSnapshotChanged,
 	ExecutionRefusalPolicyViolation, ExecutionRefusalPolicyStale,
 	ExecutionRefusalRegistryStale, ExecutionRefusalImageMissing,
 	ExecutionRefusalDigestMismatch, ExecutionRefusalPlatformMismatch,
@@ -623,6 +645,9 @@ func (r ExecutionRefusal) Explain() string {
 		return "this container has no configuration snapshot, so there would be no record of what it looked like beforehand"
 	case ExecutionRefusalRestoreReadiness:
 		return "this container has no usable configuration snapshot to refer back to"
+	case ExecutionRefusalSnapshotChanged:
+		return "this container's configuration has changed since this update was assessed; " +
+			"HarborMaster captured the new configuration and will assess the update again against it"
 	case ExecutionRefusalPolicyViolation:
 		return "this container has an unresolved critical policy violation, which should be settled first"
 	case ExecutionRefusalPolicyStale:

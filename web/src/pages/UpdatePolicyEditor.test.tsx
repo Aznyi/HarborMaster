@@ -293,6 +293,10 @@ describe("the mode warning", () => {
 
   it("shows it once automatic is chosen", async () => {
     const user = await openEditor();
+    // The individual mode control lives under Custom now: the presets above it
+    // answer the same question as an outcome, and offering both at once would
+    // let an operator change the mode out from under a preset without noticing.
+    await user.click(screen.getByRole("radio", { name: /^Custom/ }));
     await user.click(screen.getByRole("radio", { name: /^Automatic/ }));
 
     // Several regions carry role="status" on this page; the one under test is

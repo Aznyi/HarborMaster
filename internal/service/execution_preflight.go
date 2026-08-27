@@ -291,6 +291,72 @@ func (s *ExecutionService) preflight(
 	}
 
 	// ---- the snapshot ----------------------------------------------------
+	//
+	// # Assurance runs HERE, and it is a measurement rather than a preparation
+	//
+	// This is the last point before the mutation, and it is reached twice: once
+	// when the request is made and once inside the worker immediately before
+	// anything is stopped. Both matter. Capturing only at request time would
+	// leave the whole time-of-check/time-of-use window between the request and
+	// the stop unguarded, which is the window a configuration change actually
+	// lands in.
+	//
+	// What assurance establishes is not "a snapshot exists" but "the snapshot
+	// that describes this container NOW is the one the plan was assessed
+	// against". Those are different claims, and only the second one makes the
+	// plan's risk assessment mean anything.
+	//
+	// A capture that writes a NEW row is therefore not a success here. It is the
+	// discovery that the container was reconfigured after it was assessed. The
+	// new snapshot is kept -- it is the evidence the next planner pass builds
+	// from -- but it does not authorise the plan already in flight. Reading it
+	// into that plan is precisely the thing the immutable-evidence invariant
+	// forbids, and the reason this file may not simply take the newest baseline
+	// and carry on.
+	//
+	// # Why this write is acceptable inside a decision function
+	//
+	// Capture reaches HarborMaster's own container repository and never Docker
+	// -- see the comment on SnapshotContainers -- and it is idempotent: an
+	// unchanged configuration deduplicates transactionally against
+	// (container_id, checksum) and writes nothing. Running the preflight twice
+	// therefore captures at most once.
+
+	if s.assurance != nil && s.assurance.Available() {
+		result := s.assurance.EnsureCurrent(ctx, decision.ContainerID, domain.SnapshotTriggerPreUpdate)
+		switch {
+		case result.Outcome == AssuranceNotReady:
+			if s.cfg.RequireSnapshot {
+				decision.Refusal = domain.ExecutionRefusalRestoreReadiness
+				return decision, nil
+			}
+		case !result.Usable():
+			// No baseline could be established. Fails closed under the gate, and
+			// leaves the host untouched: nothing below this line has run.
+			if s.cfg.RequireSnapshot {
+				decision.Refusal = domain.ExecutionRefusalSnapshotMissing
+				return decision, nil
+			}
+		case plan.SnapshotID != result.SnapshotID:
+			// THE STALENESS CHECK.
+			//
+			// Gated on RequireSnapshot with the rest of the snapshot policy, and
+			// deliberately so. A deployment that switched the gate off has said
+			// it will recreate without snapshot evidence; on such a deployment a
+			// plan legitimately carries SnapshotID 0 while assurance produces a
+			// real id, and refusing on that difference would break it. Every
+			// other time-of-use check -- the plan still being current, the
+			// container still running the assessed image, the digest -- is
+			// ungated and still runs.
+			if s.cfg.RequireSnapshot {
+				decision.Refusal = domain.ExecutionRefusalSnapshotChanged
+				return decision, nil
+			}
+			decision.SnapshotID = result.SnapshotID
+		default:
+			decision.SnapshotID = result.SnapshotID
+		}
+	}
 
 	baseline, err := s.evidence.Baseline(ctx, decision.ContainerID)
 	switch {

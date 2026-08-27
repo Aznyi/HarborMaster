@@ -8,6 +8,17 @@ import type {
   UpdateSelector,
   UpdateStrategy,
 } from "../api/automationTypes";
+import type { Recommendation } from "../api/planTypes";
+import {
+  AUTOMATION_PRESETS,
+  PRESET_DESCRIPTIONS,
+  PRESET_LABELS,
+  compilePreset,
+  describeRecommendationFloor,
+  detectPreset,
+  presetConsequence,
+  type AutomationPreset,
+} from "../api/automationPresets";
 import {
   AUTOMATION_MODE_ORDER,
   SCOPE_CHOICE_DESCRIPTIONS,
@@ -150,6 +161,7 @@ export function UpdatePolicies() {
         <PolicyEditor
           key={editing?.policyId ?? "new"}
           policy={editing}
+          engineEnabled={Boolean(status.data?.status.enabled)}
           onCancel={() => {
             setCreating(false);
             setEditing(null);
@@ -393,10 +405,12 @@ function capitalise(value: string): string {
  */
 function PolicyEditor({
   policy,
+  engineEnabled,
   onCancel,
   onSaved,
 }: {
   policy: UpdatePolicy | null;
+  engineEnabled: boolean;
   onCancel: () => void;
   onSaved: (warnings: string[]) => void;
 }) {
@@ -430,6 +444,16 @@ function PolicyEditor({
 
   // 3. How should updates happen?
   const [mode, setMode] = useState<AutomationMode>(policy?.mode ?? "observe");
+
+  // The recommendation floor.
+  //
+  // Previously the editor never sent this and the create handler stored
+  // `proceed`. It is state now because a preset writes it and Custom exposes
+  // it, and sending it explicitly makes the stored policy match what the
+  // summary said rather than what the server chose.
+  const [floor, setFloor] = useState<Recommendation>(
+    policy?.minimumRecommendation ?? "proceed",
+  );
 
   // 4. When may updates happen?
   const [alwaysOpen, setAlwaysOpen] = useState(
@@ -490,6 +514,7 @@ function PolicyEditor({
       selector,
       strategy,
       mode,
+      minimumRecommendation: floor,
       window: alwaysOpen
         ? { alwaysOpen: true }
         : { alwaysOpen: false, timezone: timezone.trim(), start, end },
@@ -506,6 +531,7 @@ function PolicyEditor({
     description,
     end,
     exclude,
+    floor,
     images,
     labels,
     mode,
@@ -517,6 +543,113 @@ function PolicyEditor({
     strategy,
     timezone,
   ]);
+
+  /**
+   * Which preset the operator is on.
+   *
+   * # Why this is explicit state and not purely derived
+   *
+   * The obvious implementation is `detectPreset(request)`, recomputed on every
+   * keystroke. It is wrong, and the failing test that found it is worth
+   * recording: with detection as the only source, **Custom is unreachable**.
+   * Choosing Custom writes no fields -- that is its whole point -- so the next
+   * render detects the preset the fields still match and snaps the selection
+   * straight back. An operator could never open the individual controls.
+   *
+   * So the choice is remembered, and detection is used for the one thing it is
+   * genuinely for: deciding what to select when the form OPENS. An existing
+   * policy that exactly matches a preset opens on that preset; anything else
+   * opens on Custom.
+   *
+   * Within a session the explicit choice then wins. Editing a ceiling inside
+   * Custom until it happens to equal Follow current tag does not yank the
+   * operator out of Custom, which would move the controls out from under them
+   * mid-edit.
+   */
+  const [preset, setPreset] = useState<AutomationPreset>(() =>
+    policy
+      ? detectPreset({
+          strategy: policy.strategy,
+          mode: policy.mode,
+          minimumRecommendation: policy.minimumRecommendation,
+          failure: policy.failure,
+        })
+      : "observe",
+  );
+
+  /**
+   * Choosing an outcome writes the fields that outcome owns.
+   *
+   * Everything else -- name, scope, selector, exclusions, window, priority,
+   * pause setting -- is untouched, so switching presets never discards the
+   * targeting an operator has already done. Custom writes nothing at all: it
+   * reveals the controls holding whatever the last preset produced, which is
+   * what makes "Follow current tag -> Custom" show a digest-only automatic
+   * policy rather than an empty form.
+   */
+  const choosePreset = useCallback(
+    (next: AutomationPreset) => {
+      setPreset(next);
+      const compiled = compilePreset(next, request);
+      setStrategy(compiled.strategy as UpdateStrategy);
+      setMode(compiled.mode as AutomationMode);
+      setFloor(compiled.minimumRecommendation as Recommendation);
+      setAutoRollback(compiled.failure?.autoRollback ?? true);
+    },
+    [request],
+  );
+
+  /**
+   * Editing an owned field by hand re-derives which preset the form is on.
+   *
+   * This is the other half of the explicit-state decision above. Detection runs
+   * HERE -- on an actual edit -- rather than on every render, so an operator who
+   * clicked Custom and changed nothing stays in Custom, while one who widened
+   * the ceiling under Follow current tag is moved to Custom because that is now
+   * what their policy is.
+   *
+   * The three wrappers exist because each has to re-derive against the value
+   * that is about to be set rather than the one currently in state, which React
+   * has not applied yet.
+   */
+  const rederive = useCallback(
+    (overrides: Partial<UpdatePolicyRequest>) => {
+      setPreset(detectPreset({ ...request, ...overrides }));
+    },
+    [request],
+  );
+
+  const editStrategy = useCallback(
+    (next: UpdateStrategy) => {
+      setStrategy(next);
+      rederive({ strategy: next });
+    },
+    [rederive],
+  );
+
+  const editMode = useCallback(
+    (next: AutomationMode) => {
+      setMode(next);
+      rederive({ mode: next });
+    },
+    [rederive],
+  );
+
+  const editFloor = useCallback(
+    (next: Recommendation) => {
+      setFloor(next);
+      rederive({ minimumRecommendation: next });
+    },
+    [rederive],
+  );
+
+  const editAutoRollback = useCallback(
+    (next: boolean) => {
+      setAutoRollback(next);
+      rederive({ failure: { ...request.failure, autoRollback: next } });
+    },
+    [rederive, request.failure],
+  );
 
   const save = useCallback(async () => {
     setBusy(true);
@@ -560,6 +693,12 @@ function PolicyEditor({
         />
       </Field>
 
+      <PresetSection
+        preset={preset}
+        onPreset={choosePreset}
+        engineEnabled={engineEnabled}
+      />
+
       <ScopeSection
         choice={choice}
         onChoice={setChoice}
@@ -573,9 +712,25 @@ function PolicyEditor({
         onExclude={setExclude}
       />
 
-      <CeilingSection strategy={strategy} onStrategy={setStrategy} />
+      {/* The individual controls, ALWAYS visible.
+        *
+        * It was tempting to reveal these only in Custom, so a preset would read
+        * as one clean choice. That is wrong here, and the rule it breaks is
+        * written at the top of this file: nothing whose omission changes how
+        * much the host can be changed may go behind a disclosure. The ceiling
+        * and the mode are exactly that, and a preset naming them in friendly
+        * words is not a substitute for showing an operator the setting they are
+        * about to save.
+        *
+        * So a preset FILLS these in and they stay on screen. Changing one by
+        * hand re-derives which preset the form is on, which is how an operator
+        * ends up in Custom without having to know Custom exists.
+        */}
+      <CeilingSection strategy={strategy} onStrategy={editStrategy} />
 
-      <ModeSection mode={mode} onMode={setMode} />
+      <ModeSection mode={mode} onMode={editMode} />
+
+      <FloorSection floor={floor} onFloor={editFloor} />
 
       <WindowSection
         alwaysOpen={alwaysOpen}
@@ -591,7 +746,7 @@ function PolicyEditor({
       <FailureSection
         mode={mode}
         autoRollback={autoRollback}
-        onAutoRollback={setAutoRollback}
+        onAutoRollback={editAutoRollback}
         pauseEnabled={pauseEnabled}
         onPauseEnabled={setPauseEnabled}
         pauseAfter={pauseAfter}
@@ -635,6 +790,40 @@ function PolicyEditor({
         <p className="mt-1 max-w-prose text-sm" data-testid="policy-summary">
           {summariseUpdatePolicy(request)}
         </p>
+
+        {/* The outcome, in the operator's terms rather than the schema's.
+          *
+          * Rendered from the SAME request object that is about to be sent, via
+          * the preset it currently matches -- so there is no second model of
+          * what the policy means for this to drift away from.
+          */}
+        {presetConsequence(preset).length > 0 ? (
+          <ul
+            className="mt-2 max-w-prose list-disc space-y-1 pl-5 text-sm"
+            data-testid="preset-consequence"
+          >
+            {presetConsequence(preset).map((sentence) => (
+              <li key={sentence}>{sentence}</li>
+            ))}
+          </ul>
+        ) : null}
+
+        {/* The recommendation floor, never hidden. */}
+        <p className="mt-2 max-w-prose text-xs text-content-muted">
+          {describeRecommendationFloor(request.minimumRecommendation)}
+        </p>
+
+        {mode === "automatic" && !engineEnabled ? (
+          <p
+            className="mt-2 max-w-prose text-xs font-medium text-warning"
+            data-testid="engine-disabled-warning"
+          >
+            This policy will not run automatically until the automation engine
+            is enabled for this HarborMaster installation. It can be saved now,
+            and it will be evaluated and recorded as soon as the engine is
+            switched on.
+          </p>
+        ) : null}
       </div>
 
       {failure ? (
@@ -662,6 +851,129 @@ function PolicyEditor({
         </button>
       </div>
     </section>
+  );
+}
+
+// ------------------------------------------------------- 0. what outcome --
+
+/**
+ * The outcome question, asked before anything else.
+ *
+ * A radio group in a real `fieldset` with a real `legend`, so the whole set is
+ * announced as one choice rather than as five unrelated checkboxes, and so
+ * arrow keys move between options the way a person expects a radio group to.
+ *
+ * The selected state is carried by the radio itself -- which is what a screen
+ * reader and a keyboard user act on -- and the ring and background are
+ * decoration on top of it. Nothing here is distinguished by colour alone.
+ */
+function PresetSection({
+  preset,
+  onPreset,
+  engineEnabled,
+}: {
+  preset: AutomationPreset;
+  onPreset: (preset: AutomationPreset) => void;
+  engineEnabled: boolean;
+}) {
+  const group = useId();
+
+  return (
+    <fieldset className="space-y-2">
+      <legend className="text-sm font-medium">
+        What do you want HarborMaster to do?
+      </legend>
+
+      <div className="space-y-2">
+        {AUTOMATION_PRESETS.map((option) => {
+          const id = `${group}-${option}`;
+          const describedBy = `${id}-description`;
+          const selected = preset === option;
+
+          return (
+            <label
+              key={option}
+              htmlFor={id}
+              className={
+                "flex min-h-11 cursor-pointer gap-3 rounded-lg border px-3 py-2 " +
+                (selected
+                  ? "border-accent bg-accent-soft ring-1 ring-accent"
+                  : "border-border-subtle bg-surface")
+              }
+            >
+              <input
+                type="radio"
+                id={id}
+                name={group}
+                className="mt-1 size-4 shrink-0"
+                value={option}
+                checked={selected}
+                aria-describedby={describedBy}
+                onChange={() => onPreset(option)}
+              />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">
+                  {PRESET_LABELS[option]}
+                  {/* Not colour-only: the selected option says so in words. */}
+                  {selected ? (
+                    <span className="ml-2 text-xs font-normal text-content-muted">
+                      (selected)
+                    </span>
+                  ) : null}
+                </span>
+                <span
+                  id={describedBy}
+                  className="mt-0.5 block text-xs text-content-muted"
+                >
+                  {PRESET_DESCRIPTIONS[option]}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      {/* Watchtower migration help, offered where the decision is made rather
+        * than in documentation somebody would have to already know to look for.
+        */}
+      <details className="rounded-lg border border-border-subtle px-3 py-2">
+        <summary className="min-h-9 cursor-pointer py-1 text-sm font-medium">
+          Coming from Watchtower?
+        </summary>
+        <div className="space-y-2 pt-2 text-sm text-content-muted">
+          <p className="max-w-prose">
+            Choose <strong>Follow current tag</strong>. It is the closest match
+            to what Watchtower does by default: each container stays on the tag
+            you configured, and HarborMaster recreates it when that tag starts
+            pointing at a different image.
+          </p>
+          <p className="max-w-prose">
+            HarborMaster does more around that than Watchtower does, and it is
+            worth knowing before you rely on it. Before replacing a container it
+            captures a configuration snapshot, verifies the image it pulled is
+            the image it planned, checks whether anything shares the container&apos;s
+            network namespace, compares the replacement&apos;s configuration against
+            the original, and proves the new container is healthy — rolling back
+            if it is not.
+          </p>
+          <p className="max-w-prose">
+            The practical difference is that HarborMaster will sometimes refuse
+            an update Watchtower would have applied. When it does, the
+            Automation page names the check that refused it.
+          </p>
+        </div>
+      </details>
+
+      {!engineEnabled ? (
+        <p className="max-w-prose text-xs text-content-muted">
+          The automation engine is switched off for this installation, so no
+          policy runs automatically yet. Policies can still be written and
+          evaluated in Observe mode. Enabling it is a deployment setting
+          (<code>HARBORMASTER_AUTOMATION_ENABLED</code>) and takes effect on
+          restart.
+        </p>
+      ) : null}
+    </fieldset>
   );
 }
 
@@ -927,6 +1239,101 @@ const MODE_CONSEQUENCES: Record<AutomationMode, string> = {
   automatic:
     "HarborMaster may stop and replace matching containers unattended inside the policy's allowed window.",
 };
+
+// ---------------------------------------------- 3b. how sure must it be --
+
+/**
+ * The recommendation floor.
+ *
+ * Custom only, because it is the one field where the vocabulary genuinely
+ * matters and there is no honest way to hide it: the planner rates every
+ * individual update, and this says how good that rating has to be. Presets set
+ * it to the stricter value and the summary states the consequence in words, so
+ * an operator who never opens Custom is told what it means without being asked
+ * to choose it.
+ *
+ * Only two values are offered. Validation refuses the rest by name -- a verdict
+ * that asks for human review cannot be the threshold for acting without one.
+ */
+function FloorSection({
+  floor,
+  onFloor,
+}: {
+  floor: Recommendation;
+  onFloor: (floor: Recommendation) => void;
+}) {
+  const group = useId();
+
+  const options: { value: Recommendation; heading: string; detail: string }[] = [
+    {
+      value: "proceed",
+      heading: "Only straightforward updates",
+      detail:
+        "HarborMaster acts only on updates it rates as straightforward. The stricter setting.",
+    },
+    {
+      value: "proceedWithCaution",
+      heading: "Also updates flagged for caution",
+      detail:
+        "HarborMaster also acts on updates it has flagged for caution — an unfamiliar publisher, " +
+        "an imperfect snapshot, or unresolved drift.",
+    },
+  ];
+
+  return (
+    <fieldset className="space-y-2">
+      <legend className="text-sm font-medium">
+        How sure must HarborMaster be before it acts?
+      </legend>
+
+      {options.map((option) => {
+        const id = `${group}-${option.value}`;
+        const describedBy = `${id}-description`;
+        const selected = floor === option.value;
+
+        return (
+          <label
+            key={option.value}
+            htmlFor={id}
+            className={
+              "flex min-h-11 cursor-pointer gap-3 rounded-lg border px-3 py-2 " +
+              (selected
+                ? "border-accent bg-accent-soft ring-1 ring-accent"
+                : "border-border-subtle bg-surface")
+            }
+          >
+            <input
+              type="radio"
+              id={id}
+              name={group}
+              className="mt-1 size-4 shrink-0"
+              value={option.value}
+              checked={selected}
+              aria-describedby={describedBy}
+              onChange={() => onFloor(option.value)}
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">
+                {option.heading}
+                {selected ? (
+                  <span className="ml-2 text-xs font-normal text-content-muted">
+                    (selected)
+                  </span>
+                ) : null}
+              </span>
+              <span
+                id={describedBy}
+                className="mt-0.5 block text-xs text-content-muted"
+              >
+                {option.detail}
+              </span>
+            </span>
+          </label>
+        );
+      })}
+    </fieldset>
+  );
+}
 
 // ------------------------------------------------------------ 4. when --
 

@@ -631,6 +631,15 @@ type execHarness struct {
 	// dependencies is the namespace evidence the preflight consults. Defaults
 	// to an ordinary standalone container; the invariant A tests replace it.
 	dependencies service.ExecutionDependencies
+
+	// assurance establishes the current baseline in the preflight. NIL by
+	// default, which is the pre-Phase-17 behaviour every test in this file was
+	// written against; the snapshot-assurance tests wire one in through tune.
+	assurance *service.SnapshotAssurance
+
+	// requireSnapshot overrides EXECUTION_REQUIRE_SNAPSHOT. Nil leaves it at
+	// true, which is both the default and what every existing test assumes.
+	requireSnapshot *bool
 }
 
 func (h *execHarness) now() time.Time {
@@ -698,6 +707,11 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		t.Fatalf("load secret key: %v", err)
 	}
 
+	requireSnapshot := true
+	if harness.requireSnapshot != nil {
+		requireSnapshot = *harness.requireSnapshot
+	}
+
 	harness.service = service.NewExecutionService(service.ExecutionOptions{
 		Store:    harness.store,
 		Evidence: harness.evidence,
@@ -710,9 +724,10 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		Mutator:      harness.mutator,
 		Lineage:      harness.lineage,
 		Hasher:       service.NewHasher(key),
+		Assurance:    harness.assurance,
 		Config: config.Execution{
 			Enabled:               true,
-			RequireSnapshot:       true,
+			RequireSnapshot:       requireSnapshot,
 			StartupTimeout:        2 * time.Second,
 			StabilityPeriod:       10 * time.Millisecond,
 			HealthPollInterval:    time.Millisecond,

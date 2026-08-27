@@ -614,43 +614,109 @@ func (s *ImageIntelService) resolveTagDigest(
 
 // assess decides what update, if any, is available.
 //
-// Two independent signals, in order:
+// # Two questions, not one
 //
-//  1. TAG COMPARISON, when the current tag parses as a version and the registry
-//     will enumerate tags. This is the informative answer: it names the newer
-//     tag and the size of the change.
-//  2. DIGEST COMPARISON, always available. The tag did not change but what it
-//     points at did, which for a mutable tag is the publisher republishing.
+// A check asks the registry two things, and they are independent:
 //
-// A digest change is reported only when tag comparison found nothing, so an
-// image with both a newer tag and a moved digest reports the newer tag -- the
-// more actionable of the two.
+//  1. Does the EXACT CONFIGURED REFERENCE still resolve to the digest this
+//     container runs? Answered by one manifest HEAD, always, before this
+//     function is called -- the answer arrives as remoteDigest.
+//  2. Does a NEWER VERSION TAG exist anywhere in the repository? Answered by a
+//     bounded tag enumeration, and only when the configured tag is a version.
+//
+// The first is cheap and always answerable. The second is bounded by a page
+// budget and is frequently UNANSWERABLE on a large repository: `library/nginx`
+// publishes far more tags than the configured budget can carry.
+//
+// # The rule, and the defect it was written for
+//
+//	Bounded version discovery may be incomplete. That must not erase a
+//	positively established fact about the exact configured reference.
+//
+// Until Phase 17.5 an unanswerable second question discarded a positively
+// answered first one: a truncated listing returned `unknown`, and `unknown`
+// short-circuited before the digest comparison ran. No strategy permits
+// `unknown`, so a container on a versioned tag whose digest had genuinely moved
+// was never updated -- permanently, because a repository never gets smaller.
+//
+// Nothing here fetches anything new. The manifest HEAD has already happened and
+// remoteDigest is already in hand; the fix is that an answer HarborMaster
+// already had stops being thrown away.
+//
+// # The precedence
+//
+//	D. A CONCRETE NEWER TAG outranks same-tag digest movement, because it is the
+//	   more actionable of two true answers. Unchanged.
+//	E. Discovery truncated, nothing newer seen: report the digest move if there
+//	   was one, and SAY that discovery was incomplete. Otherwise `unknown`.
+//	F. Discovery complete, nothing newer: report the digest move if there was
+//	   one, otherwise `none`.
+//
+// Truncation may never manufacture `none`, and may never manufacture a version
+// update that was not observed.
 func (s *ImageIntelService) assess(
 	ctx context.Context,
 	record domain.ImageIntel,
 	normalized domain.NormalizedRef,
 	remoteDigest string,
 ) domain.UpdateAssessment {
-	// A digest-pinned reference cannot have "moved": it names immutable
-	// content. Only a newer tag is meaningful, and only if the repository
-	// publishes versions.
+	// B. The fact about the configured reference. Established first and held,
+	// so no later branch can reach a conclusion without having considered it.
+	moved := digestMoved(record.LocalDigest, remoteDigest)
+
+	// C. Version discovery, when the reference admits it. A digest-pinned
+	// reference cannot have "moved" -- it names immutable content -- and a
+	// non-version tag has no series to search.
+	var (
+		discovery domain.UpdateAssessment
+		searched  bool
+		truncated bool
+	)
 	if !normalized.Pinned() && normalized.Tag != "" {
 		if _, versioned := domain.ParseTagVersion(normalized.Tag); versioned {
-			if assessment, ok := s.compareTags(ctx, normalized); ok {
-				if assessment.Type != domain.UpdateNone {
-					return assessment
-				}
-				// No newer tag. Fall through to the digest comparison, because a
-				// pinned-looking tag can still be republished.
-			}
+			discovery, truncated, searched = s.compareTags(ctx, normalized)
 		}
 	}
 
-	if digestMoved(record.LocalDigest, remoteDigest) {
-		return domain.UpdateAssessment{
+	// D. A concrete newer tag was OBSERVED.
+	//
+	// Keyed on the TAG rather than on the type, deliberately. A calendar-versioned
+	// candidate is reported as `unknown` with a tag -- HarborMaster saw a newer
+	// tag but will not assert what size of change it represents -- and that is a
+	// different thing from having seen nothing at all. Keying on the type would
+	// fold the two together and lose the tag.
+	if searched && discovery.Tag != "" {
+		return discovery
+	}
+
+	// E and F. Nothing newer was observed, either because there is nothing or
+	// because the search could not finish.
+	if moved {
+		assessment := domain.UpdateAssessment{
 			Type: domain.UpdateDigest,
 			Reason: "the registry serves a different digest for this tag; " +
 				"the publisher has republished it",
+		}
+		if truncated {
+			// Said out loud rather than folded away. The digest movement is
+			// positively known; whether a newer VERSION tag also exists is not,
+			// and an operator reading "digest update" deserves to know which of
+			// the two questions went unanswered.
+			assessment.Reason += ". Version discovery also reached the configured " +
+				"registry search limit, so a newer version tag may exist beyond " +
+				"what was read"
+		}
+		return assessment
+	}
+
+	if truncated {
+		// No movement, and the search could not finish. HarborMaster genuinely
+		// does not know, and must not say `none`.
+		return domain.UpdateAssessment{
+			Type: domain.UpdateUnknown,
+			Reason: "HarborMaster could not finish version discovery within the " +
+				"configured registry search limit, so it cannot determine whether " +
+				"a newer version tag exists",
 		}
 	}
 
@@ -671,19 +737,29 @@ func (s *ImageIntelService) assess(
 
 // compareTags enumerates the repository's tags and classifies the newest.
 //
+// Returns the classification, whether the listing was TRUNCATED, and whether it
+// ran at all. Truncation is returned separately rather than inferred from the
+// verdict: "unknown because the budget ran out" and "unknown because the
+// candidate is calendar-versioned" are different facts, and assess has to tell
+// them apart to know whether it may fall back to the digest comparison.
+//
 // Reports ok=false when tag listing is unavailable, which is a normal condition
 // on a registry that does not implement it rather than a failure.
 func (s *ImageIntelService) compareTags(
 	ctx context.Context,
 	normalized domain.NormalizedRef,
-) (domain.UpdateAssessment, bool) {
+) (assessment domain.UpdateAssessment, truncated, ok bool) {
+	// The SAME bounded call as before. MaxTagPages, the per-page cap, the
+	// tracked-tag cap, and the response-size cap are all unchanged: this change
+	// is control flow over evidence already gathered, not more evidence.
 	tags, err := s.registry.Tags(ctx, normalized, s.cfg.MaxTagPages)
 	if err != nil {
 		// A listing failure does not fail the whole check: the digest
 		// comparison is still available and still true.
-		return domain.UpdateAssessment{}, false
+		return domain.UpdateAssessment{}, false, false
 	}
-	return domain.ClassifyTagUpdate(normalized.Tag, tags.Tags, tags.Truncated), true
+	return domain.ClassifyTagUpdate(normalized.Tag, tags.Tags, tags.Truncated),
+		tags.Truncated, true
 }
 
 // digestMoved reports whether two digests differ meaningfully.
