@@ -1,5 +1,9 @@
 import type { ResourceState } from "../hooks/useApiResource";
 import type { Features, HealthReport } from "../api/types";
+import {
+  setAdvancedTools,
+  useAdvancedTools,
+} from "../hooks/useAdvancedTools";
 import { useVersion } from "../hooks/useHealth";
 import { PageIntro } from "../components/PageIntro";
 import { LoadingState } from "../components/States";
@@ -134,7 +138,56 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
           </li>
         </ul>
       </section>
+
+      <AdvancedToolsSection />
     </div>
+  );
+}
+
+/**
+ * The one preference HarborMaster keeps in the browser.
+ *
+ * # Why it is here and not on the server
+ *
+ * It changes what the SIDEBAR lists, not what the account may do. Every page it
+ * reveals is already routable by URL and already refused by the server without
+ * the permission behind it, so there is nothing to authorise and nothing worth
+ * a migration. It is stored per browser, which is also where "I want a denser
+ * menu" actually belongs.
+ */
+function AdvancedToolsSection() {
+  const enabled = useAdvancedTools();
+
+  return (
+    <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+      <h3 className="font-semibold">Advanced</h3>
+      <p className="mt-2 max-w-prose text-sm text-content-muted">
+        HarborMaster keeps a record of every stage of an update: the images it
+        found, the plans it wrote, the downloads, the recreations, the
+        rollbacks, and the drift and snapshot evidence behind them. The sidebar
+        does not list them by default, because keeping containers updated should
+        not require knowing that vocabulary.
+      </p>
+
+      <label className="mt-4 flex min-h-11 items-start gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(event) => setAdvancedTools(event.target.checked)}
+          className="mt-0.5 size-4 shrink-0"
+        />
+        <span>
+          <span className="block font-medium text-content">
+            Show advanced tools
+          </span>
+          <span className="block text-content-muted">
+            Adds an Advanced section to the sidebar listing those pages. This is
+            a preference for this browser; it grants no permissions, and every
+            page it lists is reachable by URL either way.
+          </span>
+        </span>
+      </label>
+    </section>
   );
 }
 

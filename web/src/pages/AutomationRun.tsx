@@ -210,7 +210,6 @@ function DecisionList({
                     <ApproveButton
                       runId={runId}
                       containerName={decision.containerName}
-                      containerId={decision.containerId}
                       recommendation={decision.recommendation}
                       onApproved={onChanged}
                     />
@@ -290,15 +289,11 @@ function RecordLinks({ decision }: { decision: AutomationDecision }) {
 export function ApproveButton({
   runId,
   containerName,
-  containerId,
   recommendation,
   onApproved,
 }: {
   runId: string;
   containerName: string;
-  /** For the plan link. Absent means the link is omitted, never that the
-   *  Approve button comes back. */
-  containerId?: string;
   /**
    * The planner's verdict, set on the decision by the decision function.
    * `manualReview` means no automation approval can authorise this.
@@ -343,14 +338,15 @@ export function ApproveButton({
         <span className="block text-xs text-content-muted">
           This update needs review of the plan before it can be applied.
         </span>
-        {containerId ? (
-          <Link
-            to={`/plans/container/${encodeURIComponent(containerId)}`}
-            className="text-xs text-accent hover:underline"
-          >
-            Review plan
-          </Link>
-        ) : null}
+        {/* To the page that can actually do it.
+          *
+          * Approving happens in one place -- the Update reviews list -- so a
+          * link offered as the remedy has to land there. It used to deep-link
+          * to the container's plan page, which showed the same verdict and had
+          * no control on it. */}
+        <Link to="/plans" className="text-xs text-accent hover:underline">
+          Review plan
+        </Link>
       </span>
     );
   }

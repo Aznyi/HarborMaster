@@ -226,7 +226,6 @@ function ApprovalRow({
         <ApproveDecision
           runId={decision.runId}
           containerName={decision.containerName}
-          containerId={decision.containerId}
           recommendation={decision.recommendation}
           onApproved={onApproved}
         />

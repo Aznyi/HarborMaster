@@ -142,13 +142,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderPlans() {
+function renderPlans(role: "viewer" | "operator" = "operator") {
+  // Wrapped in a session because the review list now carries the manual-review
+  // approval control, which asks whether this operator may approve. In the app
+  // every page is inside a session; this fixture simply had no need of one
+  // before.
   return render(
-    <MemoryRouter initialEntries={["/plans"]}>
-      <Routes>
-        <Route path="/plans" element={<ChangePlans />} />
-      </Routes>
-    </MemoryRouter>,
+    <TestSessionProvider session={testSession({ user: testUser(role) })}>
+      <MemoryRouter initialEntries={["/plans"]}>
+        <Routes>
+          <Route path="/plans" element={<ChangePlans />} />
+        </Routes>
+      </MemoryRouter>
+    </TestSessionProvider>,
   );
 }
 
@@ -330,15 +336,57 @@ it("requests a reassessment without applying anything", async () => {
 });
 
 // There is no control that applies a plan, because there is no such capability.
-it("offers no control that applies, executes, or approves a change", async () => {
+it("offers no control that applies or executes a change", async () => {
+  // Reviewing IS done here now -- see the manual-review tests below. What this
+  // page must still never offer is a control that changes a container: reading
+  // a verdict and applying one are different acts, and the page intro promises
+  // that nothing here pulls an image or recreates anything.
   mockApi(listRoutes([plan()]));
   renderPlans();
 
   await screen.findByText("web");
 
-  for (const forbidden of [/^apply/i, /^execute/i, /^approve/i, /^roll ?back/i, /^pull/i]) {
+  for (const forbidden of [/^apply/i, /^execute/i, /^roll ?back/i, /^pull/i]) {
     expect(screen.queryByRole("button", { name: forbidden })).not.toBeInTheDocument();
   }
+});
+
+// --------------------------------------------------------- manual review --
+
+/**
+ * The review happens on the review list.
+ *
+ * An update needing a person used to be routed to three screens -- the
+ * dashboard sent you to this list, the automation surfaces sent you to their
+ * own queue, and only the container's plan page had a control. The page named
+ * for the act could not perform it.
+ */
+it("offers the review on the row, for a plan that asks for one", async () => {
+  mockApi([
+    ...listRoutes([plan({ risk: { ...plan().risk, recommendation: "manualReview" } })]),
+    ["/plan-approvals/", { error: { code: "not_found" } }],
+  ]);
+  renderPlans();
+
+  const row = (await screen.findByText("web")).closest("li");
+  expect(row).not.toBeNull();
+  expect(
+    within(row as HTMLElement).getByRole("button", {
+      name: "Approve this exact update for web",
+    }),
+  ).toBeInTheDocument();
+});
+
+it("offers no review on a row that does not ask for one", async () => {
+  mockApi(listRoutes([plan()]));
+  renderPlans();
+
+  const row = (await screen.findByText("web")).closest("li");
+  expect(
+    within(row as HTMLElement).queryByTestId("plan-approval-action"),
+  ).not.toBeInTheDocument();
+  // And no approval lookup was made for it.
+  expect(requests.some((url) => url.includes("/plan-approvals/"))).toBe(false);
 });
 
 // -------------------------------------------------------- container view --

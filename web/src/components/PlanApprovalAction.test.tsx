@@ -5,13 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChangePlan } from "../api/planTypes";
 import { TestSessionProvider, testSession, testUser } from "../test/session";
-import { PlanApprovalPanel } from "./PlanApprovalPanel";
+import { PlanApprovalAction } from "./PlanApprovalAction";
 
 /**
- * The manual-review approval panel.
+ * The manual-review approval control.
  *
  * # The properties that matter
  *
+ *   - it lives on the Update reviews row and nowhere else, so the page named
+ *     for the act is the page that performs it;
+ *   - it makes NO request for a plan that does not ask for review: it renders
+ *     inside a list, and a request per row for an answer that cannot matter is
+ *     the amplification this page must not have;
  *   - it appears ONLY for a plan that asks for review. Offering the control
  *     anywhere else would imply the other plans need one;
  *   - the wording never suggests an override. "Force", "Ignore warnings" and
@@ -70,10 +75,10 @@ const approval = {
   valid: true,
 };
 
-function renderPanel(role: "viewer" | "operator" = "operator", p = plan()) {
+function renderAction(role: "viewer" | "operator" = "operator", p = plan()) {
   return render(
     <TestSessionProvider session={testSession({ user: testUser(role) })}>
-      <PlanApprovalPanel plan={p} />
+      <PlanApprovalAction plan={p} />
     </TestSessionProvider>,
   );
 }
@@ -99,24 +104,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("the plan approval panel", () => {
-  it("appears only for a plan that asks for review", () => {
+describe("the plan approval control", () => {
+  it("appears only for a plan that asks for review, and asks the server nothing otherwise", () => {
     for (const recommendation of ["proceed", "proceedWithCaution", "notRecommended", "unknown"] as const) {
-      const { unmount } = renderPanel(
+      const { unmount } = renderAction(
         "operator",
         plan({ risk: { ...plan().risk, recommendation } }),
       );
-      expect(screen.queryByText("Manual review required")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("plan-approval-action")).not.toBeInTheDocument();
       unmount();
     }
+    // The amplification guard: sixteen settled plans on a page must not be
+    // sixteen approval lookups.
+    expect(requests).toEqual([]);
   });
 
   it("asks for a review, and never for an override", async () => {
-    renderPanel();
+    renderAction();
 
-    expect(await screen.findByText("Manual review required")).toBeInTheDocument();
+    expect(await screen.findByTestId("plan-approval-action")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Approve this exact update" }),
+      screen.getByRole("button", { name: "Approve this exact update for web" }),
     ).toBeInTheDocument();
 
     // The words this control must never use.
@@ -129,15 +137,16 @@ describe("the plan approval panel", () => {
         ? jsonResponse(approval, 201)
         : jsonResponse({ error: { code: "notFound" } }, 404);
 
-    renderPanel();
+    renderAction();
     await userEvent.click(
-      await screen.findByRole("button", { name: "Approve this exact update" }),
+      await screen.findByRole("button", { name: "Approve this exact update for web" }),
     );
 
     await screen.findByTestId("approval-granted");
     expect(screen.getByText(/Approved by colby/)).toBeInTheDocument();
+    // Approving is not applying, and the compact form still says so.
     expect(
-      screen.getByText(/still run every normal safety check/i),
+      screen.getByText(/every safety check still runs before the container changes/i),
     ).toBeInTheDocument();
 
     const post = requests.find((r) => r.method === "POST");
@@ -160,7 +169,7 @@ describe("the plan approval panel", () => {
         explanation: "a newer change plan has replaced the one that was approved",
       });
 
-    renderPanel();
+    renderAction();
     const stale = await screen.findByTestId("approval-stale");
     expect(stale.textContent).toContain("A newer plan replaced this one");
     expect(stale.textContent).toContain("a newer change plan has replaced");
@@ -171,7 +180,7 @@ describe("the plan approval panel", () => {
   it("does not render a failed check as unapproved", async () => {
     respond = () => jsonResponse({ error: { code: "internal" } }, 500);
 
-    renderPanel();
+    renderAction();
     await waitFor(() =>
       expect(
         screen.getByText(/could not check whether this plan has been reviewed/i),
@@ -180,18 +189,18 @@ describe("the plan approval panel", () => {
   });
 
   it("offers a viewer no control", async () => {
-    renderPanel("viewer");
+    renderAction("viewer");
 
-    expect(await screen.findByText("Manual review required")).toBeInTheDocument();
+    expect(await screen.findByTestId("plan-approval-action")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Approve this exact update" }),
+      screen.queryByRole("button", { name: /Approve this exact update/ }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/needs the plan approval permission/i)).toBeInTheDocument();
   });
 
   it("has no serious or critical axe findings", async () => {
     respond = () => jsonResponse(approval);
-    renderPanel();
+    renderAction();
     await screen.findByTestId("approval-granted");
 
     const results = await axe.run(document.body, {

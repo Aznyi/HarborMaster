@@ -6,7 +6,7 @@ import { SessionProvider } from "./hooks/useSession";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { NAV_ITEMS } from "./components/AppShell";
+import { ADVANCED_NAV, PRIMARY_NAV } from "./components/AppShell";
 import type { HealthReport } from "./api/types";
 import { stubApi as stubAllEndpoints } from "./test/fixtures";
 
@@ -98,13 +98,22 @@ describe("App shell", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders navigation for every section", async () => {
+  it("renders the primary destinations, and only those", async () => {
     stubApi(healthyReport);
     renderApp();
 
     const nav = await shell();
-    for (const item of NAV_ITEMS) {
+    for (const item of PRIMARY_NAV) {
       expect(within(nav).getByRole("link", { name: item.label })).toBeInTheDocument();
+    }
+
+    // The specialised tools are the point of the change: they exist, they are
+    // routable, and the default sidebar does not put them in front of somebody
+    // who has not asked for them.
+    for (const item of ADVANCED_NAV) {
+      expect(
+        within(nav).queryByRole("link", { name: item.label }),
+      ).not.toBeInTheDocument();
     }
     await settle();
   });
@@ -176,12 +185,13 @@ describe("App shell", () => {
     stubApi(healthyReport);
     renderApp();
 
-    // The dependency panel is named "HarborMaster" and its cards are the
-    // three things everything else is read through.
-    await waitFor(() => expect(screen.getByText("Docker")).toBeInTheDocument());
-    expect(screen.getByText("Database")).toBeInTheDocument();
+    // Scoped to the page: the header's status detail reports the same Engine
+    // version, and this assertion is about the dashboard rendering it.
+    const main = await screen.findByRole("main");
+    await waitFor(() => expect(within(main).getByText("Docker")).toBeInTheDocument());
+    expect(within(main).getByText("Database")).toBeInTheDocument();
     // The Engine API version comes from the response, not from a constant.
-    expect(screen.getByText(/API 1\.51/)).toBeInTheDocument();
+    expect(within(main).getByText(/API 1\.51/)).toBeInTheDocument();
   });
 
   it("navigates between sections", async () => {
@@ -190,11 +200,11 @@ describe("App shell", () => {
     renderApp();
 
     const nav = await shell();
-    await user.click(within(nav).getByRole("link", { name: "Snapshots" }));
+    await user.click(within(nav).getByRole("link", { name: "Updates" }));
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: "Snapshots", level: 2 }),
+        screen.getByRole("heading", { name: "Updates", level: 2 }),
       ).toBeInTheDocument(),
     );
     await settle();

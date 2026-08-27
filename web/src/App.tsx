@@ -25,6 +25,7 @@ import { ContainerDetailPage } from "./pages/ContainerDetail";
 import { ContainerPlan } from "./pages/ContainerPlan";
 import { ContainerDrift } from "./pages/ContainerDrift";
 import { Containers } from "./pages/Containers";
+import { ActivitySection } from "./pages/ActivitySection";
 import { Dashboard } from "./pages/Dashboard";
 import { Dependencies } from "./pages/Dependencies";
 import { Drift } from "./pages/Drift";
@@ -36,6 +37,7 @@ import { ContainerPolicy } from "./pages/ContainerPolicy";
 import { Policies } from "./pages/Policies";
 import { PolicyViolations } from "./pages/PolicyViolations";
 import { Settings } from "./pages/Settings";
+import { UpdatesSection } from "./pages/UpdatesSection";
 import { SignIn } from "./pages/SignIn";
 import { SnapshotDetailPage } from "./pages/SnapshotDetail";
 import { SnapshotReadinessPage } from "./pages/SnapshotReadiness";
@@ -103,6 +105,20 @@ function AuthenticatedApp() {
     <AppShell health={health}>
       <Routes>
         <Route path="/" element={<Dashboard health={health} />} />
+
+        {/* Section landings. Transitional signposts, not implementations: they
+          * link to the pages below and hold no state of their own. Every route
+          * they point at still exists and is still reachable directly, so an
+          * existing bookmark is unaffected by this grouping.
+          */}
+        <Route
+          path="/updates"
+          element={<Guard permission="inventory:read"><UpdatesSection /></Guard>}
+        />
+        <Route
+          path="/activity"
+          element={<Guard permission="event:read"><ActivitySection /></Guard>}
+        />
 
         <Route
           path="/containers"

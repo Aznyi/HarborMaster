@@ -6,7 +6,6 @@ import { AcquireImageAction } from "../components/AcquireImageAction";
 import { DetailSection } from "../components/DetailSection";
 import { PageIntro } from "../components/PageIntro";
 import { Pagination } from "../components/Pagination";
-import { PlanApprovalPanel } from "../components/PlanApprovalPanel";
 import { PlanDigests } from "../components/PlanBadges";
 import { PlanCard, PlanTimeline } from "../components/PlanReasoning";
 import {
@@ -78,13 +77,6 @@ export function ContainerPlan() {
             <PlanCard plan={current} />
           </DetailSection>
 
-          {/* The review this plan asks for, and the one control that answers it.
-            *
-            * Placed directly under the assessment, because the assessment is
-            * what the operator is being asked to review. It renders nothing at
-            * all for a plan that does not ask for review.
-            */}
-          <PlanApprovalPanel plan={current} onChanged={state.refresh} />
 
           <DetailSection title="What is being compared">
             <PlanDigests plan={current} />

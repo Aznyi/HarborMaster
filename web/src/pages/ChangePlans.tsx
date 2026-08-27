@@ -16,6 +16,7 @@ import {
   RISK_BAND_LABELS,
   RISK_BAND_ORDER,
 } from "../api/planTypes";
+import { PlanApprovalAction } from "../components/PlanApprovalAction";
 import { PageIntro } from "../components/PageIntro";
 import { Pagination } from "../components/Pagination";
 import {
@@ -442,17 +443,28 @@ function PlanRow({ plan }: { plan: ChangePlan }) {
         </time>
       </div>
 
-      {/* Collapsed by default: the reasoning is the point, but twenty of them
-          expanded at once would drown the list. */}
-      <details className="mt-3">
-        <summary className="flex min-h-6 cursor-pointer items-center text-xs font-medium text-content-muted">
-          Why this verdict ({plan.risk.factors?.length ?? 0}{" "}
-          {plan.risk.factors?.length === 1 ? "factor" : "factors"})
-        </summary>
-        <div className="mt-2">
-          <PlanReasoning factors={plan.risk.factors} />
-        </div>
-      </details>
+      {/* The end of the review: the reasoning on the left, and -- for a plan
+          that asks for one -- the review itself on the right.
+        *
+        * The control is HERE rather than on the container's plan page because
+        * this is the page named for the act. It renders nothing at all for a
+        * plan that does not ask for review.
+        */}
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+        {/* Collapsed by default: the reasoning is the point, but twenty of them
+            expanded at once would drown the list. */}
+        <details className="min-w-0 flex-1">
+          <summary className="flex min-h-6 cursor-pointer items-center text-xs font-medium text-content-muted">
+            Why this verdict ({plan.risk.factors?.length ?? 0}{" "}
+            {plan.risk.factors?.length === 1 ? "factor" : "factors"})
+          </summary>
+          <div className="mt-2">
+            <PlanReasoning factors={plan.risk.factors} />
+          </div>
+        </details>
+
+        <PlanApprovalAction plan={plan} />
+      </div>
     </li>
   );
 }

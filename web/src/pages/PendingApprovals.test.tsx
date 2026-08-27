@@ -440,8 +440,11 @@ it("offers review, not approval, when the plan needs manual review", async () =>
 
   // And the one that can is named, with somewhere to do it.
   expect(within(row as HTMLElement).getByText(/Manual review required/i)).toBeInTheDocument();
+  // To the page that can actually approve it. Deep-linking to the container's
+  // plan page sent the operator somewhere that shows the same verdict and has
+  // no control on it.
   const link = within(row as HTMLElement).getByRole("link", { name: /Review plan/i });
-  expect(link).toHaveAttribute("href", `/plans/container/${containerID}`);
+  expect(link).toHaveAttribute("href", "/plans");
 });
 
 /** An ordinary held decision still gets the approve control. */

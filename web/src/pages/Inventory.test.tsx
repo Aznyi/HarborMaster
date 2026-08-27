@@ -1,4 +1,5 @@
 ﻿import { render, screen, waitFor, within } from "@testing-library/react";
+import { setAdvancedTools } from "../hooks/useAdvancedTools";
 import userEvent from "@testing-library/user-event";
 import { SessionProvider } from "../hooks/useSession";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -640,14 +641,23 @@ describe("Images page", () => {
 // ----------------------------------------------------------- navigation --
 
 describe("navigation", () => {
-  it("includes Images in the primary navigation", async () => {
+  it("lists Images under Advanced rather than in the default sidebar", async () => {
     stubApi();
     renderApp();
 
     const nav = await waitFor(() =>
       screen.getByRole("navigation", { name: /primary/i }),
     );
-    expect(within(nav).getByRole("link", { name: "Images" })).toBeInTheDocument();
+    // Not a default destination: the image list is a view of HarborMaster's
+    // records, not a thing an operator sets out to do.
+    expect(
+      within(nav).queryByRole("link", { name: "Images" }),
+    ).not.toBeInTheDocument();
+
+    setAdvancedTools(true);
+    expect(
+      await within(nav).findByRole("link", { name: "Images" }),
+    ).toBeInTheDocument();
 
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /your containers/i })).toBeInTheDocument(),

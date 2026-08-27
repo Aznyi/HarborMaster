@@ -1,3 +1,4 @@
+import { setAdvancedTools } from "../hooks/useAdvancedTools";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
@@ -284,10 +285,34 @@ describe("role-aware rendering", () => {
     renderWith("administrator");
     const nav = await screen.findByRole("navigation", { name: /primary/i });
 
-    expect(within(nav).getByRole("link", { name: "Accounts" })).toBeInTheDocument();
+    // Both are specialised tools, so they live under Advanced. What this test
+    // is about is the ROLE: an administrator is offered them and a viewer is
+    // not, whether or not the section is expanded.
+    setAdvancedTools(true);
+
+    expect(
+      await within(nav).findByRole("link", { name: "Accounts" }),
+    ).toBeInTheDocument();
     expect(
       within(nav).getByRole("link", { name: "Security audit" }),
     ).toBeInTheDocument();
+  });
+
+  it("offers neither to a viewer, even with advanced tools shown", async () => {
+    renderWith("viewer");
+    const nav = await screen.findByRole("navigation", { name: /primary/i });
+    setAdvancedTools(true);
+
+    // Showing advanced tools is a density preference. It grants nothing, and
+    // the permission filter is unchanged underneath it.
+    await waitFor(() =>
+      expect(
+        within(nav).queryByRole("link", { name: "Accounts" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      within(nav).queryByRole("link", { name: "Security audit" }),
+    ).not.toBeInTheDocument();
   });
 
   // Hiding a link is not the access control -- the server refuses regardless --

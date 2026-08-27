@@ -5,8 +5,10 @@ import type { ReactNode } from "react";
 import type { ResourceState } from "../hooks/useApiResource";
 import type { HealthReport } from "../api/types";
 import type { Permission, PublicUser } from "../api/authTypes";
+import { useAdvancedTools } from "../hooks/useAdvancedTools";
 import { useSession } from "../hooks/useSession";
-import { ConnectivityIndicator } from "./ConnectivityIndicator";
+import { AccountMenu } from "./AccountMenu";
+import { SystemStatus } from "./SystemStatus";
 
 export interface NavItem {
   label: string;
@@ -28,23 +30,50 @@ export interface NavItem {
   permission?: Permission;
 }
 
-/** Primary navigation. Order is the operator's expected workflow. */
-export const NAV_ITEMS: readonly NavItem[] = [
+/**
+ * Primary navigation: the six things a homelab operator actually does.
+ *
+ * # Why this is six and not twenty-two
+ *
+ * The sidebar used to list every stage of HarborMaster's update lifecycle --
+ * plans, acquisitions, executions, rollbacks, drift, snapshots -- as separate
+ * destinations. That is an accurate map of the ENGINE and a poor map of the
+ * job. Somebody who wants their containers kept up to date should not have to
+ * learn the difference between an acquisition and an execution to find out
+ * whether anything happened.
+ *
+ * Nothing was removed. Every one of those pages is still routable by URL and
+ * still listed under ADVANCED_NAV; what changed is which of them the default
+ * sidebar puts in front of somebody who has not asked for them.
+ */
+export const PRIMARY_NAV: readonly NavItem[] = [
   { label: "Dashboard", path: "/" },
   { label: "Containers", path: "/containers", permission: "inventory:read" },
+  // The section landings gate on the permission their FIRST destination needs,
+  // so the sidebar never offers a section whose contents are all refused.
+  { label: "Updates", path: "/updates", permission: "inventory:read" },
+  { label: "Automation", path: "/automation", permission: "automation:read" },
+  { label: "Activity", path: "/activity", permission: "event:read" },
+  { label: "Settings", path: "/settings" },
+] as const;
+
+/**
+ * The specialised tools, shown only when an operator asks for them.
+ *
+ * Every entry keeps the permission it has always had. This list is about
+ * DENSITY, not access: the routes are unchanged, the guards are unchanged, and
+ * a bookmark to any of them still works whether or not this section is shown.
+ */
+export const ADVANCED_NAV: readonly NavItem[] = [
   { label: "Images", path: "/images", permission: "inventory:read" },
-  { label: "Updates", path: "/images/updates", permission: "inventory:read" },
+  { label: "Available updates", path: "/images/updates", permission: "inventory:read" },
   { label: "Snapshots", path: "/snapshots", permission: "snapshot:read" },
   { label: "Drift", path: "/drift", permission: "drift:read" },
   { label: "Update reviews", path: "/plans", permission: "plan:read" },
   { label: "Image downloads", path: "/acquisitions", permission: "acquisition:read" },
   { label: "Update history", path: "/executions", permission: "execution:read" },
   { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
-  { label: "Automation", path: "/automation", permission: "automation:read" },
   { label: "Update policies", path: "/update-policies", permission: "automation:read" },
-  // Next to the update machinery rather than under administration: a dependency
-  // decides WHEN an update may happen, which is the same question the two items
-  // above answer. Listed for every role, because reading is `dependency:read`.
   { label: "Update dependencies", path: "/dependencies", permission: "dependency:read" },
   { label: "Paused", path: "/automation/paused", permission: "automation:read" },
   { label: "Compliance", path: "/compliance", permission: "policy:read" },
@@ -53,14 +82,32 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { label: "Events", path: "/events", permission: "event:read" },
   { label: "Accounts", path: "/users", permission: "user:manage" },
   { label: "Security audit", path: "/audit", permission: "audit:read" },
-  { label: "Your account", path: "/account" },
-  { label: "Settings", path: "/settings" },
 ] as const;
 
-/** The destinations one account may see. */
-export function visibleNavItems(user: PublicUser | null): readonly NavItem[] {
+/**
+ * Every destination the sidebar can name, primary or advanced.
+ *
+ * `Your account` is deliberately absent from both lists: it moved into the
+ * header's account menu, which is where somebody looks for it.
+ */
+export const NAV_ITEMS: readonly NavItem[] = [
+  ...PRIMARY_NAV,
+  ...ADVANCED_NAV,
+  { label: "Your account", path: "/account" },
+] as const;
+
+/**
+ * The destinations one account may see, from any list.
+ *
+ * Filtering is a usability property, not the access control: the server refuses
+ * the request regardless, and typing the URL gets a 403 rather than a page.
+ */
+export function visibleNavItems(
+  user: PublicUser | null,
+  items: readonly NavItem[] = NAV_ITEMS,
+): readonly NavItem[] {
   if (!user) return [];
-  return NAV_ITEMS.filter(
+  return items.filter(
     (item) => !item.permission || user.permissions.includes(item.permission),
   );
 }
@@ -81,7 +128,12 @@ export function AppShell({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
   const session = useSession();
-  const items = visibleNavItems(session.user);
+  const advancedEnabled = useAdvancedTools();
+
+  const primary = visibleNavItems(session.user, PRIMARY_NAV);
+  // Computed even when hidden, so the section can be skipped entirely when an
+  // account holds none of the permissions behind it.
+  const advanced = visibleNavItems(session.user, ADVANCED_NAV);
 
   // Navigating away must close the drawer, or the overlay traps the new page.
   useEffect(() => setDrawerOpen(false), [location.pathname]);
@@ -99,7 +151,8 @@ export function AppShell({
         <Sidebar
           open={drawerOpen}
           onClose={() => setDrawerOpen(false)}
-          items={items}
+          primary={primary}
+          advanced={advancedEnabled ? advanced : []}
         />
 
         <div className="flex min-h-screen flex-col">
@@ -118,30 +171,18 @@ export function AppShell({
               {pageTitle(location.pathname)}
             </h1>
 
-            <ConnectivityIndicator health={health} />
-
-            <div className="flex items-center gap-2 text-sm">
-              <span className="hidden text-content-muted sm:inline">
-                {session.user?.username}
-              </span>
-              {session.user ? (
-                <span className="rounded bg-accent-soft px-1.5 py-0.5 text-xs text-accent">
-                  {session.user.role}
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => void session.signOut()}
-                className="rounded-lg border border-border-subtle px-3 py-1.5 text-sm font-medium"
-              >
-                Sign out
-              </button>
-            </div>
+            <SystemStatus health={health} />
+            <AccountMenu />
           </header>
 
           <main
             id="main-content"
-            className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8"
+            // Wider than the old max-w-6xl (72rem). HarborMaster's pages are
+            // mostly tables of containers, digests and timestamps, and 1152px
+            // left a third of a desktop display empty while those tables
+            // wrapped. Individual components still constrain their own prose
+            // with max-w-prose, so text does not become a 1376px line.
+            className="mx-auto w-full max-w-[86rem] flex-1 px-4 py-6 sm:px-6 sm:py-8"
           >
             {children}
           </main>
@@ -174,11 +215,13 @@ function pageTitle(pathname: string): string {
 function Sidebar({
   open,
   onClose,
-  items,
+  primary,
+  advanced,
 }: {
   open: boolean;
   onClose: () => void;
-  items: readonly NavItem[];
+  primary: readonly NavItem[];
+  advanced: readonly NavItem[];
 }) {
   return (
     <>
@@ -193,11 +236,11 @@ function Sidebar({
 
       <aside
         id="primary-navigation"
-        className={`fixed inset-y-0 left-0 z-40 w-64 border-r border-border-subtle bg-surface-raised transition-transform lg:sticky lg:top-0 lg:z-0 lg:h-screen lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 w-64 overflow-y-auto border-r border-border-subtle bg-surface-raised transition-transform lg:sticky lg:top-0 lg:z-0 lg:h-screen lg:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="flex h-full flex-col gap-6 p-4">
+        <div className="flex min-h-full flex-col gap-6 p-4">
           <div className="flex items-center gap-2 px-2 py-1">
             <span
               aria-hidden="true"
@@ -210,26 +253,58 @@ function Sidebar({
             </span>
           </div>
 
-          <nav aria-label="Primary" className="flex flex-col gap-1">
-            {items.map((item) => (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                end={item.path === "/"}
-                className={({ isActive }) =>
-                  `rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    isActive
-                      ? "bg-accent-soft text-accent"
-                      : "text-content-muted hover:bg-surface-sunken hover:text-content"
-                  }`
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
+          {/* One landmark for both groups. Two navigation landmarks in a
+              sidebar makes a screen reader announce a section boundary that
+              is not one; the heading below does that job instead. */}
+          <nav aria-label="Primary" className="flex flex-col gap-6">
+            <div className="flex flex-col gap-1">
+              {primary.map((item) => (
+                <SidebarLink key={item.path} item={item} />
+              ))}
+            </div>
+
+            {advanced.length > 0 ? (
+              <div className="flex flex-col gap-1">
+                <h2
+                  id="advanced-tools-heading"
+                  className="px-3 pb-1 text-xs font-semibold uppercase tracking-wide text-content-muted"
+                >
+                  Advanced
+                </h2>
+                <div
+                  aria-labelledby="advanced-tools-heading"
+                  role="group"
+                  className="flex flex-col gap-1"
+                >
+                  {advanced.map((item) => (
+                    <SidebarLink key={item.path} item={item} />
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </nav>
         </div>
       </aside>
     </>
+  );
+}
+
+function SidebarLink({ item }: { item: NavItem }) {
+  return (
+    <NavLink
+      to={item.path}
+      // `end` on the dashboard alone, as before: every other destination wants
+      // its nested detail pages to keep the section highlighted.
+      end={item.path === "/"}
+      className={({ isActive }) =>
+        `rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+          isActive
+            ? "bg-accent-soft text-accent"
+            : "text-content-muted hover:bg-surface-sunken hover:text-content"
+        }`
+      }
+    >
+      {item.label}
+    </NavLink>
   );
 }
