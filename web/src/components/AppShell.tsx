@@ -53,7 +53,7 @@ export const PRIMARY_NAV: readonly NavItem[] = [
   // so the sidebar never offers a section whose contents are all refused.
   { label: "Updates", path: "/updates", permission: "plan:read" },
   { label: "Automation", path: "/automation", permission: "automation:read" },
-  { label: "Activity", path: "/activity", permission: "event:read" },
+  { label: "Activity", path: "/activity", permission: "execution:read" },
   { label: "Settings", path: "/settings" },
 ] as const;
 

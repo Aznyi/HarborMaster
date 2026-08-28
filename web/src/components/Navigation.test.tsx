@@ -272,17 +272,24 @@ it("routes /updates to the consolidated workspace, not a landing page", async ()
   ).not.toBeInTheDocument();
 });
 
-it("routes the activity landing the same way", async () => {
+it("routes /activity to the consolidated workspace, not a landing page", async () => {
+  // Phase 4 replaced the transitional landing, as Phase 2 did for /updates.
+  // The Phase 1 property -- the sidebar entry leads somewhere useful -- now
+  // means the history workspace rather than a menu of three other pages.
   renderAt("/activity");
 
   const main = await screen.findByRole("main");
   expect(
     within(main).getByRole("heading", { name: "Activity", level: 2 }),
   ).toBeInTheDocument();
-  expect(within(main).getByRole("link", { name: /events/i })).toHaveAttribute(
-    "href",
-    "/events",
-  );
+  expect(
+    within(main).getByRole("tablist", { name: /activity type/i }),
+  ).toBeInTheDocument();
+
+  // Not the old signpost: no card linking onwards to a separate Events page.
+  expect(
+    within(main).queryByRole("link", { name: /^Events$/i }),
+  ).not.toBeInTheDocument();
 });
 
 // ------------------------------------------------------------------ header --

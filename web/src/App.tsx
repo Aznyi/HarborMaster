@@ -25,7 +25,7 @@ import { ContainerDetailPage } from "./pages/ContainerDetail";
 import { ContainerPlan } from "./pages/ContainerPlan";
 import { ContainerDrift } from "./pages/ContainerDrift";
 import { Containers } from "./pages/Containers";
-import { ActivitySection } from "./pages/ActivitySection";
+import { Activity } from "./pages/Activity";
 import { Dashboard } from "./pages/Dashboard";
 import { Dependencies } from "./pages/Dependencies";
 import { Drift } from "./pages/Drift";
@@ -106,9 +106,9 @@ function AuthenticatedApp() {
       <Routes>
         <Route path="/" element={<Dashboard health={health} />} />
 
-        {/* /updates is the consolidated update workspace (Phase 2). /activity
-          * is still a transitional signpost. Every specialised route below
-          * remains, unredirected, so existing bookmarks are unaffected.
+        {/* /updates (Phase 2) and /activity (Phase 4) are the consolidated
+          * workspaces. Every specialised route below remains, unredirected, so
+          * existing bookmarks are unaffected.
           */}
         <Route
           path="/updates"
@@ -116,7 +116,7 @@ function AuthenticatedApp() {
         />
         <Route
           path="/activity"
-          element={<Guard permission="event:read"><ActivitySection /></Guard>}
+          element={<Guard permission="execution:read"><Activity /></Guard>}
         />
 
         <Route
