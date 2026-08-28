@@ -358,10 +358,12 @@ function ActivityRow({
               <RecreateContainerAction
                 acquisition={entry.acquisition}
                 onRequested={onChanged}
+                label="Apply update"
               />
             ) : (
               <p className="text-xs text-content-muted">
-                Recreating the container needs the execution permission.
+                Applying an update recreates the container, which needs the
+                execution permission.
               </p>
             )
           ) : null}

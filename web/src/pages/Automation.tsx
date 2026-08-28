@@ -19,6 +19,7 @@ import {
 } from "../components/AutomationBadges";
 import { AutomationOnboarding } from "../components/AutomationOnboarding";
 import type { FirstRunFacts } from "../api/firstRun";
+import { describeFirstRun, firstRunExplanation } from "../api/firstRun";
 import type { HealthReport } from "../api/types";
 import type { ResourceState } from "../hooks/useApiResource";
 import { useInventory } from "../hooks/useContainers";
@@ -119,6 +120,25 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
     readinessKnown: upcoming.status === "ready" && !upcoming.error,
   };
 
+  /*
+   * Which first-run states the status badge above already answers.
+   *
+   * `active` and `nothingEligible` differ from each other only in the
+   * eligibility sentence, which is carried across as `settledNote`.
+   * `needsAttention` adds nothing at all: AutomationAttention below names every
+   * waiting thing AND links to the queue that clears it, which the onboarding
+   * block did not.
+   */
+  const firstRun = describeFirstRun(facts);
+  const settled =
+    firstRun === "active" ||
+    firstRun === "nothingEligible" ||
+    firstRun === "needsAttention";
+  const settledNote =
+    firstRun === "active" || firstRun === "nothingEligible"
+      ? firstRunExplanation(firstRun, facts)
+      : undefined;
+
   return (
     <div className="space-y-6">
       <PageIntro
@@ -130,19 +150,44 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
         }
       />
 
-      <AutomationOnboarding
-        facts={facts}
-        features={health.data?.features ?? null}
-        requiredCapabilities={engine?.requiredCapabilities ?? []}
-        mayManagePolicies={mayManage}
-      />
+      {/*
+        The engine's state, said once.
 
-      <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />
+        Before this batch the page opened with three consecutive statements of
+        the same fact: the onboarding heading ("Automatic updates are active"),
+        the warning banner ("The update engine is on"), and then this section's
+        own heading and badge. An operator read three paragraphs to learn one
+        thing, and the actionable content began below the fold.
+
+        Now the status section is first and carries the badge, the engine's own
+        detail sentence, the one extra sentence a settled state earns, and the
+        safety warning -- which is NOT shortened, because the thing it warns
+        about has not changed.
+      */}
+      <AutomationSummary state={status} note={settledNote}>
+        <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />
+      </AutomationSummary>
 
       <SelfUpdateNotice self={engine?.self} />
 
-      {/* Is it on, and what is it doing. */}
-      <AutomationSummary state={status} />
+      {/*
+        Onboarding, only while it has an instruction to give.
+
+        Its purpose is getting a new deployment to a working automation setup,
+        and in the three SETTLED states it had nothing left to say that the
+        badge above and the attention panel below do not say better. Every
+        unsettled state -- starting up, assessing, engine off, no policy,
+        observing, or unable to answer -- still renders it in full, including
+        its capability checklist and its actions.
+      */}
+      {settled ? null : (
+        <AutomationOnboarding
+          facts={facts}
+          features={health.data?.features ?? null}
+          requiredCapabilities={engine?.requiredCapabilities ?? []}
+          mayManagePolicies={mayManage}
+        />
+      )}
 
       {/* Only when something is genuinely waiting. */}
       <AutomationAttention

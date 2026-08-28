@@ -51,7 +51,20 @@ import { StatusBadge } from "./StatusBadge";
  */
 export function AutomationSummary({
   state,
+  note,
+  children,
 }: {
+  /**
+   * One extra sentence, when the settled state has one worth reading.
+   *
+   * "3 containers are currently eligible" and "no containers are currently
+   * eligible" are the two that survived the Phase-6-B condensation: they are
+   * the only part of the onboarding block that was not already said by the
+   * badge two lines above.
+   */
+  note?: string;
+  /** The engine's safety warning, rendered inside the one status section. */
+  children?: React.ReactNode;
   /**
    * The whole resource, not just the payload.
    *
@@ -124,6 +137,15 @@ export function AutomationSummary({
         <StatusBadge tone={engineState.tone} label={engineState.label} />
       </div>
       <p className="max-w-prose text-sm text-content-muted">{engineState.detail}</p>
+
+      {note ? (
+        <p className="max-w-prose text-sm text-content-muted">{note}</p>
+      ) : null}
+
+      {/* The warning lives with the state it qualifies. As a free-standing
+          banner above this section it was the third consecutive restatement of
+          "automatic updates are on"; here it is the second half of the first. */}
+      {children}
 
       <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map((card) => (

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 
 import type { UpdateRowModel } from "../api/updateWorkspace";
+import { isUndetermined } from "../api/updateWorkspace";
 import { AcquireImageAction } from "./AcquireImageAction";
 import { PlanApprovalAction } from "./PlanApprovalAction";
 import { RecreateContainerAction } from "./RecreateContainerAction";
@@ -53,8 +54,10 @@ export function UpdateAction({
   const mayExecute = session.can("execution:create");
 
   // Nothing to move onto. Saying so beats offering a control that the server
-  // would refuse, and the row's details carry the reason.
-  if (assessment.kind === "unknown") {
+  // would refuse, and the row's details carry the reason. All three no-verdict
+  // kinds are covered: a row HarborMaster is not tracking has no more to apply
+  // than one it could not judge.
+  if (isUndetermined(assessment.kind)) {
     return (
       <p className="text-xs text-content-muted">
         Nothing to apply until this can be assessed.
@@ -77,7 +80,11 @@ export function UpdateAction({
         <p className="text-xs text-content-muted">
           Image downloaded and verified.
         </p>
-        <RecreateContainerAction acquisition={acquisition} onRequested={onChanged} />
+        <RecreateContainerAction
+          acquisition={acquisition}
+          onRequested={onChanged}
+          label="Apply update"
+        />
       </div>
     );
   }

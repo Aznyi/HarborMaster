@@ -1,3 +1,4 @@
+import { formatImageReference } from "../api/presentation";
 import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 
@@ -35,15 +36,32 @@ const PAGE_SIZE = 25;
  * something anybody scans a column for, and the space they were using now
  * carries the two things an operator was previously opening every row to find.
  *
- * "Needs attention" and "Update" have no `sort` because the server does not
- * order on them. A header that looked sortable and silently was not would be
- * worse than one that plainly is not.
+ * "HarborMaster" and "Update" have no `sort` because the server does not order
+ * on them. A header that looked sortable and silently was not would be worse
+ * than one that plainly is not.
+ *
+ * # Why the assessment column is called "HarborMaster"
+ *
+ * It was called "Needs attention", and most of what it contains does not need
+ * any: "Up to date", "Not tracked" and "Not checked" are the three commonest
+ * values on a healthy host, and labelling them as attention taught operators
+ * that the column cries wolf.
+ *
+ * The column is not one subject. It carries HarborMaster's update verdict, its
+ * automation state, its dependency findings, and the containers it is keeping
+ * as evidence -- so no word narrower than the product name covers it
+ * honestly. "Assessment" would have fitted the update verdicts and mislabelled
+ * the rest.
+ *
+ * It is also the only naming that cannot be confused with the two columns
+ * beside it, which is the other requirement: "State" is Docker's, "Health" is
+ * the container's own healthcheck, and this one is ours.
  */
 const COLUMNS: { key: string; label: string; sort?: string }[] = [
   { key: "name", label: "Name", sort: "name" },
   { key: "state", label: "State", sort: "state" },
   { key: "health", label: "Health", sort: "health" },
-  { key: "attention", label: "Needs attention" },
+  { key: "attention", label: "HarborMaster" },
   { key: "image", label: "Image", sort: "image" },
   { key: "update", label: "Update" },
   { key: "ports", label: "Ports" },
@@ -351,7 +369,7 @@ function ContainerTable({
             this page need{needing === 1 ? "s" : ""} attention.
           </span>{" "}
           <span className="text-content-muted">
-            Look at the Needs attention column.
+            Look at the HarborMaster column.
           </span>
         </p>
       ) : null}
@@ -447,6 +465,7 @@ function ContainerTable({
 
 function ContainerRow({ container }: { container: ContainerListRow }) {
   const attention = rowAttention(container.attention);
+  const image = formatImageReference(container.image);
 
   return (
     <tr className="border-b border-border-subtle last:border-0 align-top hover:bg-surface-sunken">
@@ -506,8 +525,16 @@ function ContainerRow({ container }: { container: ContainerListRow }) {
       </td>
 
       <td className="px-4 py-3">
-        <span className="block break-all font-mono text-xs">
-          {container.image.raw}
+        {/*
+          The digest is abbreviated, the tag never is, and the complete
+          reference is on the title so it is available without leaving the row.
+          The container's own page carries it in full and unabbreviated.
+        */}
+        <span
+          className="block break-all font-mono text-xs"
+          title={image.abbreviated ? image.full : undefined}
+        >
+          {image.display}
         </span>
         {/*
           What the container FOLLOWS, under what it RUNS. A container

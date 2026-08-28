@@ -24,8 +24,31 @@ import type { BadgeTone } from "../components/StatusBadge";
  * row's details.
  */
 
-/** What HarborMaster makes of the change, for somebody deciding. */
-export type AssessmentKind = "ready" | "review" | "against" | "unknown";
+/**
+ * What HarborMaster makes of the change, for somebody deciding.
+ *
+ * # Why three kinds of "no verdict" rather than one
+ *
+ * They have different remedies, and collapsing them told an operator to go and
+ * investigate a hundred containers about which there was nothing to
+ * investigate.
+ *
+ *   - `untracked`  -- the reference can never be looked up. Nothing to do, ever.
+ *   - `unchecked`  -- no lookup has happened yet. Wait; it resolves itself.
+ *   - `unknown`    -- a lookup happened and no reliable conclusion came out of
+ *                     it. This is the one that may deserve a person.
+ *
+ * The split is read off `plan.registryStatus`, a required field with a closed
+ * server-side vocabulary. Nothing here parses an image string or guesses from a
+ * tag name.
+ */
+export type AssessmentKind =
+  | "ready"
+  | "review"
+  | "against"
+  | "untracked"
+  | "unchecked"
+  | "unknown";
 
 export interface Assessment {
   kind: AssessmentKind;
@@ -36,24 +59,73 @@ export interface Assessment {
 }
 
 /**
+ * Why HarborMaster reached no verdict, when it reached none.
+ *
+ * Read from `registryStatus`, which the server sets from the outcome of the
+ * most recent lookup and which the risk model already treats as decisive: both
+ * `unsupported` and `pending` contribute an unknown-severity factor, and an
+ * unknown-severity factor forces the recommendation to `unknown`. So a plan in
+ * either state can never carry a real verdict, and reading the reason off it
+ * cannot override one.
+ *
+ * Every other status -- `ok`, `failed`, `rateLimited`, `unauthorized`,
+ * `notFound` -- means a lookup was attempted and either succeeded without
+ * settling the question or did not succeed. All of those are "cannot
+ * determine", because the operator's next move is the same for all of them:
+ * look, or wait and look again.
+ */
+function undeterminedAssessment(plan: ChangePlan, summary: string): Assessment {
+  switch (plan.registryStatus) {
+    case "unsupported":
+      return {
+        kind: "untracked",
+        label: "Not tracked",
+        tone: "neutral",
+        summary:
+          summary ||
+          "This image reference names no registry that can be looked up, so " +
+            "no update will ever be found for it.",
+      };
+    case "pending":
+      return {
+        kind: "unchecked",
+        label: "Not checked yet",
+        tone: "neutral",
+        summary:
+          summary ||
+          "This image has not been looked up yet. The check runs on its own " +
+            "schedule; nothing is required.",
+      };
+    default:
+      return {
+        kind: "unknown",
+        label: "Cannot determine",
+        tone: "neutral",
+        summary:
+          summary ||
+          "HarborMaster looked and could not reach a reliable conclusion. " +
+            "This is the absence of a verdict, not a mild one.",
+      };
+  }
+}
+
+/**
  * Reads the assessment off the plan.
  *
- * A plan with no proposed target is `unknown` regardless of its risk band. It
+ * A plan with no proposed target has no verdict regardless of its risk band. It
  * proposes nothing, so there is nothing to be ready or unready about -- and its
- * band is scored against a change that does not exist.
+ * band is scored against a change that does not exist. WHY there is no target
+ * is then read from the registry status, because "there is nothing to find" and
+ * "we could not find out" are different answers.
  */
 export function assessmentOf(plan: ChangePlan): Assessment {
   const summary = plan.risk?.summary ?? "";
 
   if (!plan.proposedImage || !plan.proposedDigest) {
-    return {
-      kind: "unknown",
-      label: "Cannot advise",
-      tone: "neutral",
-      summary:
-        summary ||
-        "No target was proposed, so there is nothing to move onto yet.",
-    };
+    return undeterminedAssessment(
+      plan,
+      summary || "No target was proposed, so there is nothing to move onto yet.",
+    );
   }
 
   switch (plan.risk?.recommendation) {
@@ -66,8 +138,22 @@ export function assessmentOf(plan: ChangePlan): Assessment {
     case "notRecommended":
       return { kind: "against", label: "Not recommended", tone: "danger", summary };
     default:
-      return { kind: "unknown", label: "Cannot advise", tone: "neutral", summary };
+      // Only reached when the planner declined to advise, so the reason is
+      // read here too rather than being flattened into one grey label.
+      return undeterminedAssessment(plan, summary);
   }
+}
+
+/** The kinds that carry no verdict, and so offer nothing to apply. */
+export const UNDETERMINED_KINDS = [
+  "untracked",
+  "unchecked",
+  "unknown",
+] as const satisfies readonly AssessmentKind[];
+
+/** True when the row proposes nothing an operator could act on. */
+export function isUndetermined(kind: AssessmentKind): boolean {
+  return (UNDETERMINED_KINDS as readonly AssessmentKind[]).includes(kind);
 }
 
 /** What automation will do about this container, if anything. */
@@ -198,42 +284,58 @@ export function buildUpdateRows(
     .sort((a, b) => a.plan.containerName.localeCompare(b.plan.containerName));
 }
 
-/** The counts the header reports. */
+/**
+ * The counts the header reports.
+ *
+ * # The invariant
+ *
+ * `ready + needsReview + notRecommended + untracked + unchecked + undetermined`
+ * equals the number of rows, exactly. Every row lands in one bucket and no row
+ * lands in two, so the cards can be read as a partition rather than as six
+ * overlapping filters. `available` is a DERIVED total over the first three and
+ * is the only figure that double-counts anything, which is why it is named for
+ * what it is rather than sitting among the others as a seventh state.
+ */
 export interface UpdateSummary {
+  /** Rows that propose a move somewhere. The sum of the first three below. */
   available: number;
+
   ready: number;
   needsReview: number;
+  notRecommended: number;
+
+  /** No verdict, and no lookup is possible. */
+  untracked: number;
+  /** No verdict yet, because nothing has been looked up. */
+  unchecked: number;
+  /** No verdict, after a lookup that settled nothing. */
   undetermined: number;
 }
 
 export function summarise(rows: readonly UpdateRowModel[]): UpdateSummary {
-  let ready = 0;
-  let needsReview = 0;
-  let undetermined = 0;
+  const counts: Record<AssessmentKind, number> = {
+    ready: 0,
+    review: 0,
+    against: 0,
+    untracked: 0,
+    unchecked: 0,
+    unknown: 0,
+  };
 
-  for (const row of rows) {
-    switch (row.assessment.kind) {
-      case "ready":
-        ready += 1;
-        break;
-      case "review":
-        needsReview += 1;
-        break;
-      case "unknown":
-        undetermined += 1;
-        break;
-      default:
-        break;
-    }
-  }
+  for (const row of rows) counts[row.assessment.kind] += 1;
 
-  // "Available" is what proposes a move somewhere, which is what an operator
-  // means by the word. A plan that could not be assessed proposes nothing.
-  const available = rows.filter(
-    (row) => row.assessment.kind !== "unknown",
-  ).length;
-
-  return { available, ready, needsReview, undetermined };
+  return {
+    // "Available" is what proposes a move somewhere, which is what an operator
+    // means by the word. A row with no verdict proposes nothing, and none of
+    // the three no-verdict kinds is folded in here.
+    available: counts.ready + counts.review + counts.against,
+    ready: counts.ready,
+    needsReview: counts.review,
+    notRecommended: counts.against,
+    untracked: counts.untracked,
+    unchecked: counts.unchecked,
+    undetermined: counts.unknown,
+  };
 }
 
 /** Which rows a tab shows. */
@@ -246,6 +348,7 @@ export function filterRows(
   switch (tab) {
     case "available":
       // Actionable now: it proposes something and is not waiting on a person.
+      // The tab's badge counts exactly this set -- see `availableTabCount`.
       return rows.filter(
         (row) => row.assessment.kind === "ready" || row.assessment.kind === "against",
       );
@@ -254,4 +357,15 @@ export function filterRows(
     case "all":
       return [...rows];
   }
+}
+
+/**
+ * What the "Available" tab's badge says.
+ *
+ * The badge used to report `ready` while the tab itself also listed
+ * `notRecommended` rows, so a tab labelled 3 could open onto five rows. One
+ * function now answers both questions.
+ */
+export function availableTabCount(summary: UpdateSummary): number {
+  return summary.ready + summary.notRecommended;
 }

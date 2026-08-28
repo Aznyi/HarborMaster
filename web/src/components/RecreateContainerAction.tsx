@@ -26,6 +26,21 @@ import {
  * single-click control for an operation that takes a service down is the wrong
  * design, and a name that has to be typed is one an operator has to have read.
  *
+ * # Why the button can be called two things
+ *
+ * The OPERATION has one name and one meaning: HarborMaster stops the container
+ * and recreates it from its own recorded configuration on the acquired image.
+ * That is what the confirmation says, in those words, every time.
+ *
+ * The BUTTON is named for what the person pressing it came to do. In the
+ * Updates and Activity workspaces they came to apply an update, and calling the
+ * control "Recreate container" there asked them to translate. On the
+ * acquisition record -- an advanced page about the download itself -- the
+ * technical name is the accurate one and stays.
+ *
+ * Nothing else varies. Same component, same permission, same two-step typed
+ * confirmation, same `recreateForAcquisition` call, same server preflight.
+ *
  * # Why the digest is shown rather than the tag
  *
  * A tag is a name and can move. Asking an operator to approve "nginx:1.27.1"
@@ -36,11 +51,17 @@ import {
 export function RecreateContainerAction({
   acquisition,
   onRequested,
+  label = "Recreate container",
 }: {
   /** The SUCCEEDED acquisition to apply. The only thing the request carries. */
   acquisition: Acquisition;
   /** Called once a request has been accepted, so the caller can refresh. */
   onRequested?: () => void;
+  /**
+   * What the button says. Presentation only: it changes no behaviour, no
+   * permission, and nothing about the confirmation the operator must read.
+   */
+  label?: string;
 }) {
   /*
    * What depends on this container, read BEFORE the operator confirms.
@@ -129,7 +150,7 @@ export function RecreateContainerAction({
           // available to someone who only hovers.
           title="Stops this container and replaces it with one built from its own configuration on the downloaded image. Rollback is NOT automatic."
         >
-          Recreate container
+          {label}
         </button>
       ) : (
         <div

@@ -69,7 +69,8 @@ it("answers the four questions from server-supplied counts", () => {
   expect(within(card("Updates")).getByText("15")).toBeInTheDocument();
   expect(within(card("Updates")).getByText("3 need review")).toBeInTheDocument();
   expect(within(card("Automation")).getByText("On")).toBeInTheDocument();
-  expect(within(card("Needs attention")).getByText("2")).toBeInTheDocument();
+  // The unit is part of the value: "2" alone reads as a container count.
+  expect(within(card("Needs attention")).getByText("2 issues")).toBeInTheDocument();
 });
 
 it("deep-links review-required updates to the review tab", () => {

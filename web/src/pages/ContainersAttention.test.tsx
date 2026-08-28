@@ -129,7 +129,7 @@ describe("the attention column", () => {
     renderTable();
 
     const row = await rowFor("calendar-tag");
-    expect(within(row).getByText("Can't advise")).toBeInTheDocument();
+    expect(within(row).getByText("Cannot determine")).toBeInTheDocument();
     expect(within(row).getByText(/cannot judge this change/i)).toBeInTheDocument();
   });
 
@@ -200,8 +200,8 @@ describe("the page summary", () => {
     renderTable();
     await rowFor("a");
 
-    // Scoped to the live region: the column heading says "Needs attention" on
-    // every page and is not the claim under test.
+    // Scoped to the live region: the column heading is "HarborMaster" and is
+    // present on every page, so it is not the claim under test.
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 

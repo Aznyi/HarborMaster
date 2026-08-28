@@ -49,3 +49,78 @@ export function formatMomentOrNothing(
   if (!value) return undefined;
   return formatMoment(value);
 }
+
+/**
+ * How much of a digest is enough to recognise it.
+ *
+ * Twelve hex characters is what `docker images` shows and what an operator
+ * pastes when they mean "that one". Long enough to identify a digest among the
+ * handful on one host; short enough that a table row stays a row.
+ */
+const DIGEST_PREFIX = 12;
+
+/** The parts of an image reference a list needs, as the server already sends them. */
+export interface ImageReferenceParts {
+  raw: string;
+  repository?: string;
+  tag?: string;
+  digest?: string;
+}
+
+/**
+ * An image reference, compact enough to scan.
+ *
+ * # The problem this solves
+ *
+ * A container HarborMaster has updated runs an immutable digest, so its image
+ * reads as `docker.io/library/alpine@sha256:` plus sixty-four hex characters.
+ * In a table that is one row of noise per successfully-managed container --
+ * exactly backwards, since those are the ones working correctly.
+ *
+ * # What it does NOT do
+ *
+ * It never shortens a tag. `nginx:1.27.1` is already the shortest true form of
+ * itself, and abbreviating a version is how somebody applies the wrong one.
+ * Only the digest -- the part that is a content address rather than a name --
+ * is abbreviated, and only ever with an ellipsis so it can never be mistaken
+ * for a complete value.
+ *
+ * The full reference is returned alongside, and every caller is expected to
+ * carry it: on a `title`, in a detail field, or both. Nothing here is the only
+ * copy of anything.
+ */
+export function formatImageReference(image: ImageReferenceParts): {
+  /** The compact form, for the cell. */
+  display: string;
+  /** The complete reference, exactly as the server sent it. */
+  full: string;
+  /** True when `display` is an abbreviation of `full`. */
+  abbreviated: boolean;
+} {
+  const full = image.raw ?? "";
+  const digest = image.digest ?? "";
+
+  // A digest short enough to read whole is left whole: abbreviating something
+  // that already fits adds an ellipsis and removes information.
+  const algorithmAndHex = /^([A-Za-z0-9_+.-]+):([A-Fa-f0-9]+)$/.exec(digest);
+  const algorithm = algorithmAndHex?.[1] ?? "";
+  const hex = algorithmAndHex?.[2] ?? "";
+  if (hex.length <= DIGEST_PREFIX) {
+    return { display: full || NO_VALUE, full: full || NO_VALUE, abbreviated: false };
+  }
+
+  const short = `${algorithm}:${hex.slice(0, DIGEST_PREFIX)}…`;
+
+  // Prefer the repository the server parsed. Falling back to splitting `raw`
+  // keeps a malformed row readable rather than blank.
+  const repository = image.repository || full.split("@")[0] || "";
+  if (!repository) {
+    return { display: full || NO_VALUE, full: full || NO_VALUE, abbreviated: false };
+  }
+
+  // A reference can carry a tag AND a digest. Both are kept: the tag is what
+  // was asked for and the digest is what was resolved, and dropping either
+  // changes what the row says.
+  const tag = image.tag ? `:${image.tag}` : "";
+  return { display: `${repository}${tag}@${short}`, full, abbreviated: true };
+}

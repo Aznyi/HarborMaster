@@ -379,3 +379,146 @@ it("reads only, and writes nothing, when the page is opened", async () => {
   await screen.findByTestId("automation-summary");
   expect(requests.filter((r) => r.method !== "GET")).toEqual([]);
 });
+
+// ============================================ polish batch A: one statement ==
+
+/**
+ * The engine's state is stated once, at the top, with nothing lost.
+ *
+ * # The defect this exists to prevent coming back
+ *
+ * The page opened with three consecutive statements of the same fact:
+ *
+ *   1. the onboarding heading -- "Automatic updates are active";
+ *   2. the warning banner -- "The update engine is on";
+ *   3. this section's own heading and badge -- "Automatic updates" / "On".
+ *
+ * Three paragraphs to learn one thing, and the actionable content -- what is
+ * waiting, when the window opens, what the next pass would do -- began below
+ * them.
+ *
+ * The condensation is presentation only. Nothing was deleted that said
+ * something: the safety warning is intact and verbatim, the self-update
+ * exclusion is intact, and every UNSETTLED state still renders the full
+ * onboarding block with its capability checklist and its actions. What went is
+ * the repetition.
+ */
+
+it("states the engine's state once, before anything else", async () => {
+  mockApi(withState({ engine: { enabled: true, actingPolicies: 1 } }));
+  renderAutomation();
+
+  const summary = await screen.findByTestId("automation-summary");
+  expect(within(summary).getByText("Automatic updates")).toBeInTheDocument();
+  expect(within(summary).getByText("On")).toBeInTheDocument();
+
+  // The onboarding block said the same thing a second time and is gone here.
+  expect(screen.queryByTestId("automation-onboarding")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: /automatic updates are (active|configured)/i }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps the safety warning, in the section that reports the state", async () => {
+  mockApi(withState({ engine: { enabled: true, actingPolicies: 1 } }));
+  renderAutomation();
+
+  const summary = await screen.findByTestId("automation-summary");
+  // Verbatim. The thing it warns about did not become less true.
+  expect(summary.textContent).toMatch(/the update engine is on/i);
+  expect(summary.textContent).toMatch(
+    /stop and replace matching containers without asking/i,
+  );
+  expect(summary.textContent).toMatch(/inside its maintenance window/i);
+});
+
+it("keeps the eligibility sentence the onboarding block used to carry", async () => {
+  // The one part of the removed block that was not said anywhere else.
+  mockApi(withState({ engine: { enabled: true, actingPolicies: 1 } }));
+  renderAutomation();
+
+  const summary = await screen.findByTestId("automation-summary");
+  expect(summary.textContent).toMatch(/no containers are currently eligible/i);
+});
+
+it("keeps engine-off and watching-only distinguishable", async () => {
+  mockApi(withState({ engine: { enabled: false, actingPolicies: 0 } }));
+  const off = renderAutomation();
+
+  const offSummary = await screen.findByTestId("automation-summary");
+  expect(within(offSummary).getByText("Off")).toBeInTheDocument();
+  expect(offSummary.textContent).toMatch(/no policy can act however it is configured/i);
+  // An engine that is off still gets the full onboarding block: it is an
+  // unsettled state with an instruction and a capability checklist.
+  expect(screen.getByTestId("automation-onboarding")).toBeInTheDocument();
+  off.unmount();
+
+  mockApi(withState({ engine: { enabled: true, actingPolicies: 0 } }));
+  renderAutomation();
+
+  const watching = await screen.findByTestId("automation-summary");
+  expect(within(watching).getByText("Watching only")).toBeInTheDocument();
+  expect(watching.textContent).toMatch(/no policy is set to change a container/i);
+});
+
+it("keeps the self-update exclusion, which nothing else states", async () => {
+  mockApi(
+    withState({
+      engine: {
+        enabled: true,
+        actingPolicies: 1,
+        self: { containerId: "abc123", containerName: "harbormaster" },
+      },
+    }),
+  );
+  renderAutomation();
+
+  await screen.findByTestId("automation-summary");
+  expect(
+    await screen.findByText(/HarborMaster will not update itself/i),
+  ).toBeInTheDocument();
+});
+
+it("keeps the whole onboarding block while the deployment is unsettled", async () => {
+  // No policy: the block is the only thing on the page that says what to do.
+  mockApi(withState({ engine: { enabled: true, policies: 0, actingPolicies: 0 }, policies: [] }));
+  renderAutomation();
+
+  const onboarding = await screen.findByTestId("automation-onboarding");
+  expect(onboarding).toHaveAttribute("data-state", "noPolicy");
+  expect(
+    within(onboarding).getByRole("heading", {
+      name: /choose how HarborMaster should handle updates/i,
+    }),
+  ).toBeInTheDocument();
+});
+
+it("sends the policy actions to a route that exists", async () => {
+  /*
+   * The defect this batch found: "Create update policy" and "Review policies"
+   * pointed at /automation/policies, which has never been registered. The
+   * wildcard route sends unknown paths to the dashboard, so the links looked
+   * like they worked -- the operator landed somewhere plausible and had no
+   * reason to think otherwise.
+   */
+  mockApi(withState({ engine: { enabled: true, policies: 0, actingPolicies: 0 }, policies: [] }));
+  renderAutomation();
+
+  const onboarding = await screen.findByTestId("automation-onboarding");
+  const action = within(onboarding).getByRole("link", { name: /create update policy/i });
+  expect(action).toHaveAttribute("href", "/update-policies");
+});
+
+it("still shows what is waiting, and where to clear it", async () => {
+  // The condensation must not have taken the attention panel with it.
+  mockApi(
+    withState({
+      engine: { enabled: true, actingPolicies: 1, awaitingApproval: 2, pausedContainers: 1 },
+      pauses: [pause()],
+    }),
+  );
+  renderAutomation();
+
+  const attention = await screen.findByTestId("automation-attention");
+  expect(attention.textContent).toMatch(/approval/i);
+});

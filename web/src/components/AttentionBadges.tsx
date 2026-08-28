@@ -18,13 +18,19 @@ import { StatusBadge, type BadgeTone } from "./StatusBadge";
  * and it means the distinctions the server works hard to preserve cannot be
  * flattened by a component that only needed a short label.
  *
- * The three that must never be conflated:
+ * The four that must never be conflated. The Updates workspace derives the
+ * same four from the plan's registry status and says them the same way, so an
+ * operator moving between the two surfaces is not shown two vocabularies for
+ * one set of facts:
  *
- *   - "Not checked" -- HarborMaster has not looked.
- *   - "Up to date"  -- HarborMaster looked and found nothing to do.
- *   - "Can't advise" -- HarborMaster looked and cannot judge what it found.
+ *   - "Not tracked"      -- no reference can be followed, so there will never
+ *                           be anything to tell.
+ *   - "Not checked"      -- HarborMaster has not looked yet.
+ *   - "Up to date"       -- HarborMaster looked and found nothing to do.
+ *   - "Cannot determine" -- HarborMaster looked and cannot judge what it
+ *                           found.
  *
- * All three would be defensible as a grey badge saying nothing. None of them
+ * All four would be defensible as a grey badge saying nothing. None of them
  * means the same thing to somebody deciding whether to act.
  */
 export const ATTENTION_LABELS: Record<AttentionState, string> = {
@@ -37,7 +43,7 @@ export const ATTENTION_LABELS: Record<AttentionState, string> = {
   dependencyUnresolved: "Dependency unavailable",
   needsReview: "Needs review",
   dependencyBlocked: "Dependency blocked",
-  cannotAdvise: "Can't advise",
+  cannotAdvise: "Cannot determine",
   updateAvailable: "Update available",
   notTracked: "Not tracked",
   notChecked: "Not checked",

@@ -240,7 +240,7 @@ it("counts what could not be assessed separately from what is available", async 
   renderUpdates();
 
   await screen.findByText("redis");
-  const cannot = screen.getByText("Cannot advise", { selector: "dt" }).closest("div");
+  const cannot = screen.getByText("Cannot determine", { selector: "dt" }).closest("div");
   // A gap in evidence is not an available update.
   expect(within(cannot as HTMLElement).getByText("1")).toBeInTheDocument();
 });
@@ -340,7 +340,7 @@ it("offers the recreation once the image is downloaded and verified", async () =
 
   const card = screen.getByText("redis").closest("li") as HTMLElement;
   expect(
-    within(card).getByRole("button", { name: /recreate container/i }),
+    within(card).getByRole("button", { name: /apply update/i }),
   ).toBeInTheDocument();
 });
 
@@ -356,7 +356,7 @@ it("does not offer a recreation for a download that has not succeeded", async ()
 
   const card = screen.getByText("redis").closest("li") as HTMLElement;
   expect(
-    within(card).queryByRole("button", { name: /recreate container/i }),
+    within(card).queryByRole("button", { name: /apply update/i }),
   ).not.toBeInTheDocument();
 });
 
@@ -387,7 +387,7 @@ it("offers a viewer no recreation on a downloaded image", async () => {
 
   const card = screen.getByText("redis").closest("li") as HTMLElement;
   expect(
-    within(card).queryByRole("button", { name: /recreate container/i }),
+    within(card).queryByRole("button", { name: /apply update/i }),
   ).not.toBeInTheDocument();
 });
 

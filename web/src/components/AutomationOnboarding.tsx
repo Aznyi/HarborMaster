@@ -271,10 +271,10 @@ function Actions({
   const actions: React.ReactNode[] = [];
   switch (state) {
     case "noPolicy":
-      if (may) actions.push(link("/automation/policies", "Create update policy"));
+      if (may) actions.push(link("/update-policies", "Create update policy"));
       break;
     case "observeOnly":
-      actions.push(link("/automation/policies", "Review policies"));
+      actions.push(link("/update-policies", "Review policies"));
       break;
     case "needsAttention":
       if (facts.pausedContainers > 0) {
@@ -286,7 +286,7 @@ function Actions({
       break;
     case "nothingEligible":
     case "active":
-      actions.push(link("/automation/policies", "Review policies"));
+      actions.push(link("/update-policies", "Review policies"));
       break;
     case "engineDisabled":
     case "assessmentUnavailable":

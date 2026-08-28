@@ -176,7 +176,7 @@ it("shows a download that has not been applied, with its continuation", async ()
   expect(within(row).getByText(/has not been recreated/i)).toBeInTheDocument();
   // Phase 2's control, on the acquisition record this page already holds.
   expect(
-    within(row).getByRole("button", { name: /recreate container/i }),
+    within(row).getByRole("button", { name: /apply update/i }),
   ).toBeInTheDocument();
 });
 
@@ -370,7 +370,7 @@ it("offers a viewer no continuation action", async () => {
 
   const row = (await screen.findByText("redis")).closest("li") as HTMLElement;
   expect(
-    within(row).queryByRole("button", { name: /recreate container/i }),
+    within(row).queryByRole("button", { name: /apply update/i }),
   ).not.toBeInTheDocument();
   expect(within(row).getByText(/needs the execution permission/i)).toBeInTheDocument();
 });

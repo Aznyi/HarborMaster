@@ -83,8 +83,16 @@ export function DashboardSummary({
     },
     {
       label: "Needs attention",
-      value: String(attentionCount),
-      hint: attentionCount > 0 ? "waiting for you" : "nothing right now",
+      // The attention model groups by ISSUE, not by container: "3 containers
+      // are unhealthy" is one item. A bare "2" beside a panel listing six
+      // containers reads as a container count and contradicts it, so the unit
+      // is stated rather than left to be guessed.
+      value:
+        attentionCount === 1 ? "1 issue" : `${attentionCount} issues`,
+      hint:
+        attentionCount > 0
+          ? "kinds of issue, not containers"
+          : "nothing right now",
       to: "/activity",
       tone: attentionCount > 0 ? "danger" : "ok",
     },

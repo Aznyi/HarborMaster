@@ -5,6 +5,7 @@ import { Link, useSearchParams } from "react-router";
 import { UPDATE_TYPE_LABELS } from "../api/imageTypes";
 import { RECOMMENDATION_LABELS } from "../api/planTypes";
 import {
+  availableTabCount,
   buildUpdateRows,
   filterRows,
   summarise,
@@ -177,11 +178,22 @@ function emptyDescription(tab: UpdateTab): string {
 }
 
 /**
- * The four numbers.
+ * The numbers.
  *
- * "Cannot advise" is counted separately and never folded into the others: a gap
- * in evidence is not a finding of safety, and adding it to "available" would
- * claim HarborMaster knows about updates it explicitly could not assess.
+ * # None of the no-verdict rows is folded into "Available"
+ *
+ * A gap in evidence is not a finding of safety, and adding one to "available"
+ * would claim HarborMaster knows about updates it explicitly could not assess.
+ *
+ * # Why "Not tracked" and "Not checked yet" are their own cards
+ *
+ * They used to be inside "Cannot advise", which made that number large and
+ * alarming and mostly meaningless: an operator investigating it found rows that
+ * needed no investigation, and learned to ignore the card. The three have
+ * different remedies -- nothing, wait, look -- so they are three numbers.
+ *
+ * They appear only when non-zero. A permanent "Not tracked 0" is a column of
+ * noise on a host where every image is followable.
  */
 function SummaryCounts({
   summary,
@@ -193,10 +205,28 @@ function SummaryCounts({
     { label: "Ready", value: summary.ready, hint: "Assessed and actionable" },
     { label: "Need review", value: summary.needsReview, hint: "Waiting for a person" },
     {
-      label: "Cannot advise",
+      label: "Cannot determine",
       value: summary.undetermined,
-      hint: "Not a finding of safety",
+      hint: "Looked, and could not conclude",
     },
+    ...(summary.untracked > 0
+      ? [
+          {
+            label: "Not tracked",
+            value: summary.untracked,
+            hint: "No registry to look up",
+          },
+        ]
+      : []),
+    ...(summary.unchecked > 0
+      ? [
+          {
+            label: "Not checked yet",
+            value: summary.unchecked,
+            hint: "No lookup has run",
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -229,7 +259,7 @@ function Tabs({
   total: number;
 }) {
   const tabs: { id: UpdateTab; label: string; count: number }[] = [
-    { id: "available", label: "Available", count: summary.ready },
+    { id: "available", label: "Available", count: availableTabCount(summary) },
     { id: "review", label: "Needs review", count: summary.needsReview },
     { id: "all", label: "All", count: total },
   ];
