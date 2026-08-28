@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 
 import { UPDATE_TYPE_LABELS } from "../api/imageTypes";
 import { RECOMMENDATION_LABELS } from "../api/planTypes";
@@ -47,7 +47,16 @@ import { useSession } from "../hooks/useSession";
  * assessment is the planner's and the automation context is the engine's.
  */
 export function Updates() {
-  const [tab, setTab] = useState<UpdateTab>("available");
+  // The tab is deep-linkable so Automation can send an operator straight to
+  // what is waiting for them. Read once for the initial value; the tab buttons
+  // own it afterwards, so switching tabs does not push history entries.
+  const [params] = useSearchParams();
+  const requested = params.get("tab");
+  const [tab, setTab] = useState<UpdateTab>(
+    requested === "review" || requested === "all" || requested === "available"
+      ? requested
+      : "available",
+  );
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
 
@@ -298,6 +307,19 @@ function UpdateRow({
           <p className="text-sm">{automation.label}</p>
           {automation.detail ? (
             <p className="mt-1 text-xs text-content-muted">{automation.detail}</p>
+          ) : null}
+          {/* Changing any of these is a RULE, which lives in Automation. The
+              link goes there rather than putting policy controls on a row
+              about one container. */}
+          {automation.label === "Paused" ||
+          automation.label === "Not automated" ||
+          automation.label === "Observing" ? (
+            <Link
+              to="/automation"
+              className="mt-1 inline-block text-xs text-accent hover:underline"
+            >
+              Manage automation
+            </Link>
           ) : null}
         </div>
 

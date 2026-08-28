@@ -4,7 +4,6 @@ import { Link } from "react-router";
 import type {
   AutomationDecision,
   AutomationRun,
-  AutomationStatus,
 } from "../api/automationTypes";
 import {
   AUTOMATION_TRIGGER_LABELS,
@@ -30,12 +29,23 @@ import {
   LoadingState,
 } from "../components/States";
 import {
+  useAutomationPauses,
   useAutomationRuns,
   useAutomationStatus,
   useAutomationUpcoming,
+  useUpdatePolicies,
   useRunAutomationPass,
 } from "../hooks/useAutomation";
 import { useSession } from "../hooks/useSession";
+import { useDependencies } from "../hooks/useDependencies";
+import {
+  AutomationAttention,
+  AutomationOrder,
+  AutomationSettings,
+  AutomationSummary,
+  MaintenanceWindowState,
+} from "../components/AutomationWorkspace";
+import { PauseCard } from "./AutomationPaused";
 
 /**
  * The update engine.
@@ -70,11 +80,17 @@ export function Automation() {
   // `plans` carries the planner's own status alongside the first page, and the
   // health report is the app-wide capability read every page already makes.
   const inventory = useInventory();
+  // The workspace's own reads. All existing endpoints, each the same one its
+  // specialised page already uses; none of them decides anything.
+  const policies = useUpdatePolicies({ page: 1, pageSize: 50 });
+  const pauses = useAutomationPauses();
+  const dependencies = useDependencies();
   const plans = usePlans({ page: 1, pageSize: 1 });
   const health = useHealth();
 
   const session = useSession();
   const engine = status.data?.status;
+  const mayManage = Boolean(session.user?.permissions.includes("automation:manage"));
 
   // Every fact below comes from a server response. Nothing here decides
   // whether a container may be updated; see web/src/api/firstRun.ts.
@@ -117,120 +133,121 @@ export function Automation() {
         facts={facts}
         features={health.data?.features ?? null}
         requiredCapabilities={engine?.requiredCapabilities ?? []}
-        mayManagePolicies={Boolean(
-          session.user?.permissions.includes("automation:manage"),
-        )}
+        mayManagePolicies={mayManage}
       />
 
       <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />
 
       <SelfUpdateNotice self={engine?.self} />
 
-      <StatusPanel state={status} />
+      {/* Is it on, and what is it doing. */}
+      <AutomationSummary state={status} />
 
-      <PassControls
-        enabled={Boolean(engine?.enabled)}
-        running={Boolean(engine?.running)}
-        onRan={() => {
-          status.refresh();
-          runs.refresh();
-          upcoming.refresh();
-        }}
+      {/* Only when something is genuinely waiting. */}
+      <AutomationAttention
+        engine={engine}
+        pausedCount={pauses.data?.items?.length ?? 0}
+        manualReviews={facts.manualReviews}
       />
 
-      <UpcomingPanel state={upcoming} />
+      {/* What it is configured to do, in the terms it was configured in. */}
+      <AutomationSettings
+        policies={policies.data?.items ?? []}
+        mayManage={mayManage}
+      />
 
-      <RecentRuns state={runs} />
+      {/* Held containers, using the paused page's own confirmed resume rather
+          than a second implementation of it. */}
+      <PausedSection state={pauses} />
+
+      <AutomationOrder
+        dependencies={dependencies.data ?? undefined}
+        mayManage={Boolean(session.user?.permissions.includes("dependency:manage"))}
+      />
+
+      <section
+        aria-labelledby="automation-pass-heading"
+        className="flex flex-col gap-4 rounded-xl border border-border-subtle bg-surface-raised p-5"
+      >
+        <h2 id="automation-pass-heading" className="text-base font-semibold">
+          Next automation pass
+        </h2>
+
+        <MaintenanceWindowState engine={engine} />
+
+        <PassControls
+          enabled={Boolean(engine?.enabled)}
+          running={Boolean(engine?.running)}
+          onRan={() => {
+            status.refresh();
+            runs.refresh();
+            upcoming.refresh();
+            pauses.refresh();
+          }}
+        />
+
+        <UpcomingPanel state={upcoming} />
+      </section>
+
+      <details className="rounded-xl border border-border-subtle bg-surface-raised p-5">
+        <summary className="cursor-pointer text-sm font-medium text-content-muted">
+          Recent automation passes
+        </summary>
+        <div className="mt-4">
+          <RecentRuns state={runs} />
+        </div>
+      </details>
     </div>
   );
 }
 
 // ---------------------------------------------------------------- status --
 
-function StatusPanel({ state }: { state: ReturnType<typeof useAutomationStatus> }) {
-  if (state.status === "loading") return <LoadingState label="Loading automation" />;
-  if (state.status === "disconnected") {
-    return <DisconnectedState onRetry={state.refresh} />;
-  }
-  if (state.error) return <ErrorState error={state.error} onRetry={state.refresh} />;
-  if (!state.data) return <LoadingState label="Loading automation" />;
-
-  const engine = state.data.status;
+/**
+ * Paused containers, where an operator looks for them.
+ *
+ * Rendered only when something is held: a permanent empty panel is a place
+ * people learn to skip. The card is the paused page's own -- same
+ * confirmation, same permission, same wording that resuming retries nothing --
+ * so there is one resume flow rather than two.
+ */
+function PausedSection({
+  state,
+}: {
+  state: ReturnType<typeof useAutomationPauses>;
+}) {
+  const items = state.data?.items ?? [];
+  if (items.length === 0) return null;
 
   return (
-    <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <Card
-        label="Policies"
-        value={`${engine.enabledPolicies ?? 0} of ${engine.policies ?? 0}`}
-        hint="in force"
-      />
-      <Card
-        label="Next pass"
-        value={engine.running ? "Running now" : formatMoment(engine.nextRunAt)}
-        hint={engine.lastRunAt ? `last ${formatMoment(engine.lastRunAt)}` : "never run"}
-      />
-      <Card
-        label="Maintenance window"
-        value={engine.windowOpen ? "Open" : "Closed"}
-        hint={windowHint(engine)}
-      />
-      <Card
-        label="Blocked"
-        value={`${engine.pausedContainers ?? 0} paused`}
-        hint={
-          (engine.awaitingApproval ?? 0) > 0
-            ? `${engine.awaitingApproval} waiting for approval`
-            : "nothing waiting for approval"
-        }
-      />
-      {/* The approvals are an ACTION, not a statistic. Without this the only
-          route to them was opening an archived pass and finding the row. */}
-      {(engine.awaitingApproval ?? 0) > 0 ? (
-        <Link
-          to="/automation/approvals"
-          className="rounded-lg border border-warn/40 bg-warn-soft p-4 sm:col-span-2 lg:col-span-4"
-        >
-          <p className="text-sm font-medium text-content">
-            {engine.awaitingApproval} update
-            {engine.awaitingApproval === 1 ? "" : "s"} waiting for you to approve
-          </p>
-          <p className="mt-1 text-xs text-content-muted">
-            Review and release them &rarr;
-          </p>
+    <section
+      aria-labelledby="automation-paused-heading"
+      data-testid="automation-paused"
+      className="flex flex-col gap-3 rounded-xl border border-border-subtle bg-surface-raised p-5"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="automation-paused-heading" className="text-base font-semibold">
+          Paused containers
+        </h2>
+        <Link to="/automation/paused" className="text-sm text-accent hover:underline">
+          Full paused list
         </Link>
-      ) : null}
+      </div>
+      <p className="max-w-prose text-sm text-content-muted">
+        {items.length}{" "}
+        {items.length === 1 ? "container needs" : "containers need"} attention. A
+        pause does not clear itself.
+      </p>
+      <ul className="flex flex-col gap-3">
+        {items.map((pause) => (
+          <li key={pause.containerName}>
+            <PauseCard pause={pause} onChanged={state.refresh} />
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
-
-/** The window hint, from the SERVER's calculation rather than a second one. */
-function windowHint(engine: AutomationStatus): string {
-  if (engine.windowOpen) return "a policy admits work now";
-  if (engine.nextWindowOpensAt) {
-    return `next opens ${formatMoment(engine.nextWindowOpensAt)}`;
-  }
-  return "no policy has an open window";
-}
-
-function Card({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div className="rounded-xl border border-border-subtle bg-surface-raised px-4 py-3">
-      <p className="text-xs uppercase tracking-wide text-content-muted">{label}</p>
-      <p className="mt-1 text-lg font-semibold">{value}</p>
-      <p className="mt-0.5 text-xs text-content-muted">{hint}</p>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------- controls --
 
 function PassControls({
   enabled,

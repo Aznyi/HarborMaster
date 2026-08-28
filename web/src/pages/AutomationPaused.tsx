@@ -103,7 +103,14 @@ function PauseList({
   );
 }
 
-function PauseCard({
+/**
+ * One paused container, with the confirmed resume.
+ *
+ * Exported so the Automation workspace can show a pause where an operator
+ * looks for it without a second implementation of the resume flow -- including
+ * its confirmation, which states that resuming retries nothing.
+ */
+export function PauseCard({
   pause,
   onChanged,
 }: {
