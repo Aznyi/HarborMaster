@@ -70,6 +70,44 @@ beforeEach(() => {
 
 // ------------------------------------------------------------- dashboard --
 
+
+/**
+ * Opens a configuration panel, which now lives inside the Configuration
+ * section rather than at the top level.
+ *
+ * Phase 5 regrouped fifteen top-level tabs into four. Every panel still exists
+ * and still renders the same content; what changed is that reaching one means
+ * naming the question first. These helpers encode that, so the assertions below
+ * keep testing the panel rather than the navigation.
+ */
+async function openConfigView(user: ReturnType<typeof userEvent.setup>, view: string) {
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Configuration" })).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("tab", { name: "Configuration" }));
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: view })).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("tab", { name: view }));
+}
+
+/** Opens one of the record-oriented panels under Advanced. */
+async function openAdvanced(
+  user: ReturnType<typeof userEvent.setup>,
+  summary: RegExp,
+) {
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Advanced" })).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  // The <summary> element, not the panel heading inside it: both carry the
+  // same words once the disclosure is open.
+  const disclosures = await screen.findAllByText(summary);
+  const control = disclosures.find((node) => node.tagName === "SUMMARY") ?? disclosures.at(0);
+  if (!control) throw new Error(`no disclosure matched ${summary}`);
+  await user.click(control);
+}
+
 describe("Dashboard", () => {
   it("shows a loading state before the inventory arrives", async () => {
     stubApi();
@@ -487,16 +525,25 @@ describe("Container detail", () => {
     }
   });
 
-  it("offers a tab for every documented section", async () => {
+  it("still reaches every documented section, grouped by question", async () => {
     stubApi();
+    const user = userEvent.setup();
     renderDetail();
 
+    // Four top-level sections rather than fifteen.
     await waitFor(() => expect(screen.getByRole("tablist")).toBeInTheDocument());
-    for (const tab of [
-      "Overview", "Configuration", "Environment", "Mounts", "Networks",
-      "Ports", "Resources", "Security", "Labels", "Compose", "Raw inspection",
-    ]) {
+    for (const tab of ["Overview", "Configuration", "Activity", "Advanced"]) {
       expect(screen.getByRole("tab", { name: tab })).toBeInTheDocument();
+    }
+
+    // And nothing was removed: every configuration panel is still there, one
+    // level in, under the section that answers the question it belongs to.
+    await user.click(screen.getByRole("tab", { name: "Configuration" }));
+    for (const view of [
+      "Summary", "Environment", "Mounts", "Networks",
+      "Ports", "Resources", "Security", "Labels", "Compose",
+    ]) {
+      expect(screen.getByRole("tab", { name: view })).toBeInTheDocument();
     }
   });
 
@@ -506,8 +553,7 @@ describe("Container detail", () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument());
-    await user.click(screen.getByRole("tab", { name: "Environment" }));
+    await openConfigView(user, "Environment");
 
     await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeInTheDocument());
     expect(screen.getByText("********")).toBeInTheDocument();
@@ -528,9 +574,7 @@ describe("Container detail", () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Mounts" })).toBeInTheDocument());
-
-    await user.click(screen.getByRole("tab", { name: "Mounts" }));
+    await openConfigView(user, "Mounts");
     await waitFor(() => expect(screen.getByText("/data")).toBeInTheDocument());
     expect(screen.getByText("shop_data")).toBeInTheDocument();
 
@@ -549,8 +593,7 @@ describe("Container detail", () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Security" })).toBeInTheDocument());
-    await user.click(screen.getByRole("tab", { name: "Security" }));
+    await openConfigView(user, "Security");
 
     await waitFor(() => expect(screen.getByText("Privileged")).toBeInTheDocument());
     expect(screen.getByText("Read-only root filesystem")).toBeInTheDocument();
@@ -564,10 +607,7 @@ describe("Container detail", () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Raw inspection" })).toBeInTheDocument());
-    expect(requests.some((request) => request.url.includes("/raw"))).toBe(false);
-
-    await user.click(screen.getByRole("tab", { name: "Raw inspection" }));
+    await openAdvanced(user, /Raw inspection/);
 
     await waitFor(() => expect(requests.some((request) => request.url.includes("/raw"))).toBe(true));
     await waitFor(() =>

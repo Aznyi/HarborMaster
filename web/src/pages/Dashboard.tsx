@@ -6,6 +6,12 @@ import type { InventoryStatus } from "../api/inventoryTypes";
 import type { HealthReport } from "../api/types";
 import type { ResourceState } from "../hooks/useApiResource";
 import { useInventory } from "../hooks/useContainers";
+import { useAcquisitions } from "../hooks/useAcquisitions";
+import {
+  DashboardSummary,
+  RecentActivity,
+  SystemStrip,
+} from "../components/DashboardSummary";
 import { useEventEngine } from "../hooks/useDockerEvents";
 import { useExecutions } from "../hooks/useExecutions";
 import { usePlans } from "../hooks/usePlans";
@@ -49,6 +55,14 @@ type RefreshFeedback =
  * surfaces to authorise and document.
  */
 const SUMMARY_ONLY = { page: 1, pageSize: 1 } as const;
+
+/**
+ * Enough rows for the activity preview, and no more.
+ *
+ * A dashboard is not a history: five entries are shown, and the join needs a
+ * little headroom because one attempt can span three records.
+ */
+const RECENT = { page: 1, pageSize: 10 } as const;
 
 /**
  * The dashboard.
@@ -101,11 +115,91 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
   }
 
   return (
+    <DashboardBody health={health} inventory={inventory} status={inventory.data} />
+  );
+}
+
+/**
+ * The dashboard, once the inventory has answered.
+ *
+ * Split out so the shared reads live below the early returns above -- hooks
+ * cannot be called conditionally, and the loading and error paths must not
+ * issue nine requests to render a spinner.
+ */
+function DashboardBody({
+  health,
+  inventory,
+  status,
+}: {
+  health: ResourceState<HealthReport>;
+  inventory: ResourceState<InventoryStatus>;
+  status: InventoryStatus;
+}) {
+  const data = useDashboardData();
+
+  const inputs: AttentionInputs = useMemo(
+    () => ({
+      health: health.data,
+      inventory: status,
+      events: data.events.error ? null : data.events.data,
+      automation:
+        data.canReadAutomation && !data.automation.error
+          ? data.automation.data?.status
+          : null,
+      plans: data.plans.error ? null : data.plans.data?.summary,
+      planner: data.plans.error ? null : data.plans.data?.planner,
+      executions: data.executions.error ? null : data.executions.data?.summary,
+      rollbacks: data.rollbacks.error ? null : data.rollbacks.data?.summary,
+      policy: data.policy.error ? null : data.policy.data,
+      drift: data.drift.error ? null : data.drift.data,
+      dependencies: data.dependencies.error ? null : data.dependencies.data?.summary,
+      canReadAutomation: data.canReadAutomation,
+    }),
+    [health.data, status, data],
+  );
+
+  const items = useMemo(() => buildAttention(inputs), [inputs]);
+  const action = atLevel(items, "action");
+
+  return (
     <div className="flex flex-col gap-6">
-      <AttentionPanel health={health} inventory={inventory.data} />
-      <EstatePanel inventory={inventory.data} />
-      <SystemPanel status={inventory.data} health={health} />
-      <SnapshotSummary />
+      {/* State at a glance, each card leading into the workspace that owns it. */}
+      <DashboardSummary
+        inventory={status}
+        plans={data.plans.data?.summary}
+        automation={data.automation.error ? null : data.automation.data?.status}
+        attentionCount={action.length}
+      />
+
+      {/* What needs a person, first and prominent. */}
+      <AttentionPanel items={items} inputs={inputs} />
+
+      <SystemStrip
+        automation={data.automation.error ? null : data.automation.data?.status}
+        lastCheck={status.lastAttempt?.finishedAt ?? status.lastAttempt?.startedAt}
+      />
+
+      <RecentActivity
+        acquisitions={data.acquisitions.data?.items ?? []}
+        executions={data.executions.data?.items ?? []}
+        rollbacks={data.rollbacks.data?.items ?? []}
+      />
+
+      {/* The estate breakdown, the subsystem detail and the catalogue counts
+        * are diagnostics: real, occasionally useful, and not what somebody
+        * opens a dashboard to find out. They keep their place behind a
+        * disclosure rather than being deleted. */}
+      <details className="rounded-xl border border-border-subtle bg-surface-raised">
+        <summary className="flex min-h-11 cursor-pointer items-center px-5 py-3 text-sm font-medium">
+          Estate and subsystem detail
+        </summary>
+        <div className="flex flex-col gap-6 px-5 pb-5">
+          <EstatePanel inventory={status} />
+          <SystemPanel status={status} health={health} />
+          <SnapshotSummary />
+        </div>
+      </details>
+
       <AdvancedPanel inventory={inventory} />
     </div>
   );
@@ -121,72 +215,50 @@ export function Dashboard({ health }: { health: ResourceState<HealthReport> }) {
  * what HarborMaster has not looked at -- an estate with no policies and no
  * plans is unexamined, not healthy, and this is where that gets said.
  */
-function AttentionPanel({
-  health,
-  inventory,
-}: {
-  health: ResourceState<HealthReport>;
-  inventory: InventoryStatus;
-}) {
+/**
+ * Everything the dashboard reads, gathered once.
+ *
+ * The attention panel already fetched all of this; lifting it here lets the
+ * summary cards, the system strip and the activity preview share the same
+ * responses instead of issuing their own. The only addition is acquisitions,
+ * which the activity join needs and nothing else on this page had.
+ */
+function useDashboardData() {
   const session = useSession();
   const canReadAutomation = Boolean(
     session.user?.permissions.includes("automation:read"),
   );
 
-  const events = useEventEngine();
-  const automation = useAutomationStatus();
-  const policy = usePolicySummary();
-  const drift = useDriftSummary();
-  const plans = usePlans(SUMMARY_ONLY);
-  const executions = useExecutions(SUMMARY_ONLY);
-  const rollbacks = useRollbacks(SUMMARY_ONLY);
-  // ONE dependency read. The summary rides on the relationship listing rather
-  // than being a second endpoint, and the server derives it from the same facts
-  // the container rows use — so this count and those badges cannot disagree.
-  const dependencies = useDependencies();
+  return {
+    events: useEventEngine(),
+    automation: useAutomationStatus(),
+    policy: usePolicySummary(),
+    drift: useDriftSummary(),
+    plans: usePlans(SUMMARY_ONLY),
+    // A few rows rather than one: the same request now also feeds the activity
+    // preview, so the preview costs no extra round trip.
+    executions: useExecutions(RECENT),
+    rollbacks: useRollbacks(RECENT),
+    acquisitions: useAcquisitions(RECENT),
+    dependencies: useDependencies(),
+    canReadAutomation,
+  };
+}
 
-  const inputs: AttentionInputs = useMemo(
-    () => ({
-      health: health.data,
-      inventory,
-      events: events.data,
-      // A 503 from a subsystem that is switched off is not an error to report;
-      // it is a feature that is not there, and the model reads its absence as
-      // "no evidence" rather than as "nothing wrong".
-      automation: automation.error ? null : (automation.data?.status ?? null),
-      plans: plans.data?.summary ?? null,
-      // From the SAME read the summary comes from: the plan listing carries
-      // the planner's own state, so this costs no extra request.
-      planner: plans.data?.planner ?? null,
-      executions: executions.data?.summary ?? null,
-      rollbacks: rollbacks.data?.summary ?? null,
-      policy: policy.data,
-      drift: drift.data,
-      canReadAutomation,
-      // Null rather than a zeroed summary when the read failed: "the graph
-      // could not be built" is HarborMaster refusing to order the estate, and
-      // inferring "no loops" from it would invent the reassurance the whole
-      // subsystem exists to withhold.
-      dependencies: dependencies.error ? null : (dependencies.data?.summary ?? null),
-    }),
-    [
-      health.data,
-      inventory,
-      events.data,
-      automation.data,
-      automation.error,
-      plans.data,
-      executions.data,
-      rollbacks.data,
-      policy.data,
-      drift.data,
-      canReadAutomation,
-      dependencies.data,
-      dependencies.error,
-    ],
-  );
-
-  const items = useMemo(() => buildAttention(inputs), [inputs]);
+/**
+ * What needs a person, first on the page.
+ *
+ * Presentational: the reads and the model both live in `DashboardBody` now, so
+ * the summary cards and this panel cannot disagree about how many things need
+ * doing -- and the page issues one set of requests rather than two.
+ */
+function AttentionPanel({
+  items,
+  inputs,
+}: {
+  items: AttentionItem[];
+  inputs: AttentionInputs;
+}) {
   const complete = evidenceComplete(inputs);
 
   const action = atLevel(items, "action");
@@ -218,22 +290,41 @@ function AttentionPanel({
 
       {action.length > 0 ? <ItemList items={action} /> : null}
 
-      {watch.length > 0 ? (
-        <>
-          <h3 className="mt-5 text-sm font-semibold uppercase tracking-wide text-content-muted">
-            Worth watching
-          </h3>
-          <ItemList items={watch} />
-        </>
-      ) : null}
+      {/* Context and honest gaps, behind a disclosure.
+        *
+        * Both were permanent sections, and both are real -- "worth watching" is
+        * context, and "not established" is the report of what HarborMaster has
+        * not looked at, which an estate with no policies genuinely needs. But a
+        * dashboard whose first screen is three lists reads as a diagnostic
+        * report, and the one list that means WORK stops standing out.
+        *
+        * Nothing is dropped: the counts are on the summary line, so the section
+        * announces itself when it has something to say.
+        */}
+      {watch.length + info.length > 0 ? (
+        <details className="mt-5" data-testid="attention-context">
+          <summary className="flex min-h-11 cursor-pointer items-center text-sm font-medium text-content-muted">
+            Also worth knowing ({watch.length + info.length})
+          </summary>
 
-      {info.length > 0 ? (
-        <>
-          <h3 className="mt-5 text-sm font-semibold uppercase tracking-wide text-content-muted">
-            What HarborMaster has not established
-          </h3>
-          <ItemList items={info} />
-        </>
+          {watch.length > 0 ? (
+            <>
+              <h3 className="mt-4 text-sm font-semibold uppercase tracking-wide text-content-muted">
+                Worth watching
+              </h3>
+              <ItemList items={watch} />
+            </>
+          ) : null}
+
+          {info.length > 0 ? (
+            <>
+              <h3 className="mt-5 text-sm font-semibold uppercase tracking-wide text-content-muted">
+                What HarborMaster has not established
+              </h3>
+              <ItemList items={info} />
+            </>
+          ) : null}
+        </details>
       ) : null}
     </section>
   );

@@ -15,6 +15,7 @@ import type {
 } from "../api/inventoryTypes";
 import { useApiResource } from "../hooks/useApiResource";
 import { useContainerDetail } from "../hooks/useContainers";
+import { ContainerOverview } from "../components/ContainerOverview";
 import { useDockerEventPage } from "../hooks/useDockerEvents";
 import { useSnapshots } from "../hooks/useSnapshots";
 import { useContainerPolicy } from "../hooks/usePolicies";
@@ -54,9 +55,26 @@ import {
   LoadingState,
 } from "../components/States";
 
-const TABS = [
-  "Overview",
-  "Configuration",
+/**
+ * Four sections, grouped by the question rather than by the record.
+ *
+ * There were fifteen, and thirteen of them were named after a Docker config
+ * section or a HarborMaster record type -- Environment, Mounts, Networks,
+ * Ports, Resources, Security, Labels, Compose, Snapshots, Policy, Update
+ * review, Events, Raw inspection. Understanding one container meant knowing
+ * which of those held the answer.
+ *
+ * Nothing was deleted. Every one of those panels is still rendered, under the
+ * section that answers the question it belongs to, and each still fetches only
+ * when it is opened.
+ */
+const TABS = ["Overview", "Configuration", "Activity", "Advanced"] as const;
+
+type Tab = (typeof TABS)[number];
+
+/** The Docker configuration panels, unchanged, behind one section. */
+const CONFIG_VIEWS = [
+  "Summary",
   "Environment",
   "Mounts",
   "Networks",
@@ -65,14 +83,9 @@ const TABS = [
   "Security",
   "Labels",
   "Compose",
-  "Snapshots",
-  "Policy",
-  "Update review",
-  "Events",
-  "Raw inspection",
 ] as const;
 
-type Tab = (typeof TABS)[number];
+type ConfigView = (typeof CONFIG_VIEWS)[number];
 
 /**
  * How many recent events the detail view shows.
@@ -154,21 +167,16 @@ export function ContainerDetailPage() {
       </div>
 
       <div role="tabpanel" aria-label={tab}>
-        {tab === "Overview" && <OverviewTab detail={container} />}
-        {tab === "Configuration" && <ConfigurationTab detail={container} />}
-        {tab === "Environment" && <EnvironmentTab detail={container} />}
-        {tab === "Mounts" && <MountsTab detail={container} />}
-        {tab === "Networks" && <NetworksTab detail={container} />}
-        {tab === "Ports" && <PortsTab detail={container} />}
-        {tab === "Resources" && <ResourcesTab detail={container} />}
-        {tab === "Security" && <SecurityTab detail={container} />}
-        {tab === "Labels" && <LabelsTab detail={container} />}
-        {tab === "Compose" && <ComposeTab detail={container} />}
-        {tab === "Snapshots" && <SnapshotsTab id={container.overview.id} />}
-        {tab === "Policy" && <PolicyTab id={container.overview.id} />}
-        {tab === "Update review" && <PlanTab id={container.overview.id} />}
-        {tab === "Events" && <EventsTab id={container.overview.id} />}
-        {tab === "Raw inspection" && <RawTab id={container.overview.id} />}
+        {tab === "Overview" && (
+          <div className="flex flex-col gap-6">
+            <ContainerOverview detail={container} />
+            {/* The state and process detail the old overview carried. */}
+            <OverviewTab detail={container} />
+          </div>
+        )}
+        {tab === "Configuration" && <ConfigurationSection detail={container} />}
+        {tab === "Activity" && <ActivitySection detail={container} />}
+        {tab === "Advanced" && <AdvancedSection detail={container} />}
       </div>
     </div>
   );
@@ -192,6 +200,217 @@ const RECENT_SNAPSHOT_LIMIT = 10;
  * restore control: capture is a deliberate operator action taken from the
  * snapshots API, and restore does not exist.
  */
+/**
+ * Configuration: what this container is set to, whether it has changed, and
+ * what it can be compared back to.
+ *
+ * The Docker panels are unchanged and sit behind a second strip, so the section
+ * opens on the two questions an operator has -- has anything changed, and what
+ * restore points exist -- rather than on eight tabs of field listings.
+ */
+function ConfigurationSection({ detail }: { detail: ContainerDetailData }) {
+  const [view, setView] = useState<ConfigView>("Summary");
+  const changes = detail.attention?.openDrift ?? 0;
+  const id = detail.overview.id;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <h3 className="text-sm font-semibold">Configuration changes</h3>
+        {changes > 0 ? (
+          <>
+            <p className="mt-2 text-sm">
+              {changes} {changes === 1 ? "change" : "changes"} detected since the
+              recorded configuration.
+            </p>
+            <Link
+              to={"/drift/container/" + encodeURIComponent(id)}
+              className="mt-3 inline-flex min-h-11 items-center rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-medium"
+            >
+              Review changes
+            </Link>
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-content-muted">
+            No configuration changes detected since the recorded baseline.
+          </p>
+        )}
+      </section>
+
+      {/* Restore points. The snapshot panel is the existing one, so what a
+          snapshot actually records is described where it always was. */}
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <h3 className="text-sm font-semibold">Restore points</h3>
+        <p className="mt-1 text-xs text-content-muted">
+          Recorded configuration HarborMaster can compare against and restore a
+          container&rsquo;s settings from. They do not contain data volumes.
+        </p>
+        <div className="mt-3">
+          <SnapshotsTab id={id} />
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <div role="tablist" aria-label="Configuration detail" className="flex flex-wrap gap-1">
+          {CONFIG_VIEWS.map((name) => (
+            <button
+              key={name}
+              role="tab"
+              type="button"
+              aria-selected={view === name}
+              onClick={() => setView(name)}
+              className={
+                "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors " +
+                (view === name
+                  ? "bg-accent-soft text-accent"
+                  : "text-content-muted hover:bg-surface-sunken hover:text-content")
+              }
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+
+        <div role="tabpanel" aria-label={view}>
+          {view === "Summary" && <ConfigurationTab detail={detail} />}
+          {view === "Environment" && <EnvironmentTab detail={detail} />}
+          {view === "Mounts" && <MountsTab detail={detail} />}
+          {view === "Networks" && <NetworksTab detail={detail} />}
+          {view === "Ports" && <PortsTab detail={detail} />}
+          {view === "Resources" && <ResourcesTab detail={detail} />}
+          {view === "Security" && <SecurityTab detail={detail} />}
+          {view === "Labels" && <LabelsTab detail={detail} />}
+          {view === "Compose" && <ComposeTab detail={detail} />}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * What has happened to this container.
+ *
+ * # The one thing that cannot be consolidated accurately
+ *
+ * The acquisition, execution and rollback lists cannot be FILTERED by container
+ * in the current API -- they accept a container SORT and nothing more. So a
+ * complete per-container lifecycle history cannot be assembled without either
+ * fetching unbounded history or adding a query parameter to three endpoints.
+ *
+ * What is shown instead is what HarborMaster does answer per container: the
+ * outcomes carried on the projection, and the Docker events for this actor. The
+ * link goes to the Activity workspace, which owns the merged history and states
+ * its own horizon.
+ */
+function ActivitySection({ detail }: { detail: ContainerDetailData }) {
+  const attention = detail.attention;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <section className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold">Updates and recoveries</h3>
+          <Link
+            to="/activity"
+            className="inline-flex min-h-11 items-center rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-medium"
+          >
+            View all activity
+          </Link>
+        </div>
+
+        {!attention?.lastUpdate && !attention?.lastRollback ? (
+          <p className="mt-2 text-sm text-content-muted">
+            HarborMaster has not changed this container.
+          </p>
+        ) : (
+          <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+            {attention?.lastUpdate ? (
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-content-muted">
+                  Last update
+                </dt>
+                <dd className="mt-1 text-sm">
+                  {attention.lastUpdate.state}
+                  {attention.lastUpdate.at
+                    ? " — " + new Date(attention.lastUpdate.at).toLocaleString()
+                    : ""}
+                </dd>
+              </div>
+            ) : null}
+            {attention?.lastRollback ? (
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-content-muted">
+                  Last recovery
+                </dt>
+                <dd className="mt-1 text-sm">
+                  {attention.lastRollback.state}
+                  {attention.lastRollback.at
+                    ? " — " + new Date(attention.lastRollback.at).toLocaleString()
+                    : ""}
+                </dd>
+              </div>
+            ) : null}
+          </dl>
+        )}
+
+        <p className="mt-3 text-xs text-content-muted">
+          The full update history is not filterable by container in the current
+          API, so this reports the most recent outcomes rather than a complete
+          list.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h3 className="text-sm font-semibold">Docker events</h3>
+        <EventsTab id={detail.overview.id} />
+      </section>
+    </div>
+  );
+}
+
+/**
+ * The record-oriented views, kept whole.
+ *
+ * These are the panels an operator opens when they already know what they are
+ * looking for. Nothing here was simplified, because simplifying a raw
+ * inspection view is how it stops being one. Each stays collapsed, so none of
+ * them fetches until it is asked for.
+ */
+function AdvancedSection({ detail }: { detail: ContainerDetailData }) {
+  const id = detail.overview.id;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <details className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <summary className="cursor-pointer text-sm font-medium">
+          Update review and change plans
+        </summary>
+        <div className="mt-3">
+          <PlanTab id={id} />
+        </div>
+      </details>
+
+      <details className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <summary className="cursor-pointer text-sm font-medium">
+          Compliance policy
+        </summary>
+        <div className="mt-3">
+          <PolicyTab id={id} />
+        </div>
+      </details>
+
+      <details className="rounded-xl border border-border-subtle bg-surface-raised p-4">
+        <summary className="cursor-pointer text-sm font-medium">
+          Raw inspection
+        </summary>
+        <div className="mt-3">
+          <RawTab id={id} />
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function SnapshotsTab({ id }: { id: string }) {
   const query = useMemo(
     () => ({ containerId: id, pageSize: RECENT_SNAPSHOT_LIMIT, page: 1 }),

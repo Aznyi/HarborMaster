@@ -541,10 +541,12 @@ describe("Container detail events tab", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("tab", { name: /events/i });
+    await screen.findByRole("tab", { name: "Activity" });
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("tab", { name: /events/i }));
+    // Docker events now sit under Activity, beside the lifecycle outcomes
+    // for the same container.
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
 
     await waitFor(() => {
       const query = lastEventQuery(requests);
