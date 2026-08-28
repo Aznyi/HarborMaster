@@ -63,23 +63,47 @@ export const PRIMARY_NAV: readonly NavItem[] = [
  * Every entry keeps the permission it has always had. This list is about
  * DENSITY, not access: the routes are unchanged, the guards are unchanged, and
  * a bookmark to any of them still works whether or not this section is shown.
+ *
+ * # Why some labels moved and the routes did not
+ *
+ * Phase 6 settled the vocabulary an operator reads. Three entries were named
+ * after the record HarborMaster stores rather than the thing it holds --
+ * Snapshots, Drift, Update dependencies -- and now read as Restore points,
+ * Configuration changes and Update order, matching what the container page has
+ * called them since Phase 5.
+ *
+ * The URLs are unchanged. `/snapshots` and `/drift` are correct names for what
+ * those pages contain, they are the terms the API and the documentation use,
+ * and changing them would break bookmarks to buy nothing. Two entries gained a
+ * qualifier instead of a rename: "Compliance policies" and "Docker events" were
+ * ambiguous next to update policies and lifecycle activity.
+ *
+ * Order is by subject: container diagnostics, then the update lifecycle in the
+ * order its records are created, then automation, then administration.
  */
 export const ADVANCED_NAV: readonly NavItem[] = [
+  // Container diagnostics.
   { label: "Images", path: "/images", permission: "inventory:read" },
   { label: "Available updates", path: "/images/updates", permission: "inventory:read" },
-  { label: "Snapshots", path: "/snapshots", permission: "snapshot:read" },
-  { label: "Drift", path: "/drift", permission: "drift:read" },
+  { label: "Restore points", path: "/snapshots", permission: "snapshot:read" },
+  { label: "Configuration changes", path: "/drift", permission: "drift:read" },
+
+  // Update internals: the lifecycle records, in the order they are created.
   { label: "Update reviews", path: "/plans", permission: "plan:read" },
   { label: "Image downloads", path: "/acquisitions", permission: "acquisition:read" },
   { label: "Update history", path: "/executions", permission: "execution:read" },
   { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
+
+  // Automation internals.
   { label: "Update policies", path: "/update-policies", permission: "automation:read" },
-  { label: "Update dependencies", path: "/dependencies", permission: "dependency:read" },
-  { label: "Paused", path: "/automation/paused", permission: "automation:read" },
+  { label: "Update order", path: "/dependencies", permission: "dependency:read" },
+  { label: "Paused containers", path: "/automation/paused", permission: "automation:read" },
+
+  // Administration and security.
   { label: "Compliance", path: "/compliance", permission: "policy:read" },
-  { label: "Policies", path: "/policies", permission: "policy:read" },
+  { label: "Compliance policies", path: "/policies", permission: "policy:read" },
   { label: "Notifications", path: "/notifications", permission: "notification:read" },
-  { label: "Events", path: "/events", permission: "event:read" },
+  { label: "Docker events", path: "/events", permission: "event:read" },
   { label: "Accounts", path: "/users", permission: "user:manage" },
   { label: "Security audit", path: "/audit", permission: "audit:read" },
 ] as const;

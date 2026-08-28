@@ -124,6 +124,13 @@ export function automationOf(decision?: AutomationDecision): AutomationContext {
       return { label: "Not automated", detail, handsOff: false };
     case "observeMode":
       return { label: "Observing", detail, handsOff: false };
+    // Held behind something else, which Phase 5's container page already
+    // named this way. The two surfaces describe one state, so they say one
+    // thing: an operator moving between them must not think they are looking
+    // at different subsystems.
+    case "dependencyWaiting":
+    case "dependencyBlocked":
+      return { label: "Waiting on a dependency", detail, handsOff: true };
     case "windowClosed":
       return { label: "Outside window", detail, handsOff: true };
     case "alreadyInFlight":

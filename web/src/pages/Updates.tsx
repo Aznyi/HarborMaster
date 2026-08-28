@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 
@@ -349,7 +350,7 @@ function UpdateRow({
             <Detail label="Current digest">{plan.currentDigest ?? "—"}</Detail>
             <Detail label="Proposed digest">{plan.proposedDigest ?? "—"}</Detail>
             <Detail label="Assessed">
-              {new Date(plan.generatedAt).toLocaleString()}
+              {formatMoment(plan.generatedAt)}
             </Detail>
             <Detail label="Plan">{plan.planId}</Detail>
           </dl>

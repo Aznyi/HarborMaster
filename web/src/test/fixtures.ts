@@ -26,6 +26,7 @@ import type {
   EventFilterOptions,
 } from "../api/eventTypes";
 import type { HealthReport, VersionInfo } from "../api/types";
+import type { ResourceState } from "../hooks/useApiResource";
 import type { Role } from "../api/authTypes";
 import { permissionsFor } from "./session";
 
@@ -36,6 +37,34 @@ export const healthyReport: HealthReport = {
   checkedAt: "2026-08-03T09:20:11.482Z",
   uptimeSeconds: 120,
 };
+
+/**
+ * The shell's health read, as a page receives it.
+ *
+ * `useHealth()` is called once at the shell level and passed down, so a page
+ * test supplies the resource rather than a fetch stub. Every capability is on:
+ * a test that cares about one being off overrides it.
+ */
+export function healthState(
+  features: Partial<NonNullable<HealthReport["features"]>> = {},
+): ResourceState<HealthReport> {
+  return {
+    status: "ready",
+    data: {
+      ...healthyReport,
+      features: {
+        inventory: true, events: true, snapshots: true, drift: true,
+        policy: true, planner: true, imageIntel: true, acquisition: true,
+        execution: true, rollback: true, automation: true,
+        notifications: false, notificationsAllowPrivate: false,
+        ...features,
+      },
+    },
+    error: null,
+    refresh: () => {},
+    refreshing: false,
+  } as unknown as ResourceState<HealthReport>;
+}
 
 export const buildInfo: VersionInfo = {
   version: "v0.2.0",

@@ -6,6 +6,11 @@ import {
 } from "../hooks/useAdvancedTools";
 import { useVersion } from "../hooks/useHealth";
 import { PageIntro } from "../components/PageIntro";
+import {
+  AccessSettings,
+  NotificationDestinations,
+  SecuritySettings,
+} from "../components/SettingsSections";
 import { LoadingState } from "../components/States";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
@@ -138,6 +143,11 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
           </li>
         </ul>
       </section>
+
+      {/* Signposts to the pages that own each subject. Settings names them;
+        * it does not reproduce them. */}
+      <AccessSettings />
+      <SecuritySettings />
 
       <AdvancedToolsSection />
     </div>
@@ -299,6 +309,9 @@ function FeatureSections({ features }: { features?: Features }) {
             dangerous={features.notificationsAllowPrivate}
           />
         </dl>
+        {/* The way in, on the section that already reports the state. A second
+            Notifications section would have been two headings for one subject. */}
+        <NotificationDestinations />
       </section>
     </>
   );

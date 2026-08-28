@@ -179,7 +179,7 @@ it("can be turned on from Settings", async () => {
   await user.click(toggle);
 
   expect(
-    await within(sidebar).findByRole("link", { name: "Snapshots" }),
+    await within(sidebar).findByRole("link", { name: "Restore points" }),
   ).toBeInTheDocument();
 });
 
@@ -216,10 +216,10 @@ it("still renders specialised pages by URL, unlisted or not", async () => {
   stubEveryEndpoint();
 
   const cases: [string, string][] = [
-    ["/snapshots", "Snapshots"],
+    ["/snapshots", "Restore points"],
     ["/rollbacks", "Rollbacks"],
     ["/images", "Images"],
-    ["/dependencies", "Update dependencies"],
+    ["/dependencies", "Update order"],
   ];
 
   for (const [path, title] of cases) {

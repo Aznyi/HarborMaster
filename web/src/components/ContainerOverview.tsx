@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
 import type { ContainerAttention, ContainerDetail } from "../api/inventoryTypes";
@@ -281,7 +282,7 @@ function RecentPanel({ attention }: { attention?: ContainerAttention }) {
               />
               {update.at ? (
                 <span className="ml-2 text-xs text-content-muted">
-                  {new Date(update.at).toLocaleString()}
+                  {formatMoment(update.at)}
                 </span>
               ) : null}
             </li>
@@ -298,7 +299,7 @@ function RecentPanel({ attention }: { attention?: ContainerAttention }) {
               />
               {rollback.at ? (
                 <span className="ml-2 text-xs text-content-muted">
-                  {new Date(rollback.at).toLocaleString()}
+                  {formatMoment(rollback.at)}
                 </span>
               ) : null}
             </li>

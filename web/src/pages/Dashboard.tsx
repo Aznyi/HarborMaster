@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
@@ -12,6 +13,8 @@ import {
   RecentActivity,
   SystemStrip,
 } from "../components/DashboardSummary";
+import type { AutomationStatus } from "../api/automationTypes";
+import type { EventEngineStatus } from "../api/eventTypes";
 import { useEventEngine } from "../hooks/useDockerEvents";
 import { useExecutions } from "../hooks/useExecutions";
 import { usePlans } from "../hooks/usePlans";
@@ -194,13 +197,21 @@ function DashboardBody({
           Estate and subsystem detail
         </summary>
         <div className="flex flex-col gap-6 px-5 pb-5">
-          <EstatePanel inventory={status} />
-          <SystemPanel status={status} health={health} />
+          <EstatePanel
+            inventory={status}
+            automation={
+              data.canReadAutomation && !data.automation.error
+                ? (data.automation.data?.status ?? null)
+                : null
+            }
+            canReadAutomation={data.canReadAutomation}
+          />
+          <SystemPanel status={status} health={health} engine={data.events} />
           <SnapshotSummary />
         </div>
       </details>
 
-      <AdvancedPanel inventory={inventory} />
+      <AdvancedPanel inventory={inventory} engine={data.events} />
     </div>
   );
 }
@@ -389,12 +400,17 @@ const EMPTY_COUNTS: InventoryStatus["counts"] = {
  * three panels below a container count made it look like a subsystem detail
  * rather than the standing permission it is.
  */
-function EstatePanel({ inventory }: { inventory: InventoryStatus }) {
+function EstatePanel({
+  inventory,
+  automation,
+  canReadAutomation,
+}: {
+  inventory: InventoryStatus;
+  automation: AutomationStatus | null;
+  canReadAutomation: boolean;
+}) {
   const counts = inventory.counts ?? EMPTY_COUNTS;
-  const session = useSession();
-  const automation = useAutomationStatus();
-  const canReadAutomation = session.user?.permissions.includes("automation:read");
-  const engine = automation.error ? null : automation.data?.status;
+  const engine = automation;
 
   return (
     <section
@@ -475,11 +491,12 @@ function EstatePanel({ inventory }: { inventory: InventoryStatus }) {
 function SystemPanel({
   status,
   health,
+  engine,
 }: {
   status: InventoryStatus;
   health: ResourceState<HealthReport>;
+  engine: ResourceState<EventEngineStatus>;
 }) {
-  const engine = useEventEngine();
   // Defensive: the API always sends `docker` (it is required by the schema),
   // but this reads from the network, and a malformed payload should degrade
   // one card rather than blank the whole dashboard with a render crash.
@@ -572,11 +589,12 @@ function SystemPanel({
  */
 function AdvancedPanel({
   inventory,
+  engine,
 }: {
   inventory: ResourceState<InventoryStatus>;
+  engine: ResourceState<EventEngineStatus>;
 }) {
   const status = inventory.data!;
-  const engine = useEventEngine();
   const build = useVersion();
 
   return (
@@ -895,11 +913,8 @@ function feedbackClasses(kind: RefreshFeedback["kind"]): string {
   }
 }
 
-function formatTimestamp(iso: string | undefined): string {
-  if (!iso) return "never";
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
-}
+/** The shared absolute-time format. See api/presentation.ts. */
+const formatTimestamp = formatMoment;
 
 function formatDuration(ms: number | undefined): string {
   if (ms === undefined) return "—";

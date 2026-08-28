@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
 
@@ -141,7 +142,7 @@ export function Activity() {
 
           {horizon ? (
             <p className="text-xs text-content-muted">
-              Complete back to {new Date(horizon).toLocaleString()}. Older
+              Complete back to {formatMoment(horizon)}. Older
               activity is held in{" "}
               <Link to="/executions" className="text-accent underline">
                 update history
@@ -346,7 +347,7 @@ function ActivityRow({
               dateTime={entry.at}
               className="text-xs text-content-muted"
             >
-              {new Date(entry.at).toLocaleString()}
+              {formatMoment(entry.at)}
             </time>
           ) : null}
 

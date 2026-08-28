@@ -1,5 +1,6 @@
 ﻿import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
+import { formatMoment } from "../api/presentation";
 
 import type {
   AutomationDecision,
@@ -18,7 +19,8 @@ import {
 } from "../components/AutomationBadges";
 import { AutomationOnboarding } from "../components/AutomationOnboarding";
 import type { FirstRunFacts } from "../api/firstRun";
-import { useHealth } from "../hooks/useHealth";
+import type { HealthReport } from "../api/types";
+import type { ResourceState } from "../hooks/useApiResource";
 import { useInventory } from "../hooks/useContainers";
 import { usePlans } from "../hooks/usePlans";
 import { PageIntro } from "../components/PageIntro";
@@ -69,7 +71,7 @@ import { PauseCard } from "./AutomationPaused";
  * Deliberately, and in that order on screen. The safe control is the one the
  * eye lands on first.
  */
-export function Automation() {
+export function Automation({ health }: { health: ResourceState<HealthReport> }) {
   const status = useAutomationStatus({ poll: true });
   const runs = useAutomationRuns({ page: 1, pageSize: 10 });
   const upcoming = useAutomationUpcoming();
@@ -86,7 +88,6 @@ export function Automation() {
   const pauses = useAutomationPauses();
   const dependencies = useDependencies();
   const plans = usePlans({ page: 1, pageSize: 1 });
-  const health = useHealth();
 
   const session = useSession();
   const engine = status.data?.status;
@@ -516,10 +517,11 @@ function describeSubmitted(run: AutomationRun): string {
 }
 
 /** Renders an instant in the viewer's locale, or a dash. */
-export function formatMoment(value: string | undefined): string {
-  if (!value) return "â€”";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "â€”";
-  return parsed.toLocaleString();
-}
+/**
+ * Re-exported so pages importing it from here keep working.
+ *
+ * The definition moved to api/presentation.ts, where four
+ * near-identical copies were collapsed into one.
+ */
+export { formatMoment };
 

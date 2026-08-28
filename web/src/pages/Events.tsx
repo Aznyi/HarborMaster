@@ -1,4 +1,5 @@
-﻿import { useCallback, useMemo, useState } from "react";
+﻿import { formatMoment } from "../api/presentation";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 
 import type { DockerEvent, DockerEventQuery } from "../api/eventTypes";
@@ -625,8 +626,5 @@ function Metric({
   );
 }
 
-function formatTimestamp(iso: string | undefined): string {
-  if (!iso) return "never";
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleTimeString();
-}
+/** The shared absolute-time format. See api/presentation.ts. */
+const formatTimestamp = formatMoment;

@@ -3,6 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { Automation } from "./Automation";
+import { healthState } from "../test/fixtures";
 import { TestSessionProvider, testSession, testUser } from "../test/session";
 
 /**
@@ -153,7 +154,7 @@ function renderAutomation(role: "viewer" | "operator" | "administrator" = "admin
     <TestSessionProvider session={testSession({ user: testUser(role) })}>
       <MemoryRouter initialEntries={["/automation"]}>
         <Routes>
-          <Route path="/automation" element={<Automation />} />
+          <Route path="/automation" element={<Automation health={healthState()} />} />
         </Routes>
       </MemoryRouter>
     </TestSessionProvider>,

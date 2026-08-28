@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
 import {
@@ -178,7 +179,7 @@ export function MaintenanceWindowState({ engine }: { engine?: AutomationStatus }
           <p className="mt-1 text-sm">Closed</p>
           <p className="text-xs text-content-muted">
             {engine.nextWindowOpensAt
-              ? `Next opens ${new Date(engine.nextWindowOpensAt).toLocaleString()}`
+              ? `Next opens ${formatMoment(engine.nextWindowOpensAt)}`
               : "No policy window is scheduled to open."}
           </p>
         </>
@@ -281,7 +282,7 @@ export function AutomationAttention({
             The maintenance window is closed, so nothing will be updated until it
             opens
             {engine?.nextWindowOpensAt
-              ? ` — next ${new Date(engine.nextWindowOpensAt).toLocaleString()}`
+              ? ` — next ${formatMoment(engine.nextWindowOpensAt)}`
               : ""}
             .
           </li>

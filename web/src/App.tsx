@@ -207,7 +207,11 @@ function AuthenticatedApp() {
 
         <Route
           path="/automation"
-          element={<Guard permission="automation:read"><Automation /></Guard>}
+          element={
+            <Guard permission="automation:read">
+              <Automation health={health} />
+            </Guard>
+          }
         />
         <Route
           path="/automation/runs/:id"

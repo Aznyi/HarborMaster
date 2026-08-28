@@ -17,6 +17,7 @@ import { Automation } from "./Automation";
 import { AutomationPaused } from "./AutomationPaused";
 import { AutomationRun as AutomationRunPage } from "./AutomationRun";
 import { UpdatePolicies } from "./UpdatePolicies";
+import { healthState } from "../test/fixtures";
 import { TestSessionProvider, testSession, testUser } from "../test/session";
 
 /**
@@ -278,7 +279,7 @@ afterEach(() => {
 
 it("says the engine is off before offering anything", async () => {
   stub({ status: sampleStatus({ enabled: false }) });
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   const notice = await screen.findByText(/switched off in this deployment/i);
   expect(notice).toBeInTheDocument();
@@ -287,7 +288,7 @@ it("says the engine is off before offering anything", async () => {
 
 it("says what automatic mode actually does when the engine is on", async () => {
   stub();
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   const notice = await screen.findByText(/The update engine is on/i);
   // Not "automation is enabled". What HAPPENS.
@@ -298,7 +299,7 @@ it("says what automatic mode actually does when the engine is on", async () => {
 
 it("says when automation may next act, from the server's own calculation", async () => {
   stub();
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   await screen.findByText("Maintenance window");
   expect(screen.getByText("Closed")).toBeInTheDocument();
@@ -311,7 +312,7 @@ it("says when automation may next act, from the server's own calculation", async
 
 it("offers the dry run before the control that acts", async () => {
   stub();
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   const dryRun = await screen.findByRole("button", { name: "Dry run" });
   const run = screen.getByRole("button", { name: "Run pass" });
@@ -324,7 +325,7 @@ it("offers the dry run before the control that acts", async () => {
 
 it("sends only a dryRun flag when a pass is run", async () => {
   stub();
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Dry run" }));
 
@@ -338,7 +339,7 @@ it("sends only a dryRun flag when a pass is run", async () => {
 
 it("offers no pass control to a viewer", async () => {
   stub();
-  renderPage(<Automation />, "viewer");
+  renderPage(<Automation health={healthState()} />, "viewer");
 
   await screen.findByText("Maintenance window");
   expect(screen.queryByRole("button", { name: "Dry run" })).not.toBeInTheDocument();
@@ -347,7 +348,7 @@ it("offers no pass control to a viewer", async () => {
 
 it("refuses to run a pass while one is running", async () => {
   stub({ status: sampleStatus({ running: true }) });
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   const run = await screen.findByRole("button", { name: "Run pass" });
   expect(run).toBeDisabled();
@@ -368,7 +369,7 @@ it("renders why each container would be skipped", async () => {
       }),
     ],
   });
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   // Hidden by default: the preview leads with what WOULD change.
   await screen.findByText(/Nothing would be updated/i);
@@ -658,7 +659,7 @@ it("says which container HarborMaster will not update", async () => {
   render(
     <TestSessionProvider session={testSession({ user: testUser("administrator") })}>
       <MemoryRouter initialEntries={["/automation"]}>
-        <Automation />
+        <Automation health={healthState()} />
       </MemoryRouter>
     </TestSessionProvider>,
   );
@@ -679,7 +680,7 @@ it("says nothing about self-update when there is no identity", async () => {
   render(
     <TestSessionProvider session={testSession({ user: testUser("administrator") })}>
       <MemoryRouter initialEntries={["/automation"]}>
-        <Automation />
+        <Automation health={healthState()} />
       </MemoryRouter>
     </TestSessionProvider>,
   );
@@ -795,7 +796,7 @@ it("has no serious or critical axe findings on the paused view", async () => {
 // plans, created a policy, or resumed a pause on load.
 it("changes nothing when the automation page is opened", async () => {
   stub({ status: sampleStatus({ enabled: true, policies: 0 }) });
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   await screen.findByTestId("automation-onboarding");
 
@@ -824,7 +825,7 @@ it("changes nothing when the automation page is opened", async () => {
 // The request budget, asserted rather than assumed.
 it("reads each endpoint once and never per container", async () => {
   stub({ status: sampleStatus({ enabled: true }) });
-  renderPage(<Automation />);
+  renderPage(<Automation health={healthState()} />);
 
   await screen.findByTestId("automation-onboarding");
 

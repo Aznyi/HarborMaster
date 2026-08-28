@@ -1,3 +1,4 @@
+import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
 import type { AutomationStatus } from "../api/automationTypes";
@@ -180,7 +181,7 @@ export function SystemStrip({
       label: "Last checked",
       node: (
         <span className="text-sm text-content-muted">
-          {lastCheck ? new Date(lastCheck).toLocaleString() : "—"}
+          {formatMoment(lastCheck)}
         </span>
       ),
     },
@@ -276,7 +277,7 @@ function ActivityLine({ entry }: { entry: ActivityEntry }) {
       ) : null}
       {entry.at ? (
         <time dateTime={entry.at} className="ml-auto text-xs text-content-muted">
-          {new Date(entry.at).toLocaleString()}
+          {formatMoment(entry.at)}
         </time>
       ) : null}
     </li>

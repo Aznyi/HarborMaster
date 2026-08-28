@@ -1,4 +1,5 @@
-﻿import { useCallback, useMemo, useState } from "react";
+import { formatMoment, formatMomentOrNothing } from "../api/presentation";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { DependencySection } from "../components/DependencySection";
@@ -332,7 +333,7 @@ function ActivitySection({ detail }: { detail: ContainerDetailData }) {
                 <dd className="mt-1 text-sm">
                   {attention.lastUpdate.state}
                   {attention.lastUpdate.at
-                    ? " — " + new Date(attention.lastUpdate.at).toLocaleString()
+                    ? " — " + formatMoment(attention.lastUpdate.at)
                     : ""}
                 </dd>
               </div>
@@ -345,7 +346,7 @@ function ActivitySection({ detail }: { detail: ContainerDetailData }) {
                 <dd className="mt-1 text-sm">
                   {attention.lastRollback.state}
                   {attention.lastRollback.at
-                    ? " — " + new Date(attention.lastRollback.at).toLocaleString()
+                    ? " — " + formatMoment(attention.lastRollback.at)
                     : ""}
                 </dd>
               </div>
@@ -456,7 +457,7 @@ function SnapshotsTab({ id }: { id: string }) {
                   className="font-medium text-accent hover:underline"
                 >
                   <time dateTime={snapshot.createdAt}>
-                    {new Date(snapshot.createdAt).toLocaleString()}
+                    {formatMoment(snapshot.createdAt)}
                   </time>
                 </Link>
                 <TriggerBadge trigger={snapshot.trigger} />
@@ -541,10 +542,10 @@ function EventsTab({ id }: { id: string }) {
               {events.map((event) => (
                 <tr key={event.sequence} className="border-b border-border-subtle last:border-0">
                   <td className="px-3 py-2 text-xs text-content-muted" title={event.dockerTime}>
-                    {formatEventTime(event.dockerTime)}
+                    {formatMoment(event.dockerTime)}
                   </td>
                   <td className="px-3 py-2 text-xs text-content-muted" title={event.observedAt}>
-                    {formatEventTime(event.observedAt)}
+                    {formatMoment(event.observedAt)}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{event.action || "â€”"}</td>
                   <td className="px-3 py-2">
@@ -558,12 +559,6 @@ function EventsTab({ id }: { id: string }) {
       )}
     </DetailSection>
   );
-}
-
-function formatEventTime(iso: string | undefined): string {
-  if (!iso) return "â€”";
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
 }
 
 /**
@@ -714,9 +709,9 @@ function OverviewTab({ detail }: { detail: ContainerDetailData }) {
             <Field label="Short ID" value={overview.shortId} mono />
             <Field label="Host" value={overview.hostId} />
             <Field label="Image ID" value={overview.imageId} mono />
-            <Field label="Created" value={formatTimestamp(overview.createdAt)} />
-            <Field label="Started" value={formatTimestamp(overview.startedAt)} />
-            <Field label="Finished" value={formatTimestamp(overview.finishedAt)} />
+            <Field label="Created" value={formatMomentOrNothing(overview.createdAt)} />
+            <Field label="Started" value={formatMomentOrNothing(overview.startedAt)} />
+            <Field label="Finished" value={formatMomentOrNothing(overview.finishedAt)} />
             <Field label="Raw state" value={state.rawState} />
             <Field label="Status" value={state.status} />
             <Field
@@ -752,7 +747,7 @@ function OverviewTab({ detail }: { detail: ContainerDetailData }) {
                   mono
                   span
                 />
-                <Field label="Created" value={formatTimestamp(detail.image.createdAt)} />
+                <Field label="Created" value={formatMomentOrNothing(detail.image.createdAt)} />
                 <Field label="Size" value={formatBytes(detail.image.size)} />
                 <Field label="Architecture" value={detail.image.architecture} />
                 <Field label="OS" value={detail.image.os} />
@@ -980,7 +975,7 @@ function OutcomeCard({
       ) : null}
       {outcome.at ? (
         <p className="mt-1 text-xs text-content-muted">
-          {formatTimestamp(outcome.at) ?? outcome.at}
+          {formatMomentOrNothing(outcome.at) ?? outcome.at}
         </p>
       ) : null}
       <p className="mt-2 text-sm">
@@ -1506,12 +1501,6 @@ function RawTab({ id }: { id: string }) {
   );
 }
 
-function formatTimestamp(iso: string | undefined): string | undefined {
-  if (!iso) return undefined;
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
-}
-
 function formatMs(ms: number | undefined): string | undefined {
   if (!ms) return undefined;
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
@@ -1590,7 +1579,7 @@ function PolicyTab({ id }: { id: string }) {
         <p className="text-xs text-content-muted">
           Last evaluated{" "}
           <time dateTime={evaluation.evaluatedAt}>
-            {new Date(evaluation.evaluatedAt).toLocaleString()}
+            {formatMoment(evaluation.evaluatedAt)}
           </time>{" "}
           against {evaluation.policiesEvaluated}{" "}
           {evaluation.policiesEvaluated === 1 ? "policy" : "policies"}
