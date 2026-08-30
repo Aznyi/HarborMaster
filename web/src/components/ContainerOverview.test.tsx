@@ -35,7 +35,7 @@ function detail(attention?: Partial<ContainerDetail["attention"]>): ContainerDet
       health: "healthy",
     },
     attention: attention
-      ? ({ state: "none", trackingKnown: true, awaitingApproval: false,
+      ? ({ state: "notChecked", trackingKnown: true, awaitingApproval: false,
            automationPaused: false, openViolations: 0, openDrift: 0,
            ...attention } as ContainerDetail["attention"])
       : undefined,
@@ -81,9 +81,38 @@ it("names what the container follows for updates", () => {
 
 // --------------------------------------------------------------- update --
 
-it("says up to date when nothing is proposed", () => {
-  renderOverview(detail({ updateType: "none" }));
+it("says up to date when HarborMaster compared and found nothing newer", () => {
+  renderOverview(detail({ state: "upToDate", updateType: "none" }));
   expect(within(panel("Update")).getByText("Up to date")).toBeInTheDocument();
+});
+
+// The evidence-gap rule, on this panel.
+//
+// `internal/domain/attention.go`: "Absent evidence produces
+// AttentionNotChecked, never AttentionUpToDate." The panel used to render
+// "Up to date" for an ABSENT update type -- documented as "absent when no
+// assessment exists" -- so a container HarborMaster had never looked at was
+// reported as one it had looked at and cleared.
+it("does not call an unassessed container up to date", () => {
+  renderOverview(detail({ state: "notChecked" }));
+
+  const update = panel("Update");
+  expect(within(update).queryByText("Up to date")).not.toBeInTheDocument();
+  expect(within(update).getByText("Not checked")).toBeInTheDocument();
+});
+
+// The three other no-verdict states keep their own words rather than
+// collapsing into one another or into a reassurance.
+it.each([
+  ["notTracked", "Not tracked"],
+  ["cannotAdvise", "Cannot determine"],
+] as const)("renders %s as %s rather than up to date", (state, label) => {
+  renderOverview(detail({ state, updateType: "unknown" }));
+
+  const update = panel("Update");
+  expect(within(update).getByText(label)).toBeInTheDocument();
+  expect(within(update).queryByText("Up to date")).not.toBeInTheDocument();
+  expect(within(update).queryByText("Update available")).not.toBeInTheDocument();
 });
 
 it("shows an available update and sends the operator to Updates", () => {
@@ -218,8 +247,10 @@ it("does not claim independence when dependencies were never established", () =>
 // ------------------------------------------------------- missing input --
 
 it("renders without a projection at all", () => {
-  // A container HarborMaster has not assessed still has to render.
+  // A container HarborMaster has not assessed still has to render -- and must
+  // say so, rather than claiming the assessment came back clean.
   renderOverview(detail());
-  expect(within(panel("Update")).getByText("Up to date")).toBeInTheDocument();
+  expect(within(panel("Update")).getByText("Not checked")).toBeInTheDocument();
+  expect(within(panel("Update")).queryByText("Up to date")).not.toBeInTheDocument();
   expect(within(panel("Configuration")).getByText("Unchanged")).toBeInTheDocument();
 });

@@ -57,12 +57,37 @@ export const PRIMARY_NAV: readonly NavItem[] = [
   { label: "Settings", path: "/settings" },
 ] as const;
 
+/** A titled run of advanced destinations. */
+export interface NavGroup {
+  /** The subject, shown as a non-interactive heading above its entries. */
+  heading: string;
+  items: readonly NavItem[];
+}
+
 /**
- * The specialised tools, shown only when an operator asks for them.
+ * The specialised tools, shown only when an operator asks for them, grouped by
+ * subject.
  *
  * Every entry keeps the permission it has always had. This list is about
  * DENSITY, not access: the routes are unchanged, the guards are unchanged, and
  * a bookmark to any of them still works whether or not this section is shown.
+ *
+ * # Why the grouping is structure now and was a comment before
+ *
+ * These seventeen entries were already ordered by subject and the boundaries
+ * were already written down -- as `//` comments, which an operator scanning a
+ * seventeen-item list cannot see. Turning the comments into headings changes
+ * nothing about membership, permissions, URLs or order; it just makes the
+ * organisation visible to the person the organisation was for.
+ *
+ * # What a group is NOT
+ *
+ * It is not a destination, not a permission boundary, and not a disclosure
+ * control. A heading has no route and no handler, so it never enters the tab
+ * order and there is nothing to expand: an advanced page is exactly as many
+ * clicks away as it was before. Visibility is still decided per ENTRY by the
+ * permission it has always carried, and a group is shown only because one of
+ * its own entries survived that filter -- see `visibleNavGroups`.
  *
  * # Why some labels moved and the routes did not
  *
@@ -77,36 +102,59 @@ export const PRIMARY_NAV: readonly NavItem[] = [
  * and changing them would break bookmarks to buy nothing. Two entries gained a
  * qualifier instead of a rename: "Compliance policies" and "Docker events" were
  * ambiguous next to update policies and lifecycle activity.
- *
- * Order is by subject: container diagnostics, then the update lifecycle in the
- * order its records are created, then automation, then administration.
  */
-export const ADVANCED_NAV: readonly NavItem[] = [
-  // Container diagnostics.
-  { label: "Images", path: "/images", permission: "inventory:read" },
-  { label: "Available updates", path: "/images/updates", permission: "inventory:read" },
-  { label: "Restore points", path: "/snapshots", permission: "snapshot:read" },
-  { label: "Configuration changes", path: "/drift", permission: "drift:read" },
-
-  // Update internals: the lifecycle records, in the order they are created.
-  { label: "Update reviews", path: "/plans", permission: "plan:read" },
-  { label: "Image downloads", path: "/acquisitions", permission: "acquisition:read" },
-  { label: "Update history", path: "/executions", permission: "execution:read" },
-  { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
-
-  // Automation internals.
-  { label: "Update policies", path: "/update-policies", permission: "automation:read" },
-  { label: "Update order", path: "/dependencies", permission: "dependency:read" },
-  { label: "Paused containers", path: "/automation/paused", permission: "automation:read" },
-
-  // Administration and security.
-  { label: "Compliance", path: "/compliance", permission: "policy:read" },
-  { label: "Compliance policies", path: "/policies", permission: "policy:read" },
-  { label: "Notifications", path: "/notifications", permission: "notification:read" },
-  { label: "Docker events", path: "/events", permission: "event:read" },
-  { label: "Accounts", path: "/users", permission: "user:manage" },
-  { label: "Security audit", path: "/audit", permission: "audit:read" },
+export const ADVANCED_GROUPS: readonly NavGroup[] = [
+  {
+    heading: "Container diagnostics",
+    items: [
+      { label: "Images", path: "/images", permission: "inventory:read" },
+      { label: "Available updates", path: "/images/updates", permission: "inventory:read" },
+      { label: "Restore points", path: "/snapshots", permission: "snapshot:read" },
+      { label: "Configuration changes", path: "/drift", permission: "drift:read" },
+    ],
+  },
+  {
+    // The lifecycle records, in the order they are created.
+    heading: "Update lifecycle",
+    items: [
+      { label: "Update reviews", path: "/plans", permission: "plan:read" },
+      { label: "Image downloads", path: "/acquisitions", permission: "acquisition:read" },
+      { label: "Update history", path: "/executions", permission: "execution:read" },
+      { label: "Rollbacks", path: "/rollbacks", permission: "rollback:read" },
+    ],
+  },
+  {
+    heading: "Automation",
+    items: [
+      { label: "Update policies", path: "/update-policies", permission: "automation:read" },
+      { label: "Update order", path: "/dependencies", permission: "dependency:read" },
+      { label: "Paused containers", path: "/automation/paused", permission: "automation:read" },
+    ],
+  },
+  {
+    heading: "Administration & security",
+    items: [
+      { label: "Compliance", path: "/compliance", permission: "policy:read" },
+      { label: "Compliance policies", path: "/policies", permission: "policy:read" },
+      { label: "Notifications", path: "/notifications", permission: "notification:read" },
+      { label: "Docker events", path: "/events", permission: "event:read" },
+      { label: "Accounts", path: "/users", permission: "user:manage" },
+      { label: "Security audit", path: "/audit", permission: "audit:read" },
+    ],
+  },
 ] as const;
+
+/**
+ * Every advanced destination, flat and in display order.
+ *
+ * DERIVED from the groups rather than maintained beside them, so an entry
+ * cannot be listed in one place and missing from the other. Everything that
+ * asks "what can the sidebar name" -- the page title, the navigation filter --
+ * reads this and is unaffected by the grouping.
+ */
+export const ADVANCED_NAV: readonly NavItem[] = ADVANCED_GROUPS.flatMap(
+  (group) => group.items,
+);
 
 /**
  * Every destination the sidebar can name, primary or advanced.
@@ -137,6 +185,28 @@ export function visibleNavItems(
 }
 
 /**
+ * The advanced groups one account may see, with their surviving entries.
+ *
+ * A group has NO permission of its own. Its entries are filtered by
+ * `visibleNavItems` exactly as they were when the list was flat, and the group
+ * survives only if something survived inside it -- so a heading can never
+ * announce a subject an account cannot reach, and can never be the reason an
+ * account sees or misses a destination.
+ *
+ * An account that may read Docker events but not accounts or the audit still
+ * gets "Administration & security", holding Docker events alone.
+ */
+export function visibleNavGroups(
+  user: PublicUser | null,
+  groups: readonly NavGroup[] = ADVANCED_GROUPS,
+): readonly NavGroup[] {
+  if (!user) return [];
+  return groups
+    .map((group) => ({ ...group, items: visibleNavItems(user, group.items) }))
+    .filter((group) => group.items.length > 0);
+}
+
+/**
  * The responsive application shell.
  *
  * The sidebar is permanent from the `lg` breakpoint up and collapses to a
@@ -157,7 +227,7 @@ export function AppShell({
   const primary = visibleNavItems(session.user, PRIMARY_NAV);
   // Computed even when hidden, so the section can be skipped entirely when an
   // account holds none of the permissions behind it.
-  const advanced = visibleNavItems(session.user, ADVANCED_NAV);
+  const advanced = visibleNavGroups(session.user);
 
   // Navigating away must close the drawer, or the overlay traps the new page.
   useEffect(() => setDrawerOpen(false), [location.pathname]);
@@ -245,7 +315,7 @@ function Sidebar({
   open: boolean;
   onClose: () => void;
   primary: readonly NavItem[];
-  advanced: readonly NavItem[];
+  advanced: readonly NavGroup[];
 }) {
   return (
     <>
@@ -295,13 +365,18 @@ function Sidebar({
                 >
                   Advanced
                 </h2>
+                {/* Advanced stays ONE labelled group, with a group per subject
+                    inside it. The section did not become four sections: a
+                    screen reader still hears "Advanced" once, and the subjects
+                    are nested where they belong rather than announced as peers
+                    of the primary destinations. */}
                 <div
                   aria-labelledby="advanced-tools-heading"
                   role="group"
-                  className="flex flex-col gap-1"
+                  className="flex flex-col gap-4"
                 >
-                  {advanced.map((item) => (
-                    <SidebarLink key={item.path} item={item} />
+                  {advanced.map((group) => (
+                    <AdvancedGroup key={group.heading} group={group} />
                   ))}
                 </div>
               </div>
@@ -310,6 +385,42 @@ function Sidebar({
         </div>
       </aside>
     </>
+  );
+}
+
+/**
+ * One subject inside Advanced.
+ *
+ * The heading is a HEADING: no route, no handler, no tabindex. It names the
+ * run of links below it for a screen reader through `aria-labelledby`, and is
+ * skipped entirely by keyboard navigation, so grouping costs no keystrokes.
+ * It is rendered a step quieter than the entries themselves -- a subject label
+ * has to read as subordinate to the destinations it labels.
+ */
+function AdvancedGroup({ group }: { group: NavGroup }) {
+  const headingId = `advanced-group-${group.heading
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")}`;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <h3
+        id={headingId}
+        className="px-3 text-[0.6875rem] font-medium uppercase tracking-wide text-content-muted/70"
+      >
+        {group.heading}
+      </h3>
+      <div
+        role="group"
+        aria-labelledby={headingId}
+        className="flex flex-col gap-1"
+      >
+        {group.items.map((item) => (
+          <SidebarLink key={item.path} item={item} />
+        ))}
+      </div>
+    </div>
   );
 }
 

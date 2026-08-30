@@ -226,6 +226,32 @@ func NormalizeImageRef(raw string) (NormalizedRef, error) {
 	return ref, nil
 }
 
+// UnsupportedReferenceKey is the stored identity of a reference that
+// NormalizeImageRef refused.
+//
+// A refused reference has no canonical form, so the only identity available is
+// the raw string the container declared -- bounded here, because it comes from
+// a container's configuration and is therefore untrusted. Nothing is parsed,
+// lowercased or otherwise interpreted: this is an opaque key, not a reference.
+//
+// It exists so the two places that must agree on that key cannot drift. Image
+// intelligence WRITES an unsupported record under it, and the planner READS the
+// record back under it. They used to compute it separately and the planner's
+// half was missing entirely, so a container whose reference could not be
+// normalised was silently absent from planning rather than reported as
+// unassessable.
+//
+// Returns "" for an empty reference, which names no record.
+func UnsupportedReferenceKey(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if len(raw) > MaxReferenceBytes {
+		return raw[:MaxReferenceBytes]
+	}
+	return raw
+}
+
 // splitRegistryHost separates a leading registry host from the repository path.
 //
 // Docker's rule, and the reason it is a rule rather than a guess: the first

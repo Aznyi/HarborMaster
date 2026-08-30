@@ -834,6 +834,66 @@ func TestThePreflightRefusesEachUnsafeSituation(t *testing.T) {
 	}
 }
 
+// A plan for a reference that cannot be looked up must not become a download,
+// even with every other gate opened.
+//
+// # Why this is asserted rather than assumed
+//
+// Batch B1 made the planner write a plan for a container whose image reference
+// domain.NormalizeImageRef refuses -- so that "we cannot assess this" is
+// reported instead of the container silently vanishing. A new plan reaching a
+// surface that did not previously see one is exactly where a completeness fix
+// can turn into a capability, so the refusal is pinned here rather than
+// inferred from the risk model.
+//
+// The recommendation is forced to `proceed` deliberately. In production the
+// unsupported registry factor forces RecommendUnknown and the recommendation
+// gate refuses first; overriding it proves the refusal does NOT depend on the
+// risk model being right, which is what "fails closed" has to mean.
+//
+// The refusal is not asserted to be one particular value: several independent
+// gates reject this plan and which fires first is an ordering detail. What
+// matters is that it is refused and that nothing reached the daemon.
+func TestAnUnlookupablePlanNeverBecomesADownload(t *testing.T) {
+	harness := newAcquisitionHarness(t, func(h *acquisitionHarness) {
+		unsupported := func(plan *domain.ChangePlan) {
+			// Exactly what the planner writes for a refused reference: the raw
+			// declared reference, and nothing derived from it.
+			plan.CurrentImage = "registry.internal:5000/app:1.2.3"
+			plan.CurrentDigest = ""
+			plan.ProposedImage = ""
+			plan.ProposedDigest = ""
+			plan.UpdateType = domain.UpdateUnknown
+			plan.RegistryStatus = domain.CheckUnsupported
+			// Every other gate opened, including the one that really refuses
+			// this in production.
+			plan.Risk.Recommendation = domain.RecommendProceed
+		}
+		unsupported(&h.evidence.plan)
+		unsupported(&h.evidence.current)
+
+		h.evidence.intel.Status = domain.CheckUnsupported
+		h.evidence.intel.RemoteDigest = ""
+		h.evidence.intel.LatestTag = ""
+		h.evidence.intel.LatestDigest = ""
+	})
+
+	_, err := harness.service.Request(t.Context(),
+		service.AcquisitionRequest{PlanID: acqPlanID})
+	if err == nil {
+		t.Fatal("an image that can never be looked up was accepted for download")
+	}
+	if refusal := refusalFrom(t, err); refusal == "" {
+		t.Error("the request failed without recording why")
+	}
+
+	// The property that actually matters: no outbound acquisition happened for
+	// a reference the SSRF boundary refused to resolve.
+	if harness.acquirer.CallCount() != 0 {
+		t.Errorf("a refused request reached the daemon %d times", harness.acquirer.CallCount())
+	}
+}
+
 // A world that moves AFTER the request is accepted is caught by the second
 // preflight, and the acquisition fails with the specific refusal recorded.
 func TestAWorldThatMovesAfterTheRequestIsCaughtBeforeThePull(t *testing.T) {

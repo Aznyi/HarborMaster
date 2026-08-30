@@ -58,6 +58,9 @@ type fakePlanStore struct {
 	// gatheredContainers and gatheredRefs record the batch sizes asked for.
 	gatheredContainers []int
 	gatheredRefs       []int
+	// requestedRefs records the reference strings themselves, so a test can
+	// assert WHICH key a record was looked up under rather than how many.
+	requestedRefs []string
 
 	insertErr error
 }
@@ -107,6 +110,7 @@ func (f *fakePlanStore) GatherInputs(
 
 	f.gatheredContainers = append(f.gatheredContainers, len(containerIDs))
 	f.gatheredRefs = append(f.gatheredRefs, len(imageRefs))
+	f.requestedRefs = append(f.requestedRefs, imageRefs...)
 
 	inputs := store.PlanBatchInputs{
 		Drift:        make(map[string]store.SeverityRollup),
@@ -229,8 +233,16 @@ const (
 )
 
 // updatableIntel is an image with a patch update on offer.
+//
+// LastSuccessAt is set because a CheckOK record always carries one: the same
+// statement that writes update_type writes last_success_at, and only that
+// statement writes either. A fixture with a verdict but no successful lookup
+// describes a row the schema cannot produce -- and the planner now reads that
+// pair to tell a real comparison from the column default, so an unfaithful
+// fixture would test a state that cannot exist.
 func updatableIntel(reference, familiar, tag string) domain.ImageIntel {
 	published := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	answered := time.Date(2026, 8, 5, 11, 0, 0, 0, time.UTC)
 	return domain.ImageIntel{
 		Reference:    reference,
 		Familiar:     familiar,
@@ -248,6 +260,7 @@ func updatableIntel(reference, familiar, tag string) domain.ImageIntel {
 		// cannot be pinned.
 		LatestDigest:   planLatestDigest,
 		Status:         domain.CheckOK,
+		LastSuccessAt:  &answered,
 		PublishedAt:    &published,
 		ContainerCount: 1,
 	}
@@ -405,25 +418,6 @@ func TestAnUntrackedImageIsSkipped(t *testing.T) {
 	}
 	if result.Generated != 0 || result.Skipped != 1 {
 		t.Errorf("result = %+v, want one skip", result)
-	}
-}
-
-// A reference that cannot be normalised is skipped rather than planned against
-// a lookup that could never have happened.
-func TestAnUnnormalisableReferenceIsSkipped(t *testing.T) {
-	fake := newFakePlanStore()
-	fake.candidates = []store.PlanCandidate{
-		candidate("container-a", "web", "NOT A REFERENCE:::"),
-		candidate("container-b", "empty", ""),
-	}
-
-	planner := plannerAt(fake, plannerNow(t))
-	result, err := planner.Generate(context.Background())
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if result.Generated != 0 || result.Skipped != 2 {
-		t.Errorf("result = %+v, want two skips", result)
 	}
 }
 

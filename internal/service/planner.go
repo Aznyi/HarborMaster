@@ -312,7 +312,7 @@ func (s *PlannerService) planBatch(
 	// A set, because a hundred containers on one image must produce ONE
 	// reference in the query rather than a hundred duplicates.
 	referenceSet := make(map[string]struct{}, len(candidates))
-	normalized := make(map[string]domain.NormalizedRef, len(candidates))
+	declared := make(map[string]declaredImage, len(candidates))
 
 	// Lineage, by container name.
 	//
@@ -331,6 +331,9 @@ func (s *PlannerService) planBatch(
 			referenceSet[lineage.TrackingReference] = struct{}{}
 		}
 
+		// A container that declares no image at all. There is no reference to
+		// look up and no record to read back, so there is nothing to say about
+		// it beyond its presence, which the inventory already reports.
 		if candidate.ImageRef == "" {
 			continue
 		}
@@ -339,9 +342,29 @@ func (s *PlannerService) planBatch(
 			// A reference that cannot be normalised has no image intelligence
 			// to look up. It is still planned, with the registry evidence
 			// absent -- which the model reports as unknown rather than fine.
+			//
+			// That evidence EXISTS: image intelligence tracks a refused
+			// reference under its raw form with status unsupported, precisely
+			// so the gap is visible. Reading it back is what this branch does;
+			// omitting the key was the whole defect, and it made every such
+			// container silently absent from planning.
+			//
+			// No NormalizedRef is recorded, deliberately. Nothing downstream
+			// may derive a host, a repository, a tag or a target from a string
+			// this package refused to parse, so the entry carries a lookup key
+			// and nothing else.
+			key := domain.UnsupportedReferenceKey(candidate.ImageRef)
+			if key == "" {
+				continue
+			}
+			declared[candidate.ContainerID] = declaredImage{IntelKey: key}
+			referenceSet[key] = struct{}{}
 			continue
 		}
-		normalized[candidate.ContainerID] = reference
+		declared[candidate.ContainerID] = declaredImage{
+			Ref:      reference,
+			IntelKey: reference.Canonical,
+		}
 		referenceSet[reference.Canonical] = struct{}{}
 	}
 
@@ -357,7 +380,7 @@ func (s *PlannerService) planBatch(
 
 	result.plans = make([]domain.ChangePlan, 0, len(candidates))
 	for _, candidate := range candidates {
-		plan, state := s.planOne(candidate, normalized[candidate.ContainerID],
+		plan, state := s.planOne(candidate, declared[candidate.ContainerID],
 			lineages[candidate.ContainerName], inputs, evaluatedAt)
 		switch state {
 		case planNew:
@@ -383,6 +406,33 @@ func (s *PlannerService) planBatch(
 	return result, nil
 }
 
+// declaredImage is the DECLARED reference of one candidate, resolved as far as
+// it can be resolved.
+//
+// Two fields rather than one NormalizedRef, because a reference that cannot be
+// normalised still has a record to read and must still be assessable. Keeping
+// the lookup key separate is what lets the unsupported case carry a key WITHOUT
+// carrying a parsed reference: there is nowhere here for a host, a repository,
+// a tag or a digest that NormalizeImageRef refused to produce.
+type declaredImage struct {
+	// Ref is the normalised reference, and is the ZERO VALUE when the declared
+	// reference could not be normalised. Never partially filled.
+	Ref domain.NormalizedRef
+
+	// IntelKey is the key the image intelligence record is stored under: the
+	// canonical reference for a supported one, the bounded raw reference for an
+	// unsupported one, and "" for a candidate that declares no image at all.
+	//
+	// "" is not a lookup. An empty key is checked for explicitly before the map
+	// is read, so several containers with no reference cannot share one entry
+	// and cannot read another container's evidence.
+	//
+	// The two families cannot collide: a canonical reference always normalises
+	// (it is the fixed point of NormalizeImageRef), so no string that FAILED to
+	// normalise can equal one.
+	IntelKey string
+}
+
 // planState reports what happened to one container.
 type planState int
 
@@ -398,11 +448,16 @@ const (
 // the assessment's fingerprint matches the stored one.
 func (s *PlannerService) planOne(
 	candidate store.PlanCandidate,
-	reference domain.NormalizedRef,
+	declared declaredImage,
 	lineage domain.ImageLineage,
 	batch store.PlanBatchInputs,
 	evaluatedAt time.Time,
 ) (domain.ChangePlan, planState) {
+	// The normalised reference, which is the ZERO VALUE when the declared one
+	// could not be normalised. Every read of it below is a read of an empty
+	// field in that case, which is the honest answer rather than a guess.
+	reference := declared.Ref
+
 	// THE LINEAGE PATH.
 	//
 	// A container HarborMaster has updated runs `repo@sha256:...`. Asking
@@ -421,7 +476,17 @@ func (s *PlannerService) planOne(
 		}
 	}
 
-	intel, hasIntel := batch.Intel[reference.Canonical]
+	// The record for the reference the container DECLARES, read under the key
+	// that record is stored beneath. An empty key names no record and is never
+	// looked up: reading batch.Intel[""] would let every container with no
+	// reference share one entry.
+	var (
+		intel    domain.ImageIntel
+		hasIntel bool
+	)
+	if declared.IntelKey != "" {
+		intel, hasIntel = batch.Intel[declared.IntelKey]
+	}
 
 	// A plan describes a PROPOSED CHANGE. A container whose image has no update
 	// on offer has nothing to plan, and generating a row saying "no change
@@ -438,6 +503,11 @@ func (s *PlannerService) planOne(
 	// A container with no tracked intelligence at all has not been looked at
 	// yet. Nothing to plan and nothing to say beyond that, which the image
 	// intelligence dashboard already reports.
+	//
+	// This is NOT the unsupported case. An unsupported reference HAS a record
+	// -- written by the inventory sync, status unsupported, never queued for a
+	// lookup -- so it falls through to the assessment below and is reported as
+	// unassessable rather than omitted.
 	if !hasIntel {
 		return domain.ChangePlan{}, planSkipped
 	}
@@ -455,8 +525,91 @@ func (s *PlannerService) planOne(
 		CurrentTag:     reference.Tag,
 		ProposedImage:  target.Reference(),
 		ProposedDigest: target.Digest(),
-		UpdateType:     intel.Update,
+		UpdateType:     observedUpdateType(intel),
 	}, batch, evaluatedAt)
+}
+
+// observedUpdateType is what the registry record actually ESTABLISHED about
+// this reference, as distinct from what its column happens to hold.
+//
+// This is the ONE place that decision is made, and every plan built from a
+// declared reference goes through it.
+//
+// # The contract it defends
+//
+// domain.UpdateNone is a POSITIVE claim -- "the image is current: the tag has
+// not moved and no newer comparable tag exists" -- and the attention model
+// turns it into AttentionUpToDate, "HarborMaster looked and found nothing to
+// do". internal/domain/attention.go states the rule it must not break:
+//
+//	Absent evidence produces AttentionNotChecked, never AttentionUpToDate.
+//
+// The attention model cannot uphold that by itself. It is a pure function of
+// the evidence handed to it, so a planner that hands it a `none` which is
+// really a column default makes it say "up to date" about a comparison that
+// never happened -- and no amount of correctness in assessState can recover
+// from an input that is already a lie. Closing that gap is this function's
+// whole job, which is why the check lives here rather than being repeated as a
+// status switch in the attention model.
+//
+// # Telling a real verdict from the column default
+//
+// `image_intel.update_type` is `NOT NULL DEFAULT 'none'`, and it is written by
+// exactly one statement: the CheckOK arm of ImageIntelRepository.RecordCheck.
+// The failure arm deliberately leaves it alone, "because blanking them would
+// turn 'we could not reach the registry' into 'no update is available', which
+// is a different and false claim". The inventory upsert does not touch it
+// either.
+//
+// That same CheckOK statement is the only writer of `last_success_at`. So
+// LastSuccessAt == nil means NO comparison has ever succeeded for this
+// reference, and whatever its update column says is the DEFAULT rather than an
+// observation. This is a marker the model already defines -- "the most recent
+// [lookup] that answered" -- and already relies on: both the acquisition and
+// the execution preflight refuse on `intel.LastSuccessAt == nil`. It is not a
+// timestamp being read as a proxy for a semantic state.
+//
+// Without this clause a container reports "Up to date" whenever its FIRST
+// lookup did not succeed -- pending because nothing has run yet, notFound for
+// a locally built image that was never published, unauthorized for a private
+// repository HarborMaster holds no credentials for by design. None of those
+// compared anything.
+//
+// # What is deliberately preserved
+//
+// A reference that HAS succeeded keeps intel.Update exactly as stored, however
+// the most recent lookup went. A transient failure, a rate limit, or a
+// repository that has just become private must not erase a real `major`,
+// `patch` or `none` that a real comparison established: that verdict remains
+// the best knowledge available, which is precisely why the failure arm
+// preserves it in the first place.
+//
+// # Why unsupported is judged separately
+//
+// An unsupported reference is never queued, so it will never be compared
+// AGAIN. Where a failure is a gap that the next pass may close, this one never
+// closes, and any verdict such a row happens to carry -- from before a
+// normalisation rule tightened around its reference -- is frozen with no
+// possibility of refresh or contradiction. Reported as unknown whatever its
+// history, which is also what Batch B1 established and pinned.
+//
+// # Nothing becomes actionable
+//
+// UpdateUnknown is the model's own word for this state: "an update may exist
+// but its size could not be determined". It is non-actionable in exactly the
+// places UpdateNone is -- UpdateType.Available() is false for both, and
+// UpdateStrategy.Permits refuses both -- so moving between them changes what an
+// operator is TOLD and never what may be DONE.
+func observedUpdateType(intel domain.ImageIntel) domain.UpdateType {
+	// Never comparable again, so a stored verdict can never be refreshed.
+	if intel.Status == domain.CheckUnsupported {
+		return domain.UpdateUnknown
+	}
+	// Never compared at all, so a stored verdict is the column default.
+	if intel.LastSuccessAt == nil {
+		return domain.UpdateUnknown
+	}
+	return intel.Update
 }
 
 // lineageFor reads the lineage of every container in the batch, by name.

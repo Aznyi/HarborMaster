@@ -1,8 +1,15 @@
 import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
-import type { ContainerAttention, ContainerDetail } from "../api/inventoryTypes";
+import type {
+  AttentionState,
+  ContainerAttention,
+  ContainerDetail,
+  ImageRef,
+} from "../api/inventoryTypes";
 import { UPDATE_TYPE_LABELS } from "../api/imageTypes";
+import { formatImageReference } from "../api/presentation";
+import { ATTENTION_LABELS, ATTENTION_MEANINGS } from "./AttentionBadges";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
 
 /**
@@ -34,9 +41,17 @@ export function ContainerOverview({ detail }: { detail: ContainerDetail }) {
     <div className="flex flex-col gap-4" data-testid="container-overview">
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
         <Panel title="Image">
-          <p className="break-all font-mono text-sm">
-            {detail.overview.image?.raw ?? "—"}
-          </p>
+          {/*
+            The SUMMARY form. A container HarborMaster has updated runs an
+            immutable digest, so this panel was 71 characters of hex in a card
+            three of which fit across a desktop -- and the one part an operator
+            reads, the repository and tag, was the part pushed off the line.
+
+            Only the digest is abbreviated, the whole value is on the element's
+            title, and the Details tab's Image section carries it complete and
+            unabbreviated a click away. Nothing here is the only copy.
+          */}
+          <ImageReference image={detail.overview.image} />
           {attention?.tracking ? (
             <p className="mt-1 text-xs text-content-muted">
               Follows <span className="font-mono">{attention.tracking}</span>
@@ -77,19 +92,78 @@ function Panel({
 }
 
 /**
+ * One image reference, compact, with the complete value one hover away.
+ *
+ * Uses the shared `formatImageReference` rather than a second rule: Batch A
+ * settled that only the digest hex is shortened, that a tag is never shortened,
+ * that a reference carrying both keeps both, and that anything it cannot parse
+ * is passed through whole.
+ */
+function ImageReference({ image }: { image?: ImageRef }) {
+  if (!image) {
+    return <p className="break-all font-mono text-sm">&mdash;</p>;
+  }
+
+  const reference = formatImageReference(image);
+  return (
+    <p
+      className="break-all font-mono text-sm"
+      title={reference.abbreviated ? reference.full : undefined}
+    >
+      {reference.display}
+    </p>
+  );
+}
+
+/**
+ * The four verdicts that mean there is nothing here to act on.
+ *
+ * They are NOT interchangeable, and this panel used to render all of them --
+ * plus the case where no assessment exists at all -- as "Up to date". That is
+ * the exact confusion `internal/domain/attention.go` forbids:
+ *
+ *	Absent evidence produces AttentionNotChecked, never AttentionUpToDate.
+ *	[...] one says HarborMaster looked and found nothing to do, the other
+ *	says HarborMaster has not looked.
+ *
+ * `ContainerAttention.updateType` is documented as "absent when no assessment
+ * exists, never defaulted to none", so treating an absent one as "none" turned
+ * a container HarborMaster had never assessed into a reassurance.
+ */
+const NO_UPDATE_STATES = new Set<AttentionState>([
+  "upToDate",
+  "notChecked",
+  "notTracked",
+  "cannotAdvise",
+]);
+
+/**
  * The update verdict, in the same words Phase 2 uses.
  *
  * Deliberately not a second recommendation engine: the recommendation is read
- * off the projection, and acting on it happens in the Updates workspace.
+ * off the projection, and acting on it happens in the Updates workspace. WHICH
+ * kind of "nothing to do" applies is likewise read off `state` -- the verdict
+ * the server already computed -- rather than re-derived here from the update
+ * type. Two surfaces deriving the same four answers separately is how they come
+ * to disagree, and the Updates workspace derives them from the plan's registry
+ * status and says them in these same words.
  */
 function UpdatePanel({ attention }: { attention?: ContainerAttention }) {
-  if (!attention || !attention.updateType || attention.updateType === "none") {
+  const updateType = attention?.updateType;
+
+  // `unknown` belongs here too: it means a newer image MAY exist and its size
+  // could not be determined, which is the absence of a verdict rather than an
+  // available update. Rendering it as "Update available" would show one
+  // container two vocabularies across two pages.
+  if (!attention || !updateType || updateType === "none" || updateType === "unknown") {
+    // Degrade to the answer that claims the least, exactly as `rowAttention`
+    // does for a payload it does not recognise.
+    const verdict: AttentionState =
+      attention && NO_UPDATE_STATES.has(attention.state) ? attention.state : "notChecked";
     return (
       <Panel title="Update">
-        <p className="text-sm">Up to date</p>
-        <p className="mt-1 text-xs text-content-muted">
-          Nothing newer has been established for what this container follows.
-        </p>
+        <p className="text-sm">{ATTENTION_LABELS[verdict]}</p>
+        <p className="mt-1 text-xs text-content-muted">{ATTENTION_MEANINGS[verdict]}</p>
       </Panel>
     );
   }
@@ -125,7 +199,7 @@ function UpdatePanel({ attention }: { attention?: ContainerAttention }) {
         </p>
       ) : null}
       <p className="mt-1 text-xs text-content-muted">
-        {UPDATE_TYPE_LABELS[attention.updateType]}
+        {UPDATE_TYPE_LABELS[updateType]}
       </p>
     </Panel>
   );

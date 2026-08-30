@@ -1,6 +1,7 @@
 import { useId, useMemo, useState } from "react";
 
 import type { ContainerListRow } from "../api/inventoryTypes";
+import { formatImageReference } from "../api/presentation";
 import { useContainerPage } from "../hooks/useContainers";
 
 /**
@@ -181,6 +182,8 @@ function ContainerOption({
   checked: boolean;
   onToggle: () => void;
 }) {
+  const image = formatImageReference(row.image);
+
   return (
     <li className="border-b border-border-subtle last:border-b-0">
       <label className="flex min-h-11 cursor-pointer items-center gap-2 px-3 py-2 text-sm">
@@ -191,11 +194,19 @@ function ContainerOption({
           onChange={onToggle}
         />
         <span className="min-w-0 flex-1">
-          {/* Both wrap rather than truncate: a long name that is cut off is a
-              name an operator cannot verify they picked correctly. */}
+          {/* The NAME wraps rather than truncates: a long name that is cut off
+              is a name an operator cannot verify they picked correctly, and the
+              name is what this control actually selects. */}
           <span className="block break-all font-medium">{row.name}</span>
-          <span className="block break-all text-xs text-content-muted">
-            {row.image.raw}
+          {/* The image is context for telling two similarly named containers
+              apart, not the value being chosen, so it takes the compact form.
+              Only the digest is shortened and the whole reference stays on the
+              title. */}
+          <span
+            className="block break-all text-xs text-content-muted"
+            title={image.abbreviated ? image.full : undefined}
+          >
+            {image.display}
           </span>
         </span>
       </label>

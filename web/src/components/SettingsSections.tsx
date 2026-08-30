@@ -68,6 +68,21 @@ function DestinationList({
   );
 }
 
+/**
+ * The shared class for a linkable Settings heading.
+ *
+ * `scroll-mt-24` clears the sticky application header: without it the browser
+ * scrolls the heading to y=0, which is underneath the header, and the section
+ * an operator asked for arrives already hidden.
+ *
+ * `tabIndex={-1}` at each use site makes the heading a focus target so that
+ * following an in-page link moves the KEYBOARD to the section, not just the
+ * viewport -- otherwise the next Tab continues from wherever focus already was,
+ * which for a screen-reader user means the link did nothing at all.
+ */
+export const SECTION_HEADING =
+  "scroll-mt-24 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-raised";
+
 function Section({
   id,
   title,
@@ -85,7 +100,7 @@ function Section({
       data-testid={id}
       className="rounded-xl border border-border-subtle bg-surface-raised p-5"
     >
-      <h3 id={id} className="font-semibold">
+      <h3 id={id} tabIndex={-1} className={SECTION_HEADING}>
         {title}
       </h3>
       {description ? (

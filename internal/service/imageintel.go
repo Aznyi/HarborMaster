@@ -335,10 +335,11 @@ func (s *ImageIntelService) seed(reference store.InventoryReference) store.Image
 		// Tracked but never contacted. The canonical form is unavailable, so
 		// the raw reference is the identity -- bounded, because an unbounded one
 		// would not have reached the inventory either.
-		raw := reference.Reference
-		if len(raw) > domain.MaxReferenceBytes {
-			raw = raw[:domain.MaxReferenceBytes]
-		}
+		//
+		// Computed by the SHARED helper rather than here, because the planner
+		// reads this record back under the same key and the two deriving it
+		// separately is exactly how the planner came to miss it.
+		raw := domain.UnsupportedReferenceKey(reference.Reference)
 		return store.ImageReferenceSeed{
 			Reference: raw,
 			Familiar:  raw,

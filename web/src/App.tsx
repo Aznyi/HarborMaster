@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router";
+import { Route, Routes } from "react-router";
 import type { ReactNode } from "react";
 
 import type { Permission } from "./api/authTypes";
@@ -36,6 +36,7 @@ import { Images } from "./pages/Images";
 import { ContainerPolicy } from "./pages/ContainerPolicy";
 import { Policies } from "./pages/Policies";
 import { PolicyViolations } from "./pages/PolicyViolations";
+import { NotFound } from "./pages/NotFound";
 import { Settings } from "./pages/Settings";
 import { Updates } from "./pages/Updates";
 import { SignIn } from "./pages/SignIn";
@@ -255,7 +256,21 @@ function AuthenticatedApp() {
         <Route path="/account" element={<Account />} />
         <Route path="/settings" element={<Settings health={health} />} />
 
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/*
+          An unknown address RENDERS rather than redirects.
+
+          This wildcard used to be `<Navigate to="/" replace />`, which made
+          every broken internal link look like it worked: the operator landed on
+          the dashboard and had no reason to think otherwise. Batch A found
+          three links to `/automation/policies`, a route that has never existed,
+          hidden exactly this way.
+
+          Inside the authenticated route set on purpose. The shell, the sidebar,
+          the header controls and the session requirement are all the same as
+          any other page -- an unknown path is a missing page, not a way around
+          signing in.
+        */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </AppShell>
   );

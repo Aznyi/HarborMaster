@@ -9,8 +9,10 @@ import { PageIntro } from "../components/PageIntro";
 import {
   AccessSettings,
   NotificationDestinations,
+  SECTION_HEADING,
   SecuritySettings,
 } from "../components/SettingsSections";
+import { SettingsNav, useSettingsHashTarget } from "../components/SettingsNav";
 import { LoadingState } from "../components/States";
 import { StatusBadge, componentTone } from "../components/StatusBadge";
 
@@ -34,6 +36,9 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
   const build = useVersion();
   const features = health.data?.features;
 
+  // Deep links only. An in-page link click is handled by the browser itself.
+  useSettingsHashTarget();
+
   return (
     <div className="flex flex-col gap-6">
       <PageIntro
@@ -41,8 +46,12 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
         description="HarborMaster is configured entirely through environment variables. Values are never displayed here or written to the log, because the same mechanism carries credentials. What this page shows is what the running process can actually do."
       />
 
+      <SettingsNav hasFeatures={Boolean(features)} />
+
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Observed state</h3>
+        <h3 id="settings-status" tabIndex={-1} className={SECTION_HEADING}>
+          Observed state
+        </h3>
         <dl className="mt-4 flex flex-col gap-3 text-sm">
           <Row label="Docker Engine">
             {health.data ? (
@@ -78,7 +87,9 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
       <FeatureSections features={features} />
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Build</h3>
+        <h3 id="settings-build" tabIndex={-1} className={SECTION_HEADING}>
+          Build
+        </h3>
         {build.status === "loading" ? (
           <div className="mt-4">
             <LoadingState label="Loading build information" />
@@ -100,7 +111,9 @@ export function Settings({ health }: { health: ResourceState<HealthReport> }) {
       </section>
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Where to change any of this</h3>
+        <h3 id="settings-configuration" tabIndex={-1} className={SECTION_HEADING}>
+          Where to change any of this
+        </h3>
         <p className="mt-2 text-sm text-content-muted">
           Every setting lives in the environment. The supported deployment
           forwards them through{" "}
@@ -170,7 +183,9 @@ function AdvancedToolsSection() {
 
   return (
     <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-      <h3 className="font-semibold">Advanced</h3>
+      <h3 id="settings-advanced" tabIndex={-1} className={SECTION_HEADING}>
+          Advanced
+        </h3>
       <p className="mt-2 max-w-prose text-sm text-content-muted">
         HarborMaster keeps a record of every stage of an update: the images it
         found, the plans it wrote, the downloads, the recreations, the
@@ -206,7 +221,9 @@ function FeatureSections({ features }: { features?: Features }) {
   if (!features) {
     return (
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Features</h3>
+        <h3 id="settings-capabilities" tabIndex={-1} className={SECTION_HEADING}>
+          Features
+        </h3>
         <p className="mt-2 text-sm text-content-muted">
           This deployment did not report which features are enabled.
         </p>
@@ -217,7 +234,9 @@ function FeatureSections({ features }: { features?: Features }) {
   return (
     <>
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Observation</h3>
+        <h3 id="settings-capabilities" tabIndex={-1} className={SECTION_HEADING}>
+          Observation
+        </h3>
         <p className="mt-2 text-sm text-content-muted">
           These read the host and HarborMaster&rsquo;s own records. None of them
           can change a container.
@@ -238,7 +257,9 @@ function FeatureSections({ features }: { features?: Features }) {
       </section>
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">What this deployment may do to the host</h3>
+        <h3 id="settings-host" tabIndex={-1} className={SECTION_HEADING}>
+          What this deployment may do to the host
+        </h3>
         <p className="mt-2 text-sm text-content-muted">
           Each is a separate capability, off unless it was asked for. When one is
           off the interface is never wired, so the ability is{" "}
@@ -295,7 +316,9 @@ function FeatureSections({ features }: { features?: Features }) {
       </section>
 
       <section className="rounded-xl border border-border-subtle bg-surface-raised p-5">
-        <h3 className="font-semibold">Notifications</h3>
+        <h3 id="settings-notifications" tabIndex={-1} className={SECTION_HEADING}>
+          Notifications
+        </h3>
         <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
           <Feature
             label="Delivery"

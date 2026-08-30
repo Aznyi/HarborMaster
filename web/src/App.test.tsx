@@ -266,17 +266,63 @@ describe("App shell", () => {
     await settle();
   });
 
-  it("redirects unknown routes to the dashboard", async () => {
+  // Batch B2 replaced the wildcard redirect with a real Not Found page.
+  //
+  // The redirect was the friendliest possible failure and it hid real defects:
+  // a link to a route that never existed landed on the dashboard, so nothing
+  // looked wrong. Batch A found three such links. What is asserted here is that
+  // the failure is now VISIBLE -- and that the dashboard specifically is not
+  // what an unknown address renders.
+  it("renders Not Found for an unknown route rather than the dashboard", async () => {
     stubApi(healthyReport);
     renderApp("/does-not-exist");
 
     await waitFor(() =>
       expect(
-        // The dashboard now leads with the attention list rather than the
-        // inventory panel, so this is what "landed on the dashboard" looks
-        // like.
-        screen.getByRole("heading", { name: /your containers/i }),
+        screen.getByRole("heading", { name: /page not found/i }),
       ).toBeInTheDocument(),
     );
+
+    // The dashboard leads with the attention list, so this is what "silently
+    // landed on the dashboard" would look like.
+    expect(
+      screen.queryByRole("heading", { name: /your containers/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // The address bar is the point. An operator has to be able to see WHICH path
+  // failed, a screenshot has to stay truthful, and a bookmark to a dead link
+  // must not quietly become a dashboard bookmark.
+  it("leaves the unknown address in the URL", async () => {
+    stubApi(healthyReport);
+    renderApp("/some/mistyped/path");
+
+    const marker = await screen.findByTestId("not-found-path");
+    expect(marker).toHaveAttribute("data-path", "/some/mistyped/path");
+  });
+
+  // A missing page is still a page of the signed-in application: same shell,
+  // same six destinations, same header controls.
+  it("keeps the normal application shell on Not Found", async () => {
+    stubApi(healthyReport);
+    renderApp("/does-not-exist");
+
+    await screen.findByRole("heading", { name: /page not found/i });
+
+    const sidebar = await screen.findByRole("navigation", { name: /primary/i });
+    for (const label of [
+      "Dashboard",
+      "Containers",
+      "Updates",
+      "Automation",
+      "Activity",
+      "Settings",
+    ]) {
+      expect(within(sidebar).getByRole("link", { name: label })).toBeInTheDocument();
+    }
+
+    expect(
+      screen.getByRole("link", { name: /go to dashboard/i }),
+    ).toHaveAttribute("href", "/");
   });
 });
