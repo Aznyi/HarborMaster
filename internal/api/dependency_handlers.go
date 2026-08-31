@@ -228,7 +228,15 @@ func (s *Server) handleDependenciesForContainer(w http.ResponseWriter, r *http.R
 	containerID := strings.TrimSpace(r.PathValue("id"))
 	// Resolved through the inventory rather than trusted. The path value is
 	// caller input; the NAME the lookup returns is a record HarborMaster wrote.
-	detail, err := s.containers.Get(r.Context(), containerID)
+	//
+	// GetPresent, not Get. This endpoint answers a CURRENT question -- the
+	// state, the stage, the outstanding reattachments -- and it resolves the id
+	// to a NAME before reading. With Get, a departed container's id resolved to
+	// its name and the response described whichever container holds that name
+	// NOW: one instance's operational state returned under another instance's
+	// id. A departed container has no current dependencies, and saying so is
+	// the only truthful answer available.
+	detail, err := s.containers.GetPresent(r.Context(), containerID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && detail == nil) {
 		writeError(w, r, s.logger, http.StatusNotFound, CodeNotFound, "container not found")
 		return

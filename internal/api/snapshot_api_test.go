@@ -180,6 +180,21 @@ func (f *fakeContainerReader) Attention(
 func (f *fakeContainerReader) Get(context.Context, string) (*domain.ContainerDetail, error) {
 	return f.detail, f.err
 }
+
+// GetPresent models the repository: a departed container is not found, so a
+// diff against "the current container" has nothing to compare.
+func (f *fakeContainerReader) GetPresent(
+	ctx context.Context, id string,
+) (*domain.ContainerDetail, error) {
+	detail, err := f.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if detail != nil && !detail.Overview.Present {
+		return nil, store.ErrNotFound
+	}
+	return detail, nil
+}
 func (f *fakeContainerReader) ResolveID(_ context.Context, ref string) (string, error) {
 	return ref, nil
 }
@@ -216,7 +231,7 @@ func newSnapshotServer(t *testing.T) *snapshotTestServer {
 	snapshots := newFakeSnapshots()
 	capture := &fakeCapture{enabled: true}
 	detail := domain.ContainerDetail{
-		Overview: domain.ContainerSummary{ID: "c1", Name: "web"},
+		Overview: domain.ContainerSummary{ID: "c1", Name: "web", Present: true},
 		Labels:   []domain.Label{{Key: "app", Value: "api"}},
 	}
 

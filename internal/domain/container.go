@@ -168,8 +168,15 @@ type ContainerDetail struct {
 	// honest rather than empty: it means nothing is being followed.
 	ImageLineage *ImageLineage `json:"imageLineage,omitempty"`
 
-	// RunningDigest is the manifest digest this container is ACTUALLY running,
-	// resolved by RunningDigestFor.
+	// RunningDigest is the manifest digest this container was running as of the
+	// inventory record carrying it, resolved by RunningDigestFor.
+	//
+	// It is only a claim about NOW when the record is a present one. This
+	// struct is returned for departed containers too -- that is what a detail
+	// page and an Activity entry render -- and on such a record this is the
+	// digest the container was running when it left. A caller reasoning about
+	// what is running must establish presence first; see
+	// ContainerRepository.GetPresent.
 	//
 	// Distinct from Overview.Image.Digest, which is only ever the digest the
 	// declared REFERENCE carries and is therefore empty for every container

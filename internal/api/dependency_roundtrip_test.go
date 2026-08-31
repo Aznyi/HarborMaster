@@ -178,7 +178,7 @@ func dependencyServer(role domain.Role, deps *fakeDependencies) (*Server, *stubA
 		Dependencies: deps,
 		Containers: &fakeContainers{
 			detail: &domain.ContainerDetail{
-				Overview: domain.ContainerSummary{ID: "abcdef0123456789", Name: "sonarr"},
+				Overview: domain.ContainerSummary{ID: "abcdef0123456789", Name: "sonarr", Present: true},
 			},
 		},
 	}, role)

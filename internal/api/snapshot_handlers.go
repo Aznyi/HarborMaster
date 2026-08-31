@@ -436,7 +436,12 @@ func (s *Server) currentDiffInput(w http.ResponseWriter, r *http.Request, contai
 		return service.DiffInput{}, false
 	}
 
-	detail, err := s.containers.Get(r.Context(), containerID)
+	// GetPresent, not Get. This diff is "the snapshot versus what the container
+	// looks like NOW", so a departed container has nothing to compare against.
+	// Get returned its tombstone and the endpoint presented that container's
+	// last recorded configuration as its current one -- the message below was
+	// already written for this case and could never fire.
+	detail, err := s.containers.GetPresent(r.Context(), containerID)
 	if errors.Is(err, store.ErrNotFound) || detail == nil {
 		writeError(w, r, s.logger, http.StatusNotFound, CodeNotFound,
 			"the container this snapshot describes is no longer in the inventory")

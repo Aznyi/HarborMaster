@@ -42,6 +42,10 @@ func (f *fakeInventory) TriggerAsync(trigger domain.RefreshTrigger) (bool, time.
 func (f *fakeInventory) CheckRuntime(context.Context) error { return f.runtimeErr }
 
 type fakeContainers struct {
+	// absent makes GetPresent report the container as gone from the host
+	// while Get still returns its record.
+	absent bool
+
 	summaries  []domain.ContainerSummary
 	total      int
 	detail     *domain.ContainerDetail
@@ -87,6 +91,25 @@ func (f *fakeContainers) Get(context.Context, string) (*domain.ContainerDetail, 
 		return nil, f.getErr
 	}
 	return f.detail, nil
+}
+
+// GetPresent models the repository: a departed container is not found.
+//
+// absent lets a test place a container that HarborMaster still has a record of
+// but that is no longer on the host -- the state where Get and GetPresent
+// deliberately disagree.
+func (f *fakeContainers) GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error) {
+	if f.absent {
+		return nil, store.ErrNotFound
+	}
+	detail, err := f.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if detail != nil && !detail.Overview.Present {
+		return nil, store.ErrNotFound
+	}
+	return detail, nil
 }
 
 func (f *fakeContainers) ResolveID(_ context.Context, reference string) (string, error) {

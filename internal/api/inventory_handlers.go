@@ -30,7 +30,12 @@ type InventoryReader interface {
 // ContainerReader is the container query capability the API depends on.
 type ContainerReader interface {
 	List(ctx context.Context, filter store.ContainerFilter) ([]domain.ContainerSummary, int, error)
+	// Get returns HarborMaster's RECORD, present or not -- the container detail
+	// page renders a departed container from it, and must keep doing so.
 	Get(ctx context.Context, id string) (*domain.ContainerDetail, error)
+	// GetPresent returns it only while the container is on the host. Used by
+	// the endpoints that describe CURRENT state; see ContainerRepository.Get.
+	GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error)
 	ResolveID(ctx context.Context, reference string) (string, error)
 	RawInspection(ctx context.Context, id string) ([]byte, error)
 	DistinctComposeProjects(ctx context.Context) ([]string, error)
