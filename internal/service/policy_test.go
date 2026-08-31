@@ -65,7 +65,7 @@ type fakePolicyContainers struct {
 	absent map[string]bool
 }
 
-func (f *fakePolicyContainers) Get(_ context.Context, id string) (*domain.ContainerDetail, error) {
+func (f *fakePolicyContainers) GetPresent(_ context.Context, id string) (*domain.ContainerDetail, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	detail, ok := f.details[id]

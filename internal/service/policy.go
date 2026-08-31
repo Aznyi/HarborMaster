@@ -72,7 +72,11 @@ type PolicyDefinitions interface {
 
 // PolicyContainers is the inventory capability the engine needs.
 type PolicyContainers interface {
-	Get(ctx context.Context, id string) (*domain.ContainerDetail, error)
+	// GetPresent, not Get: this service reasons about a container's CURRENT
+	// configuration, and the inventory keeps a row after the container leaves.
+	// Get would hand back that tombstone and the evaluation would describe a
+	// container that is not there. See ContainerRepository.Get.
+	GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error)
 	List(ctx context.Context, filter store.ContainerFilter) ([]domain.ContainerSummary, int, error)
 }
 
@@ -234,7 +238,7 @@ func (s *PolicyService) evaluateAgainst(
 	evaluatedAt := s.now().UTC()
 	generation := s.currentGeneration(ctx)
 
-	detail, err := s.containers.Get(ctx, containerID)
+	detail, err := s.containers.GetPresent(ctx, containerID)
 	if err != nil || detail == nil {
 		// A container that has left the inventory has no current configuration
 		// to check. Nothing is recorded: writing an evaluation would claim a

@@ -30,7 +30,11 @@ var (
 // able to generate traffic against a privileged socket, which would make the
 // endpoint a denial-of-service amplifier.
 type SnapshotContainers interface {
-	Get(ctx context.Context, id string) (*domain.ContainerDetail, error)
+	// GetPresent, not Get: this service reasons about a container's CURRENT
+	// configuration, and the inventory keeps a row after the container leaves.
+	// Get would hand back that tombstone and the evaluation would describe a
+	// container that is not there. See ContainerRepository.Get.
+	GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error)
 	ResolveID(ctx context.Context, reference string) (string, error)
 }
 
@@ -161,7 +165,7 @@ func (s *SnapshotService) Capture(ctx context.Context, req CaptureRequest) (doma
 	}
 	defer s.endCapture(containerID)
 
-	detail, err := s.containers.Get(ctx, containerID)
+	detail, err := s.containers.GetPresent(ctx, containerID)
 	if err != nil {
 		return domain.Snapshot{}, err
 	}

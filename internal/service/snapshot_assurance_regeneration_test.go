@@ -176,7 +176,7 @@ func regenHasher(t *testing.T) *service.Hasher {
 // staticContainers serves one container detail to the capture path.
 type staticContainers struct{ detail *domain.ContainerDetail }
 
-func (s *staticContainers) Get(context.Context, string) (*domain.ContainerDetail, error) {
+func (s *staticContainers) GetPresent(context.Context, string) (*domain.ContainerDetail, error) {
 	return s.detail, nil
 }
 

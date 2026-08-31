@@ -132,7 +132,7 @@ type driftContainers struct {
 	repo    *store.ContainerRepository
 }
 
-func (c driftContainers) Get(ctx context.Context, id string) (*domain.ContainerDetail, error) {
+func (c driftContainers) GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error) {
 	if id != "container-a" {
 		return nil, store.ErrNotFound
 	}

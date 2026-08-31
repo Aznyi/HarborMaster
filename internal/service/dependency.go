@@ -70,7 +70,9 @@ type DependencyLineage interface {
 
 // DependencyContainers is the inventory read the lineage adapter needs.
 type DependencyContainers interface {
-	Get(ctx context.Context, containerID string) (*domain.ContainerDetail, error)
+	// GetPresent, not Get: a running digest is a statement about a container
+	// that is running. See ContainerRepository.Get.
+	GetPresent(ctx context.Context, containerID string) (*domain.ContainerDetail, error)
 }
 
 // NewDependencyLineage adapts the container repository to DependencyLineage.
@@ -100,7 +102,11 @@ func (l dependencyLineage) RunningDigestFor(
 	if l.containers == nil {
 		return "", "", store.ErrNotFound
 	}
-	detail, err := l.containers.Get(ctx, containerID)
+	// GetPresent: a container that has left the host is not running anything,
+	// so it has no running digest. Get would return its tombstone and this
+	// would report the digest it was running when it left as though it still
+	// were.
+	detail, err := l.containers.GetPresent(ctx, containerID)
 	if err != nil {
 		return "", "", err
 	}

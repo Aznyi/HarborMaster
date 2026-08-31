@@ -64,7 +64,11 @@ type DriftSnapshots interface {
 
 // DriftContainers is the inventory capability the drift engine needs.
 type DriftContainers interface {
-	Get(ctx context.Context, id string) (*domain.ContainerDetail, error)
+	// GetPresent, not Get: this service reasons about a container's CURRENT
+	// configuration, and the inventory keeps a row after the container leaves.
+	// Get would hand back that tombstone and the evaluation would describe a
+	// container that is not there. See ContainerRepository.Get.
+	GetPresent(ctx context.Context, id string) (*domain.ContainerDetail, error)
 	List(ctx context.Context, filter store.ContainerFilter) ([]domain.ContainerSummary, int, error)
 }
 
@@ -217,7 +221,7 @@ func (s *DriftService) EvaluateContainer(ctx context.Context, containerID string
 	evaluatedAt := s.now().UTC()
 	generation := s.currentGeneration(ctx)
 
-	detail, err := s.containers.Get(ctx, containerID)
+	detail, err := s.containers.GetPresent(ctx, containerID)
 	if err != nil || detail == nil {
 		// A container that has left the inventory is not drift. Nothing is
 		// recorded: there is no current configuration to compare, and writing

@@ -260,7 +260,24 @@ func buildContainerOrder(filter ContainerFilter) string {
 	return " ORDER BY " + column + " " + direction + ", c.name ASC, c.id ASC"
 }
 
-// Get returns the full detail for one container.
+// Get returns HarborMaster's RECORD for one container id, present or not.
+//
+// # This is not a presence check
+//
+// The inventory deliberately keeps a container's row after it leaves the host,
+// with present = 0, until retention purges it. That row is what a detail page,
+// an Activity entry, an execution record and an audit trail read afterwards, so
+// this returns it. A successful Get therefore means "HarborMaster has a record
+// of this id" and NOTHING about whether the container exists now.
+//
+// Treating the two as the same is not hypothetical: planEvidence.ContainerPresent
+// did exactly that, and a departed container passed an acquisition presence gate
+// on the strength of its own tombstone. Callers that need current presence use
+// GetPresent below, so the intent is visible in the call rather than in a field
+// check somebody has to remember.
+//
+// Callers that legitimately want the historical row -- detail, history,
+// diagnostics, audit, old-plan inspection -- keep using this.
 func (r *ContainerRepository) Get(ctx context.Context, id string) (*domain.ContainerDetail, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT`+containerColumns+` FROM containers c WHERE c.id = ?`, id)
@@ -348,6 +365,49 @@ func (r *ContainerRepository) loadRunningDigest(
 	digest, _ := domain.RunningDigestFor(declared, digests)
 	detail.RunningDigest = digest
 	return nil
+}
+
+// GetPresent returns the detail for one container ONLY while it is on the host.
+//
+// # The contract
+//
+//	no row            -> ErrNotFound
+//	row, present = 0  -> ErrNotFound
+//	row, present = 1  -> the detail
+//
+// Both absences collapse to ErrNotFound deliberately. A caller asking this
+// question wants to know whether it may act, and "there is no such container"
+// and "there was one and it is gone" are the same answer to that: no. Callers
+// that need to tell them apart are asking a historical question and use Get.
+//
+// # Why this exists as an operation rather than a field check
+//
+// It was a field check, and it was forgotten. The presence gate in front of
+// image acquisition read only whether Get returned a row, so a container that
+// had been removed from the host still passed it. The check was one line away
+// and the name promised it had been done.
+//
+// An operation makes the intent structural: a reader sees which question the
+// call site is asking without inspecting what it does with the result, and a
+// new mutation path gets the safe answer by picking the obviously named method.
+//
+// Filtered in SQL, so this costs exactly what Get costs.
+func (r *ContainerRepository) GetPresent(
+	ctx context.Context, id string,
+) (*domain.ContainerDetail, error) {
+	var present int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT present FROM containers WHERE id = ?`, id).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read container presence: %w", AsError(err))
+	}
+	if present != 1 {
+		return nil, ErrNotFound
+	}
+	return r.Get(ctx, id)
 }
 
 func (r *ContainerRepository) loadConfig(ctx context.Context, detail *domain.ContainerDetail, id string) error {

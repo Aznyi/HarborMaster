@@ -22,7 +22,7 @@ type fakeContainers struct {
 	block chan struct{}
 }
 
-func (f *fakeContainers) Get(context.Context, string) (*domain.ContainerDetail, error) {
+func (f *fakeContainers) GetPresent(context.Context, string) (*domain.ContainerDetail, error) {
 	if f.block != nil {
 		<-f.block
 	}

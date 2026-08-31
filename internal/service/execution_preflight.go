@@ -152,6 +152,20 @@ func (s *ExecutionService) preflight(
 	current, err := s.evidence.CurrentPlan(ctx, plan.ContainerID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
+		// No current plan has TWO causes, and they deserve different sentences.
+		// Since C3D a plan is current only while the container it assessed
+		// still exists, so a departed container lands here -- and reporting
+		// "the change plan no longer exists" would be false: the plan is intact
+		// and readable, its container is not.
+		//
+		// The container check further down is the authority on presence and
+		// runs against fresh inventory; this only decides which true sentence
+		// to say. It fails towards containerMissing, because a presence read
+		// that itself failed leaves the more specific claim unestablished.
+		if absent, absentErr := s.containerAbsent(ctx, plan.ContainerID); absentErr == nil && absent {
+			decision.Refusal = domain.ExecutionRefusalContainerMissing
+			return decision, nil
+		}
 		decision.Refusal = domain.ExecutionRefusalPlanMissing
 		return decision, nil
 	case err != nil:
@@ -627,4 +641,21 @@ func sameImage(a, b string) bool {
 		return false
 	}
 	return left.Canonical == right.Canonical
+}
+
+// containerAbsent reports whether the inventory says the container is gone.
+//
+// Used ONLY to choose between two refusal sentences, never to permit anything:
+// every caller is already refusing when it asks. An error is returned rather
+// than swallowed so the caller can fall back to the less specific message
+// instead of asserting an absence it could not establish.
+func (s *ExecutionService) containerAbsent(ctx context.Context, containerID string) (bool, error) {
+	container, err := s.evidence.Container(ctx, containerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return container == nil || !container.Overview.Present, nil
 }

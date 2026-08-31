@@ -1272,25 +1272,23 @@ func (e *planEvidence) Intel(ctx context.Context, reference string) (domain.Imag
 }
 
 func (e *planEvidence) ContainerPresent(ctx context.Context, containerID string) (bool, error) {
-	detail, err := e.containers.Get(ctx, containerID)
+	// GetPresent, not Get. The ROW existing is not the container existing: a
+	// container removed from the host keeps its inventory row until retention
+	// purges it, because that row is the history an operator reads afterwards.
+	//
+	// This gate stands in front of an image acquisition, and it read only
+	// whether a row came back -- so a departed container passed it on the
+	// strength of its own tombstone, and the name promised a check that was
+	// never performed. Asking the repository the presence question directly
+	// means the next caller cannot make the same mistake by omission.
+	_, err := e.containers.GetPresent(ctx, containerID)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("look up container: %w", err)
 	}
-	// The ROW existing is not the container existing.
-	//
-	// A container removed from the host keeps its inventory row until retention
-	// purges it -- that row is the history an operator reads afterwards, and
-	// ContainerRepository.Get deliberately returns it so a detail page still
-	// works. It carries present = 0.
-	//
-	// This helper answers "is the container on the host", so it has to read
-	// that flag. Without it the name promised a check it never performed, and a
-	// departed container passed the presence gate on the strength of its own
-	// tombstone.
-	return detail != nil && detail.Overview.Present, nil
+	return true, nil
 }
 
 // ------------------------------------------------------- audit attribution --
