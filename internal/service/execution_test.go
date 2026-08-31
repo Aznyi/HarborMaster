@@ -246,6 +246,10 @@ func healthyExecutionEvidence(now time.Time) *fakeExecutionEvidence {
 
 // fakeExecutionStore is an in-memory execution repository.
 type fakeExecutionStore struct {
+	// terminalObserved receives every terminal record Get returns, when a test
+	// has asked for it. See ObserveTerminalReads.
+	terminalObserved chan domain.Execution
+
 	mu sync.Mutex
 
 	records map[string]*domain.Execution
@@ -305,12 +309,39 @@ func (f *fakeExecutionStore) Create(
 
 func (f *fakeExecutionStore) Get(_ context.Context, id string) (domain.Execution, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	record, ok := f.records[id]
 	if !ok {
+		f.mu.Unlock()
 		return domain.Execution{}, store.ErrNotFound
 	}
-	return *record, nil
+	// Snapshotted under the lock, so the value this call returns is fixed here
+	// and cannot be changed by a worker racing ahead afterwards. That is what
+	// makes the observer below a sound synchronisation point.
+	snapshot := *record
+	observer := f.terminalObserved
+	f.mu.Unlock()
+
+	// TerminalObserved lets a test know that a READER has just been handed a
+	// terminal record -- which is exactly when runOnce takes its terminal
+	// branch. Nil in every test that has not asked for it.
+	if observer != nil && snapshot.State.Terminal() {
+		select {
+		case observer <- snapshot:
+		default:
+		}
+	}
+	return snapshot, nil
+}
+
+// ObserveTerminalReads makes Get publish every terminal record it hands out.
+//
+// Buffered by the caller. Used to pin the ordering in the succeeded-window
+// regression test without a sleep: the test can wait until the harness has
+// actually observed a terminal state before releasing the held removal.
+func (f *fakeExecutionStore) ObserveTerminalReads(ch chan domain.Execution) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.terminalObserved = ch
 }
 
 func (f *fakeExecutionStore) List(
@@ -772,7 +803,7 @@ func (h *execHarness) runOnce(t *testing.T, execution domain.Execution) domain.E
 		if err == nil && record.State.Terminal() {
 			cancel()
 			<-done
-			return record
+			return h.finalRecord(t, execution.ExecutionID, record)
 		}
 		select {
 		case <-deadline:
@@ -782,6 +813,53 @@ func (h *execHarness) runOnce(t *testing.T, execution domain.Execution) domain.E
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+// finalRecord re-reads the execution after the worker has finished.
+//
+// # Why the terminal snapshot is not the final record
+//
+// A terminal STATE is not the end of the worker's work. ExecutionService.succeed
+// records ExecutionSucceeded and only THEN advances lineage, removes the parked
+// original, and writes the CheckpointOriginalRemoved checkpoint -- an ordering
+// its comment calls the safety property, because a success that cannot be
+// proved must not be acted on by removing the only container that could restore
+// service.
+//
+// So the store is legitimately observable as:
+//
+//	State           == ExecutionSucceeded
+//	Checkpoint      == CheckpointReplacementVerified
+//	OriginalRemoved == false
+//
+// The polling loop above can land in exactly that window. It then returns a
+// snapshot taken BEFORE the housekeeping, and the caller -- which named the
+// value `final` -- asserts on a record that was never the final one. That is
+// the whole of the CI failure; nothing in the pipeline was wrong.
+//
+// Waiting is already correct: cancel() ends Run's loop, Run's deferred
+// workers.Wait() blocks on the in-flight worker, and the worker's mutation
+// context is GraceContext(ctx, 10s, budget) -- built on context.WithoutCancel,
+// so cancellation cannot interrupt the removal or the checkpoint. By the time
+// <-done returns, the worker has finished and its writes have landed.
+//
+// The only thing missing was reading them.
+func (h *execHarness) finalRecord(
+	t *testing.T, executionID string, observed domain.Execution,
+) domain.Execution {
+	t.Helper()
+
+	final, err := h.store.Get(context.Background(), executionID)
+	if err != nil {
+		// The record was readable a moment ago, so this is a real failure
+		// rather than a state worth returning the stale copy for.
+		t.Fatalf("the execution could not be re-read after the worker finished: %v", err)
+	}
+	if !final.State.Terminal() {
+		t.Fatalf("the execution left a terminal state after the worker finished: "+
+			"observed %q, now %q", observed.State, final.State)
+	}
+	return final
 }
 
 // request asks for a recreation, failing the test if it is refused.

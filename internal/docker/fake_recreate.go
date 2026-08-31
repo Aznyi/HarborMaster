@@ -46,6 +46,24 @@ type FakeMutator struct {
 	// genuinely in flight.
 	Delay time.Duration
 
+	// RemoveEntered and HoldRemove are a DETERMINISTIC barrier around the
+	// removal of the parked original.
+	//
+	// That removal is the last act of a successful recreation and happens
+	// AFTER the success is durably recorded -- see ExecutionService.succeed,
+	// where the order is the safety property. So there is a real window in
+	// which the store reads "succeeded" while the housekeeping is still
+	// running, and a test that wants to observe that window has to stop time
+	// at exactly that point.
+	//
+	// Both nil by default, so every existing test is unaffected. When set,
+	// RemoveContainer signals RemoveEntered on arrival and then blocks until
+	// HoldRemove is closed or the context ends. Channels rather than a sleep:
+	// a duration that is long enough on one machine is a flake on another,
+	// which is the class of bug this barrier exists to test for.
+	RemoveEntered chan struct{}
+	HoldRemove    chan struct{}
+
 	// NextID is the id given to the next created container. Empty generates a
 	// deterministic one from the call count.
 	NextID string
@@ -321,6 +339,11 @@ func (f *FakeMutator) RemoveContainer(ctx context.Context, request RemoveRequest
 	if err := f.pause(ctx); err != nil {
 		return err
 	}
+	// The barrier is taken BEFORE the lock, so a test holding the removal can
+	// still read the modelled host while it waits.
+	if err := f.holdRemoval(ctx); err != nil {
+		return err
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -357,6 +380,32 @@ func (f *FakeMutator) pause(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
+}
+
+// holdRemoval implements the RemoveEntered/HoldRemove barrier.
+//
+// Returns the context's error if it ends first, which is what a real adapter
+// would do and what keeps a held test from hanging past its deadline.
+func (f *FakeMutator) holdRemoval(ctx context.Context) error {
+	f.mu.Lock()
+	entered, hold := f.RemoveEntered, f.HoldRemove
+	f.mu.Unlock()
+
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if hold == nil {
+		return nil
+	}
+	select {
+	case <-hold:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // signal notifies a waiting test that a mutation has begun. Called with the
