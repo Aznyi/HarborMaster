@@ -580,6 +580,26 @@ export function sessionResponse(role: Role = "administrator") {
   };
 }
 
+/**
+ * An empty list envelope, in the shape every list endpoint guarantees.
+ *
+ * `items` and `pagination` are both `required` in the schema, so a page reading
+ * this gets its genuine empty state rather than a crash on a missing field.
+ */
+export function emptyPage(): { items: never[]; pagination: Record<string, unknown> } {
+  return {
+    items: [],
+    pagination: {
+      page: 1,
+      pageSize: 25,
+      totalItems: 0,
+      totalPages: 1,
+      hasNext: false,
+      hasPrevious: false,
+    },
+  };
+}
+
 export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
   const requests: RecordedRequest[] = [];
 
@@ -757,7 +777,107 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
       if (url.includes("/health")) {
         return respond(options.health, healthyReport);
       }
-      return json(buildInfo);
+      if (url.includes("/version")) {
+        return json(buildInfo);
+      }
+      /*
+       * SUMMARIES BEFORE LISTS.
+       *
+       * `/drift/summary` also contains `/drift`, so a list branch placed first
+       * would answer it with `{ items, pagination }` -- a list envelope served
+       * as a summary, which is the very shape this batch exists to eliminate.
+       * Ordering is the whole contract of a substring router, so the more
+       * specific path is matched first and the shape it returns is its own.
+       *
+       * Both objects carry every field the server guarantees, so a page reading
+       * them shows its genuine zero state.
+       */
+      if (url.includes("/drift/summary")) {
+        return json({
+          total: 0,
+          open: 0,
+          bySeverity: {},
+          byStatus: {},
+          byCategory: {},
+          containersWithDrift: 0,
+          containersEvaluated: 0,
+          incomplete: false,
+        });
+      }
+      if (url.includes("/policy-summary")) {
+        return json({
+          policies: 0,
+          policiesTotal: 0,
+          total: 0,
+          open: 0,
+          bySeverity: {},
+          byStatus: {},
+          byRule: {},
+          containersEvaluated: 0,
+          containersCompliant: 0,
+        });
+      }
+
+      /*
+       * The list endpoints a suite may reach incidentally, answered with a real
+       * EMPTY list envelope rather than left to the fallback.
+       *
+       * `{ items: [], pagination }` is the shape the server guarantees --
+       * `required: [items, pagination]` in the schema -- so a page rendering
+       * this shows its genuine empty state. Before the fallback was made
+       * honest these fell through to the /version payload, which had no
+       * `items` at all: the empty state such a suite asserted was produced by
+       * a malformed response rather than by an empty list.
+       */
+      if (
+        url.includes("/snapshots") ||
+        url.includes("/drift") ||
+        url.includes("/policy-violations") ||
+        url.includes("/notifications")
+      ) {
+        return json(emptyPage());
+      }
+
+      /*
+       * An endpoint this stub does not model answers 404, not 200.
+       *
+       * # Why this is not merely tidiness
+       *
+       * It used to `return json(buildInfo)` -- so EVERY unmodelled endpoint was
+       * answered with the /version payload. That object is truthy and has none
+       * of the fields any other endpoint promises, so a page that guarded one
+       * level and dereferenced the next crashed on a response that could never
+       * come from the server:
+       *
+       *     summary.bySeverity.critical            Drift, PolicyViolations
+       *     destinations.data?.items.length        Notifications
+       *
+       * Both shapes are guaranteed by the real contract -- `bySeverity` is
+       * `make()`d by the store and `required` in the schema, and every list
+       * envelope is `required: [items, pagination]` -- so the production code
+       * was right and the fixture was lying.
+       *
+       * The failures were INTERMITTENT because the bad render happened when a
+       * fetch resolved after its test had finished: landing outside the test
+       * window makes Vitest report an unhandled error rather than a failure,
+       * and which side of the boundary it lands on is a timing race.
+       *
+       * A 404 is what an unmodelled endpoint honestly is. A suite that needs an
+       * endpoint answered adds it above, with the shape the server actually
+       * returns.
+       */
+      return json(
+        {
+          error: {
+            code: "not_found",
+            message:
+              "the shared API stub does not model " +
+              new URL(url, "http://localhost").pathname +
+              "; add it to stubApi with the shape the server returns",
+          },
+        },
+        404,
+      );
     }),
   );
 
