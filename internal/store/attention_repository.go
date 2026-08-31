@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -193,17 +194,38 @@ func (r *ContainerRepository) gatherPlans(
 // every current container reported "not checked".
 //
 // The evidence exists; it lives on the image intelligence record. This reads it
-// for the page in ONE query, joined through containers.image_canonical, so a
-// hundred containers on one image cost one row rather than a hundred lookups.
+// for the page in ONE query, joined through containers.image_canonical -- the
+// column migration 0033 added so this mapping stops being rebuilt in Go.
 //
-// C3A did this by normalising every declared reference in Go and passing the
-// canonical forms back in. Migration 0033 stores that value on the container
-// row, so the join is now the same one every other current-state read uses and
-// there is one fewer place deriving canonical form.
+// # Why three columns rather than the shared projection
+//
+// C3C read the FULL image-intelligence record through selectImageIntelColumns,
+// which cannot carry the originating container id, so a second statement was
+// needed to map container to canonical reference first. That was the eleventh
+// statement on this page.
+//
+// A row only ever consults three fields. domain.ImageIntel.ComparisonSettled
+// reads Status and LastSuccessAt; ObservedUpdate reads those plus Update; and
+// the two values carried onto the evidence are Status and LastSuccessAt again.
+// Nothing here needs the other thirty-one columns, so selecting them was work
+// done to satisfy a helper rather than a caller.
+//
+// Projecting exactly what is read collapses the pair into one statement and
+// moves LESS data than either did. The cost is a projection that does not share
+// selectImageIntelColumns -- accepted deliberately, because the drift that
+// constant guards against is two hand-written attempts at the SAME full record,
+// and this is not one. What must not drift is the DECISION, and that is still
+// the domain predicates called on a domain record; nothing here reimplements
+// them. TestTheAttentionProjectionCoversEveryFieldThePredicatesRead fails if
+// either predicate starts reading a fourth field.
 //
 // It does not make anything actionable. UpdateNone and UpdateUnknown are both
 // refused by UpdateStrategy.Permits, so nothing here can cause an update; it
 // changes only what a row is allowed to SAY.
+//
+// No present filter, matching the behaviour this replaced: image intelligence
+// describes an IMAGE, and whether the container is still on the host is a
+// question the plan and presence gates answer separately.
 func (r *ContainerRepository) gatherImageIntel(
 	ctx context.Context,
 	ids []any,
@@ -212,30 +234,38 @@ func (r *ContainerRepository) gatherImageIntel(
 	if len(ids) == 0 {
 		return nil
 	}
-	byReference, references, err := r.imageIdentities(ctx, ids)
-	if err != nil {
-		return err
-	}
-	if len(references) == 0 {
-		return nil
-	}
 
-	// The shared column list and the shared scanner, not another hand-written
-	// SELECT over this table -- two used to exist and they drifted.
-	rows, err := r.db.QueryContext(ctx,
-		selectImageIntelColumns+`
-		WHERE i.reference IN (`+placeholders(len(references))+`)`, references...)
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT c.id, i.check_status, i.update_type, i.last_success_at
+		  FROM containers c
+		  JOIN image_intel i ON i.reference = c.image_canonical
+		 WHERE c.image_canonical <> ''
+		   AND c.id IN (`+placeholders(len(ids))+`)`, ids...)
 	if err != nil {
 		return fmt.Errorf("read image intelligence: %w", AsError(err))
 	}
 	defer func() { _ = rows.Close() }()
 
-	records, err := scanImageIntel(rows)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		apply := func(row *domain.ContainerEvidence) {
+	for rows.Next() {
+		var (
+			containerID string
+			status      string
+			updateType  string
+			lastSuccess sql.NullString
+		)
+		if err := rows.Scan(&containerID, &status, &updateType, &lastSuccess); err != nil {
+			return fmt.Errorf("scan image intelligence: %w", AsError(err))
+		}
+
+		// A domain record carrying the three fields the predicates read, so the
+		// verdict below is the domain one and not a second copy of it.
+		record := domain.ImageIntel{
+			Status:        domain.CheckStatus(status),
+			Update:        domain.UpdateType(updateType),
+			LastSuccessAt: scanOptionalTime(lastSuccess),
+		}
+
+		forID(containerID, func(row *domain.ContainerEvidence) {
 			// A reference with no registry behind it. Permanent, and the one
 			// fact worth carrying from a record that never settled: it is why
 			// this container will never have a comparison rather than merely
@@ -243,10 +273,9 @@ func (r *ContainerRepository) gatherImageIntel(
 			if record.Status == domain.CheckUnsupported {
 				row.CheckNotComparable = true
 			}
-			// ComparisonSettled is the domain's own predicate, and the SAME one
-			// the planner applies. A row that has never been successfully
-			// compared sets nothing, so its zero value continues to assert
-			// nothing at all.
+			// ComparisonSettled is the domain predicate, and the SAME one the
+			// planner applies. A row that has never been successfully compared
+			// sets nothing, so its zero value continues to assert nothing.
 			if !record.ComparisonSettled() {
 				return
 			}
@@ -254,54 +283,9 @@ func (r *ContainerRepository) gatherImageIntel(
 			row.CheckedUpdate = record.ObservedUpdate()
 			row.CheckStatus = record.Status
 			row.LastSuccessAt = record.LastSuccessAt
-		}
-		// One intelligence row answers for every container running that image,
-		// which is the whole reason this is not a lookup per container.
-		for _, id := range byReference[record.Reference] {
-			forID(id, apply)
-		}
+		})
 	}
 	return rows.Err()
-}
-
-// imageIdentities maps the page's containers to the canonical references they
-// run, and returns the distinct references to read intelligence for.
-//
-// Read from the column migration 0033 added. NOTHING is normalised here: the
-// value was produced by domain.NormalizeImageRef on the write path, so this
-// derives no identity of its own and cannot disagree with the rest of the
-// estate about which registry an image belongs to.
-//
-// A container whose reference the domain refused carries the empty string and
-// is skipped, which leaves its evidence at the zero value -- asserting nothing,
-// exactly as before this existed.
-func (r *ContainerRepository) imageIdentities(
-	ctx context.Context, ids []any,
-) (map[string][]string, []any, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, image_canonical FROM containers
-		 WHERE image_canonical <> '' AND id IN (`+placeholders(len(ids))+`)`, ids...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read container image identity: %w", AsError(err))
-	}
-	defer func() { _ = rows.Close() }()
-
-	byReference := make(map[string][]string, len(ids))
-	references := make([]any, 0, len(ids))
-	for rows.Next() {
-		var id, canonical string
-		if err := rows.Scan(&id, &canonical); err != nil {
-			return nil, nil, fmt.Errorf("scan container image identity: %w", AsError(err))
-		}
-		if _, seen := byReference[canonical]; !seen {
-			references = append(references, canonical)
-		}
-		byReference[canonical] = append(byReference[canonical], id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("read container image identity: %w", AsError(err))
-	}
-	return byReference, references, nil
 }
 
 // gatherApprovals reads which containers the LATEST pass is holding.
