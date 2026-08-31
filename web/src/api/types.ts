@@ -61,6 +61,8 @@ export interface Features {
   execution: boolean;
   /** Stops the replacement and starts the original. */
   rollback: boolean;
+  /** REMOVES IMAGES a settled update superseded. Cannot be undone. */
+  imageCleanup: boolean;
   /** Changes containers with nobody watching. */
   automation: boolean;
 

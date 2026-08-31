@@ -27,6 +27,7 @@ const healthyReport: HealthReport = {
     acquisition: false,
     execution: false,
     rollback: false,
+    imageCleanup: false,
     automation: false,
     notifications: false,
     notificationsAllowPrivate: false,

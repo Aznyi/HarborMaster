@@ -96,6 +96,14 @@ func TestTheHostChangingActionsAreAuditedByOutcomeNotRequest(t *testing.T) {
 		// A completed rollback stopped the container that was serving and
 		// started another in its place. It changed the host.
 		domain.AuditRollbackCompleted: true,
+		// A removed image is a host change that cannot be undone, made on a
+		// timer with nobody watching. If anything belongs in a counter an
+		// administrator scans, it is this.
+		//
+		// The recorder pairs Privileged() with a SUCCEEDED outcome, so a
+		// removal the daemon refused -- which changed nothing -- does not
+		// inflate the count. That is the same rule the other three follow.
+		domain.AuditImageRemoved: true,
 	}
 
 	for _, action := range domain.AuditActions {
@@ -111,6 +119,7 @@ func TestTheHostChangingActionsAreAuditedByOutcomeNotRequest(t *testing.T) {
 		domain.AuditExecutionCompleted, domain.AuditExecutionFailed,
 		domain.AuditRollbackRequested, domain.AuditRollbackCancelled,
 		domain.AuditRollbackCompleted, domain.AuditRollbackFailed,
+		domain.AuditImageRemoved,
 	} {
 		if !domain.ValidAuditAction(string(action)) {
 			t.Errorf("audit action %q is not in the recognised vocabulary", action)

@@ -35,6 +35,7 @@ const allOn: Features = {
   acquisition: true,
   execution: true,
   rollback: true,
+  imageCleanup: false,
   automation: true,
   notifications: false,
   notificationsAllowPrivate: false,

@@ -39,7 +39,7 @@ function health(): ResourceState<HealthReport> {
       features: {
         inventory: true, events: true, snapshots: true, drift: true,
         policy: true, planner: true, imageIntel: true, acquisition: true,
-        execution: true, rollback: true, automation: true,
+        execution: true, rollback: true, imageCleanup: false, automation: true,
         notifications: true, notificationsAllowPrivate: false,
       },
     },

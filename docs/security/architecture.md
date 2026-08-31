@@ -872,6 +872,67 @@ the route table to keep it that way.
 This is the one dependency condition that raises a notification, because it is
 the one that can leave a workload broken with no other signal.
 
+## 3g-quater. Safe image retention and cleanup
+
+HarborMaster's FOURTH Docker capability, and the only one that destroys.
+Acquisition adds an image, recreation replaces a container while keeping the
+original parked, rollback puts that original back. This removes an artefact, and
+it is the one thing on this list HarborMaster cannot undo: a removed image comes
+back only from a registry, and only if that registry still serves the same
+content.
+
+**HarborMaster can remove one local image, by id, that a settled successful
+update of its own moved a workload off. It cannot remove an image it has no
+record of introducing, cannot prune, cannot sweep dangling images, and cannot
+force.**
+
+Off by default. When `HARBORMASTER_IMAGE_CLEANUP_ENABLED` is false the pruner is
+nil, the service never enters its loop, and the capability is ABSENT rather than
+merely unused.
+
+### Four independent things stand between a settled update and a removed image
+
+1. **Selection.** Candidates come from the execution records: `state =
+   'succeeded' AND original_removed = 1 AND old_image_id <> ''`. That last
+   marker is written only after the replacement passed every verification AND
+   the success was durably recorded, so a "successful" update that could not
+   remove its parked original is not settled and its old image is not a
+   candidate. An image nothing in these records names is never considered.
+2. **Decision.** `domain.DecideImageRetention` is a pure function with a fixed
+   order and a closed vocabulary of fourteen reasons. It holds no Docker
+   interface, reads no flag that could disable a check, and returns *retain*
+   whenever it cannot establish otherwise.
+3. **Re-check.** The evidence behind an eligible verdict is gathered AGAIN --
+   from the database and from the live daemon -- immediately before the removal,
+   so a container created while the pass was running is seen.
+4. **The daemon.** The removal is never forced. A refusal because something
+   still references the image means one of the three above was wrong; it is
+   recorded as its own outcome and never retried.
+
+### The properties
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| The prune surface is ONE method | `docker.ImagePruner.RemoveImage`. Architecture tests pin the count and the name, refuse every container verb on it, and refuse every sweep verb -- `prune`, `all`, `dangling`, `sweep`, `clear` | `internal/arch/image_prune_arch_test.go` |
+| **Force is not a parameter** | There is nowhere on `ImageRemoveRequest` to put it. The call site passes a literal `Force: false` and `PruneChildren: false`. A regexp test fails the build on `Force: true` in the removal path, and a second assertion fails if the explicit `false` is ever dropped | `internal/docker/prune.go` |
+| Removal is by IMAGE ID | Full digest form, validated by the same check the acquisition target uses. A tag would ask the daemon to untag, and a tag that moved would name a different artefact than the one assessed | `ImageRemoveRequest.Validate` |
+| Nothing takes its target from a caller | There is no endpoint that removes an image and no field anywhere in the path for a caller-supplied identifier. Every candidate is derived from an execution record HarborMaster wrote | `internal/store/image_retention_repository.go` |
+| Twelve hard references retain | A present container (from the records OR the live host), a parked original or quarantined replacement, HarborMaster's own image, an acquisition/recreation/rollback in flight, a failed update, an outstanding recovery note, a plan target, an unspent acquisition, and the rollback generation contract | `domain.DecideImageRetention` |
+| Evidence that could not be READ retains everything | Any unreadable source -- candidates, references, plan targets, or the live container list -- ends the pass with nothing removed. A check that could not be performed establishes nothing | `ImageCleanupService.gather` |
+| HarborMaster's own image is never removed | Checked above every condition except the policy gates. An empty identity image matches nothing, so a failed self-detection excludes nothing rather than the wrong thing | `DecideImageRetention`, `evidenceFor` |
+| A pass is BOUNDED | At most 200 candidates per pass, a fixed seven grouped queries over them whatever the count, at most `MAX_PER_PASS` removals, and a ten-minute pass budget | `maxCleanupCandidates`, `imageCleanupPassBudget` |
+| Configuration can only make cleanup do LESS | The policy carries an on switch, a minimum age, and a generation count. There is no setting that disables a check, and an unusable policy -- disabled, or a zero minimum age -- removes nothing | `ImageRetentionPolicy.Usable` |
+| Capability is granted, not assumed | The pruner is nil unless the deployment opted in, assigned exactly once inside one conditional in `main`, and an architecture test reads `main.go` to prove it | `cmd/harbormaster/main.go` |
+| The daemon's refusal is validated against a REAL daemon | An opt-in integration test creates a container, asks for its image by id, and requires the outcome to be `stillInUse` with the image and container both intact. A companion control proves an unreferenced image really is removed | `internal/docker/prune_integration_test.go` |
+
+### What is deliberately absent
+
+There is no image browser, no manual delete endpoint, no "prune unused images"
+button, and no durable `deletable` flag. Eligibility is DERIVED from lifecycle
+evidence on every pass, so there is no stored verdict that could go stale and no
+row an attacker could write to mark an image for destruction. The only durable
+record cleanup writes is the audit event for a removal that actually happened.
+
 ## 3h. Identity, authorization, and audit
 
 Phase 9.5 closed the boundary every earlier phase was compensating for. Before

@@ -2992,9 +2992,12 @@ than a public issue.
   pipelines and are not reachable from the API.
 - Restore from a snapshot. Readiness validation answers whether it *could*
   work; nothing performs it.
-- Image deletion and pruning. Acquisition adds to the local store, recreation
-  removes only the container it replaced, rollback removes nothing at all, and
-  none of them can remove an image or a volume.
+- Arbitrary image deletion and pruning. There is no prune-all, no dangling
+  sweep, and no endpoint that takes an image to delete. Optional cleanup —
+  off by default — removes only images that HarborMaster's OWN settled,
+  successful updates superseded, once nothing references them and a retention
+  period has passed, and it never forces. Volumes are never removed by
+  anything.
 - A second authentication factor, single sign-on, LDAP, OIDC, public
   registration, and password reset by email. Accounts are local, and recovery is
   another administrator or the console.

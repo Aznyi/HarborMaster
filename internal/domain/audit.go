@@ -110,6 +110,17 @@ const (
 	// AuditAcquisitionFailed means it is not, and says why.
 	AuditAcquisitionFailed AuditAction = "acquisition.failed"
 
+	// AuditImageRemoved is HarborMaster deleting a superseded image from the
+	// local store.
+	//
+	// A destructive act on the artefact a recovery would use, so it is recorded
+	// with the same weight as the two that change containers -- and only the
+	// OUTCOME is recorded. A retained image is the normal case, happens on
+	// every pass for every image, and writing a row each time would bury the
+	// removals in noise; the reason for a retention is available on demand
+	// instead.
+	AuditImageRemoved AuditAction = "image.removed"
+
 	AuditExecutionRequested AuditAction = "execution.requested"
 	AuditExecutionCancelled AuditAction = "execution.cancelled"
 	// AuditExecutionCompleted means a container was replaced and the original
@@ -271,6 +282,8 @@ var AuditActions = []AuditAction{
 	AuditNotificationDestinationArchived, AuditNotificationDestinationTested,
 	AuditNotificationRuleCreated, AuditNotificationRuleUpdated,
 	AuditNotificationRuleArchived,
+
+	AuditImageRemoved,
 }
 
 // ValidAuditAction reports whether name is a known action.
@@ -307,7 +320,11 @@ func (a AuditAction) Security() bool {
 // configuration without anybody opening a page.
 func (a AuditAction) Privileged() bool {
 	switch a {
-	case AuditAcquisitionCompleted, AuditExecutionCompleted, AuditRollbackCompleted:
+	case AuditAcquisitionCompleted, AuditExecutionCompleted, AuditRollbackCompleted,
+		// A destroyed image is a privileged change to the host with nobody
+		// behind it. It belongs at the level a default configuration shows,
+		// for the same reason the other three do.
+		AuditImageRemoved:
 		return true
 	default:
 		return false
@@ -361,6 +378,8 @@ const (
 	AuditTargetAcquisition AuditTargetType = "acquisition"
 	AuditTargetExecution   AuditTargetType = "execution"
 	AuditTargetRollback    AuditTargetType = "rollback"
+	// AuditTargetImage is a local image artefact, identified by its image id.
+	AuditTargetImage AuditTargetType = "image"
 	// AuditTargetUpdatePolicy is an automation rule, and AuditTargetAutomation
 	// is a pass, a pause, or an approval. Distinct from AuditTargetPolicy,
 	// which is a compliance rule: the two subsystems are separate on purpose
@@ -392,6 +411,7 @@ var AuditTargetTypes = []AuditTargetType{
 	AuditTargetUpdatePolicy, AuditTargetAutomation,
 	AuditTargetNotificationDestination, AuditTargetNotificationRule,
 	AuditTargetDependency,
+	AuditTargetImage,
 	AuditTargetInventory, AuditTargetSystem,
 }
 

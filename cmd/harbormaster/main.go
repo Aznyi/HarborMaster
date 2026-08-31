@@ -366,6 +366,7 @@ func run() error {
 			Acquisition:               cfg.Acquisition.Enabled,
 			Execution:                 cfg.Execution.Enabled,
 			Rollback:                  cfg.Rollback.Enabled,
+			ImageCleanup:              cfg.ImageCleanup.Enabled,
 			Automation:                cfg.Automation.Enabled,
 			Notifications:             cfg.Notifications.Enabled,
 			NotificationsAllowPrivate: cfg.Notifications.AllowPrivateDestinations,
@@ -841,6 +842,41 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Image cleanup.
+	//
+	// HARBORMASTER'S FOURTH DOCKER CAPABILITY, and the only one that DESTROYS.
+	// The other three add an image, replace a container while keeping the
+	// original parked, and put that original back. This removes an artefact,
+	// and HarborMaster cannot undo it -- only a registry can, and only if it
+	// still serves the same content.
+	//
+	// docker.ImagePruner is handed over here and nowhere else. Its single
+	// method removes ONE local image by id, never forcibly and never
+	// cascading. There is no prune-all on it, no dangling sweep, and no way to
+	// name a container.
+	//
+	// Off unless the deployment asked for it. When disabled the pruner stays
+	// nil, the service reports itself disabled and never enters its loop -- so
+	// the capability is ABSENT rather than merely unused.
+	//
+	// Note what it is given besides the pruner: dockerClient AGAIN, through the
+	// read-only docker.Runtime, because the last thing it does before removing
+	// an image is ask the daemon which containers exist right now. And `self`,
+	// because the one image it must never remove is the one it is running.
+	var pruner docker.ImagePruner
+	if cfg.ImageCleanup.Enabled {
+		pruner = dockerClient
+	}
+	imageCleanup := service.NewImageCleanupService(service.ImageCleanupOptions{
+		Store:   db.ImageRetention,
+		Runtime: dockerClient,
+		Pruner:  pruner,
+		Self:    self,
+		Audit:   auditRecorder,
+		Config:  cfg.ImageCleanup,
+		Logger:  logger,
+	})
+
 	// Update policies.
 	//
 	// Administration only. Creating a rule records an intention; whether that
@@ -1032,6 +1068,7 @@ func run() error {
 	start(executions.Run)
 	start(rollbacks.Run)
 	start(automation.Run)
+	start(imageCleanup.Run)
 	start(auth.Run)
 	start(auditRecorder.Run)
 	start(notifications.Service.Run)

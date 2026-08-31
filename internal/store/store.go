@@ -109,6 +109,13 @@ type DB struct {
 	// host, which is what restart recovery reads instead of guessing.
 	Rollbacks *RollbackRepository
 
+	// ImageRetention reads the evidence an image-cleanup pass decides from --
+	// which images a settled update superseded, and every reference that would
+	// keep one. Reads only: it names no image to remove and holds no capability
+	// that could remove one. The service that acts on its answers holds the
+	// capability, so the reasoning and the destruction stay apart.
+	ImageRetention *ImageRetentionRepository
+
 	// UpdatePolicies holds the automation rules: which containers HarborMaster
 	// may update without being asked, how far, and when. Deliberately separate
 	// from Policies, which reports and never acts.
@@ -406,6 +413,7 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Acquisitions:         &AcquisitionRepository{db: sqlDB},
 		Executions:           &ExecutionRepository{db: sqlDB},
 		Rollbacks:            &RollbackRepository{db: sqlDB},
+		ImageRetention:       &ImageRetentionRepository{db: sqlDB},
 
 		UpdatePolicies:       &UpdatePolicyRepository{db: sqlDB},
 		Automation:           &AutomationRepository{db: sqlDB},

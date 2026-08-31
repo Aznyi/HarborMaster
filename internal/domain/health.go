@@ -104,6 +104,11 @@ type Features struct {
 	Acquisition bool `json:"acquisition"`
 	Execution   bool `json:"execution"`
 	Rollback    bool `json:"rollback"`
+	// ImageCleanup REMOVES IMAGES. The only capability that destroys rather
+	// than adds, and the only one whose result HarborMaster cannot undo: an
+	// image it removed can come back only from a registry, and only if that
+	// registry still serves the same content.
+	ImageCleanup bool `json:"imageCleanup"`
 
 	// Automation changes containers with nobody watching. It holds no Docker
 	// capability of its own; it submits the same requests an operator would.

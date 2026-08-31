@@ -7462,6 +7462,7 @@ components:
           acquisition,
           execution,
           rollback,
+          imageCleanup,
           automation,
           notifications,
           notificationsAllowPrivate,
@@ -7486,6 +7487,13 @@ components:
         rollback:
           type: boolean
           description: Stops the replacement and starts the original.
+        imageCleanup:
+          type: boolean
+          description: |
+            REMOVES IMAGES that a settled, successful update moved a workload
+            off. The only capability that destroys rather than adds, and the
+            only one HarborMaster cannot undo. Never forced, and never an image
+            HarborMaster has no record of introducing.
         automation:
           type: boolean
           description: Changes containers on a timer, with nobody watching.

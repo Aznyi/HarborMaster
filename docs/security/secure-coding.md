@@ -29,8 +29,9 @@ privileged socket traffic is a denial-of-service amplifier: one HTTP request
 becomes a full host sweep, repeatable at will.
 
 **1.5 Never widen a mutation interface without editing its test.**
-There are exactly three: `docker.ImageAcquirer` (one method),
-`docker.ContainerMutator` (five), and `docker.ContainerRollbacker` (four). Each
+There are exactly four: `docker.ImageAcquirer` (one method),
+`docker.ContainerMutator` (five), `docker.ContainerRollbacker` (four), and
+`docker.ImagePruner` (one). Each
 is pinned by an exact-set test, a verb test, and a source-level test naming the
 packages allowed to reference it. Adding a method means editing tests whose
 entire subject is that limit — which is what makes the change visible in review.
@@ -101,6 +102,27 @@ A tag-referenced container carries no digest in its reference. The daemon's
 RepoDigests do, but one image can carry entries for several repositories, so
 only an exact registry-and-repository match is eligible and anything ambiguous
 reports unknown. Never take "the first one". See `domain.SelectRepoDigest`.
+
+**1.11a Never force an image removal, and never widen `ImagePruner`.**
+`docker.ImagePruner` has one method: remove ONE local image by id. The call
+site passes a literal `Force: false` and `PruneChildren: false` that no caller
+can reach — there is nowhere on `ImageRemoveRequest` to put either. A daemon
+that refuses because something still references the image has ANSWERED, and the
+answer is keep; it is reported as its own outcome and never retried.
+`TestImageRemovalNeverForces` fails the build on `Force: true` anywhere in
+`internal/docker/prune.go`, and also fails if the explicit `false` is dropped.
+
+**Removal is by image ID only.** Not by tag and not by digest reference.
+Removing `nginx:1.27` asks the daemon to untag, which can leave the artefact
+behind or — if the tag has since moved — act on a different artefact than the
+one that was assessed. `ImageRemoveRequest.Validate` refuses anything that is
+not a full digest-form local id.
+
+**Never let a caller name an image to remove.** The candidate set is DERIVED
+from HarborMaster's own execution records: an image is a candidate only when a
+successful, settled update moved a workload off it. There is no endpoint that
+removes an image and no type in the path with somewhere to put a caller-supplied
+identifier.
 
 **1.11 Never add a remove capability to the rollback interface.**
 `docker.ContainerRollbacker` has four methods and none of them destroys

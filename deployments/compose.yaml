@@ -195,6 +195,22 @@ services:
       HARBORMASTER_AUTOMATION_RETENTION_AGE: ${HARBORMASTER_AUTOMATION_RETENTION_AGE:-2160h}
       HARBORMASTER_AUTOMATION_PRUNE_INTERVAL: ${HARBORMASTER_AUTOMATION_PRUNE_INTERVAL:-6h}
 
+      # ---- image cleanup -----------------------------------------------
+      #
+      # REMOVES IMAGES. The only feature that destroys rather than adds, and the
+      # only one whose mistakes cannot be undone by HarborMaster itself.
+      #
+      # It removes an image only when a settled, successful update moved a
+      # workload off it, nothing on the host or in HarborMaster's records still
+      # references it, and it is older than MIN_AGE. It never forces: a daemon
+      # that refuses because something still uses the image has given the
+      # answer, and the answer is keep.
+      HARBORMASTER_IMAGE_CLEANUP_ENABLED: ${HARBORMASTER_IMAGE_CLEANUP_ENABLED:-false}
+      HARBORMASTER_IMAGE_CLEANUP_MIN_AGE: ${HARBORMASTER_IMAGE_CLEANUP_MIN_AGE:-336h}
+      HARBORMASTER_IMAGE_CLEANUP_KEEP_GENERATIONS: ${HARBORMASTER_IMAGE_CLEANUP_KEEP_GENERATIONS:-2}
+      HARBORMASTER_IMAGE_CLEANUP_INTERVAL: ${HARBORMASTER_IMAGE_CLEANUP_INTERVAL:-12h}
+      HARBORMASTER_IMAGE_CLEANUP_MAX_PER_PASS: ${HARBORMASTER_IMAGE_CLEANUP_MAX_PER_PASS:-10}
+
       # ---- notifications -----------------------------------------------
       #
       # HARBORMASTER'S SECOND OUTBOUND EGRESS, and the only one that goes

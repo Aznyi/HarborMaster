@@ -388,6 +388,52 @@ const (
 	MaxAcquisitionConcurrent    = 8
 	MaxAcquisitionEvents        = 2000
 
+	// Image cleanup defaults.
+	//
+	// The fourth thing that can change the Docker host, and the only one that
+	// DESTROYS rather than adds. Off by default like the other three, and the
+	// bounds below are chosen so that an opted-in deployment still errs
+	// heavily towards keeping: a long minimum age, more than one generation
+	// kept, and a small number of removals per pass.
+	//
+	// DefaultImageCleanupEnabled is false. Nothing about an operator turning on
+	// updates implies they want their previous images destroyed.
+	DefaultImageCleanupEnabled = false
+	// DefaultImageCleanupMinAge is how long a superseded image is kept after
+	// the update that superseded it settled.
+	//
+	// Fourteen days, not hours. This clock is the operator's window to notice
+	// that an update they took two weeks ago was subtly wrong and to put the
+	// old image back without a download. Disk is cheap; a missing image on a
+	// registry that has since deleted the tag is not recoverable at all.
+	DefaultImageCleanupMinAge = 14 * 24 * time.Hour
+	// DefaultImageCleanupKeepGenerations is how many superseded images per
+	// workload are kept regardless of age.
+	//
+	// Two, so an operator can go back past the update that broke things to the
+	// one before it. One would be enough for the common case; the extra
+	// generation is what covers the case where the problem was introduced
+	// earlier than anyone realised.
+	DefaultImageCleanupKeepGenerations = 2
+	// DefaultImageCleanupInterval is how often a pass runs. Cleanup is not
+	// urgent -- an image that could have been removed at noon loses nothing by
+	// being removed at midnight.
+	DefaultImageCleanupInterval = 12 * time.Hour
+	// DefaultImageCleanupMaxPerPass bounds how many images one pass removes.
+	//
+	// Small on purpose. If a defect ever made cleanup too eager, this is the
+	// difference between an operator finding a handful of images missing and
+	// finding their whole image store gone before the next pass.
+	DefaultImageCleanupMaxPerPass = 10
+
+	// Image cleanup bounds. Each one refuses a setting that would turn the
+	// safety margin into a formality.
+	MinImageCleanupMinAge      = 24 * time.Hour
+	MinImageCleanupInterval    = 15 * time.Minute
+	MinImageCleanupGenerations = 1
+	MaxImageCleanupGenerations = 50
+	MaxImageCleanupPerPass     = 100
+
 	// DefaultExecutionEnabled is false, and it is the most consequential
 	// default in HarborMaster.
 	//
@@ -1119,6 +1165,48 @@ type Planner struct {
 	PruneInterval time.Duration
 }
 
+// ImageCleanup holds settings for removing images HarborMaster superseded.
+//
+// # What this can and cannot reach
+//
+// It can remove an image that a SETTLED, SUCCESSFUL update moved a workload
+// off, that nothing else references, and that is older than MinAge. It cannot
+// reach an image HarborMaster never introduced, and it never removes anything
+// forcibly: a daemon that refuses because something still uses the image has
+// given the answer, and the answer is keep.
+//
+// # Why every setting only ever makes cleanup do LESS
+//
+// Enabled false disables it. A larger MinAge keeps images longer. More
+// KeepGenerations keeps more of them. A smaller MaxPerPass removes fewer at a
+// time. There is no setting here that makes cleanup more aggressive than the
+// retention rules allow, and no setting that can switch a safety check off --
+// the checks live in domain.DecideImageRetention and read nothing from here
+// except the age and the generation count.
+type ImageCleanup struct {
+	// Enabled turns cleanup on. False -- the default -- means no image is ever
+	// removed and the capability is not even granted to the service.
+	Enabled bool
+
+	// MinAge is how long a superseded image is kept after its update settled.
+	// Must be positive: a zero would mean "remove as soon as it is superseded",
+	// which removes exactly the artefact a same-day rollback needs.
+	MinAge time.Duration
+
+	// KeepGenerations is how many superseded images per workload are kept
+	// regardless of age. Floors at one inside the decision, so a misconfigured
+	// zero still keeps the immediately previous image.
+	KeepGenerations int
+
+	// Interval is how often a pass runs.
+	Interval time.Duration
+
+	// MaxPerPass bounds removals in one pass. The blast-radius limit: it is
+	// what keeps a defect in the eligibility rules from emptying an image
+	// store between one look and the next.
+	MaxPerPass int
+}
+
 // Acquisition holds settings for safe image acquisition.
 //
 // # This is the one capability that changes the host
@@ -1719,6 +1807,10 @@ type Config struct {
 	Rollback    Rollback
 	Automation  Automation
 
+	// ImageCleanup removes images HarborMaster's own updates superseded. Off by
+	// default: it is the only feature that destroys rather than adds.
+	ImageCleanup ImageCleanup
+
 	// Notifications is HarborMaster's second outbound egress. Off by default.
 	Notifications Notifications
 
@@ -2078,6 +2170,17 @@ func load(lookup lookupFunc) (Config, error) {
 		*target.into = value
 	}
 
+	cfg.ImageCleanup.Enabled, err = boolVar(lookup, "IMAGE_CLEANUP_ENABLED", DefaultImageCleanupEnabled)
+	collect(err)
+	cfg.ImageCleanup.MinAge, err = durationVar(lookup, "IMAGE_CLEANUP_MIN_AGE", DefaultImageCleanupMinAge)
+	collect(err)
+	cfg.ImageCleanup.Interval, err = durationVar(lookup, "IMAGE_CLEANUP_INTERVAL", DefaultImageCleanupInterval)
+	collect(err)
+	cfg.ImageCleanup.KeepGenerations, err = intVar(lookup, "IMAGE_CLEANUP_KEEP_GENERATIONS", DefaultImageCleanupKeepGenerations)
+	collect(err)
+	cfg.ImageCleanup.MaxPerPass, err = intVar(lookup, "IMAGE_CLEANUP_MAX_PER_PASS", DefaultImageCleanupMaxPerPass)
+	collect(err)
+
 	cfg.Execution.Enabled, err = boolVar(lookup, "EXECUTION_ENABLED", DefaultExecutionEnabled)
 	collect(err)
 	cfg.Execution.RequireSnapshot, err = boolVar(lookup, "EXECUTION_REQUIRE_SNAPSHOT", true)
@@ -2406,6 +2509,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Acquisition.validate()...)
 	errs = append(errs, c.Execution.validate()...)
 	errs = append(errs, c.Automation.validate()...)
+	errs = append(errs, c.ImageCleanup.validate()...)
 	errs = append(errs, c.Notifications.validate()...)
 	errs = append(errs, c.Auth.validate()...)
 
@@ -2849,6 +2953,53 @@ func (e Execution) validate() []error {
 // the feature on is a worse failure than one caught at startup. That reasoning
 // is sharper here than anywhere else, because the day someone flips this one on
 // is the day HarborMaster gains write access to a privileged socket.
+// validate refuses a cleanup configuration that could not be acted on safely.
+//
+// Every rule here fails CLOSED in the same direction: a setting that cannot be
+// trusted stops the process at startup rather than being silently corrected to
+// something more destructive. An operator who mistyped a duration finds out
+// immediately; they do not find out later from a missing image.
+//
+// Note what is NOT validated: nothing here can make cleanup more aggressive, so
+// there is no upper bound on MinAge and no lower bound on KeepGenerations
+// beyond one. Keeping images for a thousand years is a strange choice, not an
+// unsafe one.
+func (c ImageCleanup) validate() []error {
+	if !c.Enabled {
+		// Disabled is always valid, whatever the other values say. A deployment
+		// that left a stale duration in its environment must not be refused
+		// startup over a setting nothing reads.
+		return nil
+	}
+
+	var errs []error
+
+	if c.MinAge < MinImageCleanupMinAge {
+		errs = append(errs, fmt.Errorf(
+			"%sIMAGE_CLEANUP_MIN_AGE must be at least %s: a shorter window "+
+				"removes the image a same-day rollback needs",
+			envPrefix, MinImageCleanupMinAge))
+	}
+	if c.Interval < MinImageCleanupInterval {
+		errs = append(errs, fmt.Errorf(
+			"%sIMAGE_CLEANUP_INTERVAL must be at least %s",
+			envPrefix, MinImageCleanupInterval))
+	}
+	if c.KeepGenerations < MinImageCleanupGenerations ||
+		c.KeepGenerations > MaxImageCleanupGenerations {
+		errs = append(errs, fmt.Errorf(
+			"%sIMAGE_CLEANUP_KEEP_GENERATIONS must be between %d and %d",
+			envPrefix, MinImageCleanupGenerations, MaxImageCleanupGenerations))
+	}
+	if c.MaxPerPass < 1 || c.MaxPerPass > MaxImageCleanupPerPass {
+		errs = append(errs, fmt.Errorf(
+			"%sIMAGE_CLEANUP_MAX_PER_PASS must be between 1 and %d",
+			envPrefix, MaxImageCleanupPerPass))
+	}
+
+	return errs
+}
+
 func (a Acquisition) validate() []error {
 	var errs []error
 

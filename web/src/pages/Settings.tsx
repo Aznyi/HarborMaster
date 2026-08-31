@@ -290,6 +290,12 @@ function FeatureSections({ features }: { features?: Features }) {
             note="Changes containers on a timer, with nobody watching. What it may touch is entirely the business of update policies."
             dangerous
           />
+          <Feature
+            label="Remove superseded images"
+            on={features.imageCleanup}
+            note="Deletes images that a settled, successful update moved a workload off, once nothing references them and the retention period has passed. Never forced, and never an image HarborMaster did not put there — but a removal cannot be undone."
+            dangerous
+          />
         </dl>
 
         {/* The two read-only engines an operator asks about when the automation
