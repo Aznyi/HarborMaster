@@ -785,6 +785,17 @@ func TestThePreflightRefusesEachUnsafeSituation(t *testing.T) {
 			mutate: func(h *acquisitionHarness) { h.evidence.present = false },
 			want:   domain.AcquisitionRefusalContainerMissing,
 		},
+		// C3D: a departed container makes its plan non-current, so BOTH the
+		// presence check and the currency check would refuse. The refusal must
+		// name the real reason -- the plan is intact and readable, its
+		// container is not -- rather than claiming the plan no longer exists.
+		"the container is gone and its plan is therefore not current": {
+			mutate: func(h *acquisitionHarness) {
+				h.evidence.present = false
+				h.evidence.currentErr = store.ErrNotFound
+			},
+			want: domain.AcquisitionRefusalContainerMissing,
+		},
 		"a critical policy violation is open": {
 			mutate: func(h *acquisitionHarness) {
 				h.evidence.plan.PolicyOpen = 1

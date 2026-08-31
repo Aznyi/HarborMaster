@@ -186,6 +186,13 @@ func TestAnIdenticalAssessmentIsNotWrittenTwice(t *testing.T) {
 // of what was believed when a decision was made.
 func TestAChangedAssessmentAddsAPlanWithoutDestroyingTheOld(t *testing.T) {
 	db := openTestDB(t)
+	// A plan is always written for a container the PLANNER FOUND, so the
+	// inventory row is part of a faithful fixture. Since C3D a plan is current
+	// only while the container it assessed still exists, and a plan for a
+	// container that was never inventoried is correctly not current.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+	))
 	ctx := context.Background()
 
 	insertPlans(t, db, planFor("container-a", digestOf("aa")))
@@ -610,6 +617,14 @@ func TestCurrentOnlyExcludesSupersededPlans(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
+	// Both containers are in the inventory. Since C3D a plan is current only
+	// while the container it assessed still exists, so a fixture asserting
+	// which plans are CURRENT has to inventory them.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+		buildContainer("container-b", "api", withImage("nginx:1.27", "sha256:image1")),
+	))
+
 	insertPlans(t, db, planFor("container-a", digestOf("aa")))
 	insertPlans(t, db, planFor("container-a", digestOf("bb")))
 	insertPlans(t, db, planFor("container-b", digestOf("cc")))
@@ -641,6 +656,14 @@ func TestCurrentOnlyExcludesSupersededPlans(t *testing.T) {
 func TestPlanSummaryCountsCurrentPlansOnly(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+
+	// Both containers are in the inventory. Since C3D a plan is current only
+	// while the container it assessed still exists, so a fixture asserting
+	// which plans are CURRENT has to inventory them.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+		buildContainer("container-b", "api", withImage("nginx:1.27", "sha256:image1")),
+	))
 
 	// container-a gets two assessments; only the newer one should count.
 	insertPlans(t, db, planFor("container-a", digestOf("aa")))
@@ -712,6 +735,12 @@ func TestPlanSummaryOfAnEmptyEstateIsUsable(t *testing.T) {
 func TestRetentionNeverPrunesTheCurrentPlan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	// Both containers inventoried: since C3D a plan is current only while the
+	// container it assessed still exists.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+		buildContainer("container-b", "api", withImage("nginx:1.27", "sha256:image1")),
+	))
 	old := time.Now().UTC().Add(-365 * 24 * time.Hour)
 
 	first := planFor("container-a", digestOf("aa"))

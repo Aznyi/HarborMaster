@@ -195,8 +195,24 @@ func TestEveryCurrentStateConsumerAgrees(t *testing.T) {
 	}
 
 	assertAll("before the registry answers", true)
+
+	// C3D: the OTHER reason a plan stops being current. Nothing about the
+	// registry changed here -- the container simply left.
+	commitContainers(t, db, "other")
+	assertAll("while the container is absent", false)
+
+	// And back. Currency is derived, so presence is current evidence rather
+	// than a destructive transition: nothing was written when it left and
+	// nothing has to be undone.
+	commitContainers(t, db, "svc-a")
+	assertAll("after the container returns", true)
+
 	seedIntel(t, db, currencyImage, domain.CheckOK, domain.UpdateNone, true)
 	assertAll("after settled evidence retires it", false)
+
+	// Both reasons at once. Still one answer, from all four.
+	commitContainers(t, db, "other")
+	assertAll("absent AND retired", false)
 
 	// And history is untouched throughout.
 	if got, err := db.Plans.Get(ctx, plan.PlanID); err != nil || got.PlanID != plan.PlanID {

@@ -452,6 +452,26 @@ func (s *AcquisitionService) preflight(
 		}
 	}
 
+	// ---- the container ---------------------------------------------------
+	//
+	// Checked BEFORE currency, and the order is about accuracy rather than
+	// safety: both refuse, and neither permits anything the other would not.
+	//
+	// Since C3D a plan is current only while the container it assessed still
+	// exists, so a departed container makes CurrentPlan answer "none" -- and
+	// refusing there would tell the operator "the change plan no longer
+	// exists", which is false. The plan is intact and readable; its CONTAINER
+	// is gone. Asking the more specific question first means the refusal names
+	// the real reason.
+	present, err := s.evidence.ContainerPresent(ctx, plan.ContainerID)
+	if err != nil {
+		return decision, err
+	}
+	if !present {
+		decision.Refusal = domain.AcquisitionRefusalContainerMissing
+		return decision, nil
+	}
+
 	// A superseded plan means the operator approved an assessment that has
 	// since been replaced. The newer one may say something different, and
 	// acting on the older is acting on an opinion nobody currently holds.
@@ -474,17 +494,6 @@ func (s *AcquisitionService) preflight(
 	case domain.RecommendProceed, domain.RecommendCaution, domain.RecommendManualReview:
 	default:
 		decision.Refusal = domain.AcquisitionRefusalRecommendation
-		return decision, nil
-	}
-
-	// ---- the container ---------------------------------------------------
-
-	present, err := s.evidence.ContainerPresent(ctx, plan.ContainerID)
-	if err != nil {
-		return decision, err
-	}
-	if !present {
-		decision.Refusal = domain.AcquisitionRefusalContainerMissing
 		return decision, nil
 	}
 
@@ -1263,14 +1272,25 @@ func (e *planEvidence) Intel(ctx context.Context, reference string) (domain.Imag
 }
 
 func (e *planEvidence) ContainerPresent(ctx context.Context, containerID string) (bool, error) {
-	_, err := e.containers.Get(ctx, containerID)
+	detail, err := e.containers.Get(ctx, containerID)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("look up container: %w", err)
 	}
-	return true, nil
+	// The ROW existing is not the container existing.
+	//
+	// A container removed from the host keeps its inventory row until retention
+	// purges it -- that row is the history an operator reads afterwards, and
+	// ContainerRepository.Get deliberately returns it so a detail page still
+	// works. It carries present = 0.
+	//
+	// This helper answers "is the container on the host", so it has to read
+	// that flag. Without it the name promised a check it never performed, and a
+	// departed container passed the presence gate on the strength of its own
+	// tombstone.
+	return detail != nil && detail.Overview.Present, nil
 }
 
 // ------------------------------------------------------- audit attribution --

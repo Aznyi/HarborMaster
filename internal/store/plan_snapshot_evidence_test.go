@@ -121,6 +121,12 @@ func evidencePlan(containerID string, snapshotID int64, readiness domain.Readine
 // the evidence an operator reviewed is no longer the evidence that authorizes.
 func TestCaseA_SnapshotCapturedAfterAPlanDoesNotEnterThatPlan(t *testing.T) {
 	db := openTestDB(t)
+	// A plan is written for a container the planner FOUND. Since C3D a plan is
+	// current only while the container it assessed still exists, so a fixture
+	// that reads Current has to inventory it.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+	))
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 
@@ -198,6 +204,13 @@ func TestCaseA_SnapshotCapturedAfterAPlanDoesNotEnterThatPlan(t *testing.T) {
 // reinterpreting the plan: the plan's snapshot id and the live baseline differ.
 func TestCaseB_ASnapshotTakenAfterAPlanDivergesFromIt(t *testing.T) {
 	db := openTestDB(t)
+	// A plan is written for a container the planner FOUND. Since C3D a plan is
+	// current only while the container it assessed still exists, so a fixture
+	// that reads Current has to inventory it.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+		buildContainer("container-b", "web", withImage("nginx:1.27", "sha256:image1")),
+	))
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 
@@ -261,6 +274,13 @@ func TestCaseB_ASnapshotTakenAfterAPlanDivergesFromIt(t *testing.T) {
 // baseline and nothing needs replanning.
 func TestCaseC_UnchangedConfigurationDeduplicatesAndLeavesThePlanValid(t *testing.T) {
 	db := openTestDB(t)
+	// A plan is written for a container the planner FOUND. Since C3D a plan is
+	// current only while the container it assessed still exists, so a fixture
+	// that reads Current has to inventory it.
+	commitOf(t, db, records(
+		buildContainer("container-a", "web", withImage("nginx:1.27", "sha256:image1")),
+		buildContainer("container-c", "web", withImage("nginx:1.27", "sha256:image1")),
+	))
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
 

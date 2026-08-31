@@ -161,7 +161,7 @@ func (r *ContainerRepository) gatherPlans(
 		       SELECT MAX(id) FROM change_plans
 		        WHERE container_id IN (`+placeholders(len(ids))+`)
 		        GROUP BY container_id)
-		   AND NOT `+retiredFor("container_id"), ids...)
+		   AND `+currentPlanSQL("container_id"), ids...)
 	if err != nil {
 		return fmt.Errorf("read current plans: %w", AsError(err))
 	}

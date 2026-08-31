@@ -172,6 +172,66 @@ func retiredFor(containerIDColumn string) string {
 	return fmt.Sprintf(retiredByEvidenceSQL, containerIDColumn)
 }
 
+// containerPresentSQL is the OTHER reason a plan stops being current.
+//
+// A plan assesses one container instance: its configuration snapshot, its open
+// drift, its policy violations and the digest it was running, frozen together
+// with the verdict they produced. When the inventory stops reporting that
+// container, the thing the plan is about is gone -- and an assessment of
+// something that no longer exists cannot be HarborMaster's current decision
+// about anything.
+//
+// # Why this is not folded into retiredByEvidenceSQL
+//
+// It would have been one fewer fragment, and it would have made the name a lie.
+// "Retired by evidence" means a specific thing -- the registry answered and
+// found nothing newer -- and an absent container is a different fact reached
+// for a different reason. Two facts, two fragments, composed by
+// currentPlanSQL below; a reader asking "why is this plan not current" gets a
+// truthful answer rather than one bucket covering both.
+//
+// Note that retiredByEvidenceSQL ALSO requires present = 1. That is not a
+// duplicate of this test: it is the failure direction of the retirement rule.
+// An absent container has no live registry comparison to be retired BY, so
+// retirement asserts nothing about it and this fragment decides instead.
+const containerPresentSQL = `
+	EXISTS (
+		SELECT 1 FROM containers c
+		 WHERE c.id = %s AND c.present = 1
+	)`
+
+// presentFor renders the presence fragment against a container-id expression.
+func presentFor(containerIDColumn string) string {
+	return fmt.Sprintf(containerPresentSQL, containerIDColumn)
+}
+
+// currentPlanSQL is THE definition of a current plan, composed from both halves.
+//
+//	CURRENT = the container instance still exists
+//	          AND the registry has not settled the question away
+//
+// Every current-state consumer renders this and nothing else: Current, the
+// currentOnly listing, the dashboard Summary and the container attention
+// projection. The newest-row-per-container part stays with each caller, because
+// only Current expresses it as ORDER BY ... LIMIT 1 while the others express it
+// as a grouped MAX(id) -- but the two reasons a newest row is NOT current live
+// here, once.
+//
+// Both halves fail SAFE in opposite directions, which is deliberate:
+//
+//   - Presence fails CLOSED. A container the inventory does not report is not
+//     current, and if the inventory is wrong the cost is a plan that has to be
+//     regenerated on the next pass.
+//   - Retirement fails OPEN. Absent or unreadable registry evidence retires
+//     nothing, because hiding a real update behind a failed lookup is the one
+//     direction this must never fail in.
+//
+// Historical reads never render this. History is every plan ever written and
+// stays readable forever; see the currency contract on domain.ChangePlan.
+func currentPlanSQL(containerIDColumn string) string {
+	return presentFor(containerIDColumn) + " AND NOT " + retiredFor(containerIDColumn)
+}
+
 // superseded is derived rather than stored: a plan is superseded when a newer
 // one exists for the same container. Storing it would mean writing to an
 // immutable row.
@@ -728,7 +788,7 @@ func (r *PlanRepository) Current(ctx context.Context, containerID string) (domai
 	rows, err := r.db.QueryContext(ctx,
 		selectPlanColumns+`
 		 WHERE p.container_id = ?
-		   AND NOT `+retiredFor("p.container_id")+`
+		   AND `+currentPlanSQL("p.container_id")+`
 		 ORDER BY p.id DESC LIMIT 1`, containerID)
 	if err != nil {
 		return domain.ChangePlan{}, fmt.Errorf("query current plan: %w", AsError(err))
@@ -801,7 +861,7 @@ func (r *PlanRepository) Summary(ctx context.Context) (domain.ChangePlanSummary,
 	currentPlans := `
 		SELECT * FROM change_plans
 		WHERE id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)
-		  AND NOT ` + retiredFor("container_id")
+		  AND ` + currentPlanSQL("container_id")
 
 	for _, group := range []struct {
 		query string
@@ -953,7 +1013,7 @@ func planWhere(filter PlanFilter) (string, []any) {
 		// cannot disagree about which plans are current.
 		clauses = append(clauses,
 			"p.id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)",
-			"NOT "+retiredFor("p.container_id"))
+			currentPlanSQL("p.container_id"))
 	}
 	if filter.MinRisk > 0 {
 		clauses = append(clauses, "p.risk_score >= ?")
