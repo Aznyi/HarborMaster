@@ -499,7 +499,7 @@ func TestTheRunBudgetStopsAfterMaxPerRun(t *testing.T) {
 	policy.Limits.MaxPerRun = 8
 
 	budget := service.NewAutomationBudget(2, 10, 0, nil)
-	effective := domain.Resolve(policy, nil)
+	effective := domain.Resolve(policy, nil, "")
 
 	for i := 0; i < 2; i++ {
 		if _, ok := budget.Admit(domain.AutomationDecision{}, effective); !ok {
@@ -524,7 +524,7 @@ func TestTheConcurrencyBudgetCountsWorkAlreadyOutstanding(t *testing.T) {
 	policy.Limits.MaxPerRun = 8
 
 	budget := service.NewAutomationBudget(10, 2, 2, nil)
-	effective := domain.Resolve(policy, nil)
+	effective := domain.Resolve(policy, nil, "")
 
 	reason, ok := budget.Admit(domain.AutomationDecision{}, effective)
 	if ok {
@@ -542,7 +542,7 @@ func TestAPolicyCannotRaiseTheEngineCeiling(t *testing.T) {
 	policy.Limits.MaxConcurrent = 50
 	policy.Limits.MaxPerRun = 50
 	policy.Limits.MaxPerRegistry = 50
-	effective := domain.Resolve(policy, nil)
+	effective := domain.Resolve(policy, nil, "")
 
 	budget := service.NewAutomationBudget(1, 1, 0, nil)
 	if _, ok := budget.Admit(domain.AutomationDecision{}, effective); !ok {
@@ -558,7 +558,7 @@ func TestThePerRegistryLimitBucketsByHost(t *testing.T) {
 	policy.Limits.MaxConcurrent = 8
 	policy.Limits.MaxPerRegistry = 1
 	policy.Limits.MaxPerRun = 8
-	effective := domain.Resolve(policy, nil)
+	effective := domain.Resolve(policy, nil, "")
 
 	registryOf := func(reference string) string {
 		if len(reference) > 7 && reference[:7] == "ghcr.io" {

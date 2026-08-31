@@ -193,6 +193,15 @@ const (
 	// as an event in its own right: an operator must be able to find the moment
 	// automation stopped touching a container without reading every run.
 	AuditAutomationPaused AuditAction = "automation.paused"
+	// AuditContainerBehaviorSet is an operator choosing how ONE container should
+	// be updated, from its own page. Configuration only: the row it writes
+	// touches no container, and the behaviour it stores may only narrow what
+	// the governing policy already permits.
+	AuditContainerBehaviorSet AuditAction = "container.updateBehaviorSet"
+	// AuditContainerBehaviorCleared is that choice being withdrawn, returning
+	// the container to whatever policy governs it.
+	AuditContainerBehaviorCleared AuditAction = "container.updateBehaviorCleared"
+
 	// AuditAutomationResumed is a person clearing that refusal.
 	AuditAutomationResumed AuditAction = "automation.resumed"
 
@@ -233,6 +242,8 @@ var AuditActions = []AuditAction{
 	AuditCSRFRejected, AuditAuthorizationDenied,
 
 	AuditBootstrapStarted, AuditBootstrapCompleted, AuditBootstrapRejected,
+
+	AuditContainerBehaviorSet, AuditContainerBehaviorCleared,
 
 	AuditUserCreated, AuditUserRoleChanged, AuditUserDisabled, AuditUserEnabled,
 

@@ -44,6 +44,8 @@ import type {
   ContainerDetail,
   ContainerQuery,
   ContainerListRow,
+  ContainerUpdateBehavior,
+  UpdateBehavior,
   FilterOptions,
   ImageUsage,
   InventoryStatus,
@@ -1818,6 +1820,56 @@ export function disableSimpleUpdates(
   options?: RequestOptions,
 ): Promise<UpdatePolicyResult> {
   return request<UpdatePolicyResult>("/automation/simple-updates", options, "DELETE");
+}
+
+/**
+ * GET /api/v1/containers/{id}/update-behavior
+ *
+ * What was asked for and what the engine will do. A read.
+ */
+export function getContainerUpdateBehavior(
+  containerId: string,
+  options?: RequestOptions,
+): Promise<ContainerUpdateBehavior> {
+  return request<ContainerUpdateBehavior>(
+    `/containers/${encodeURIComponent(containerId)}/update-behavior`,
+    options,
+  );
+}
+
+/**
+ * POST /api/v1/containers/{id}/update-behavior — needs `automation:manage`.
+ *
+ * Writes one row. Changes NO container: the service behind it holds no Docker
+ * capability, so this cannot stop, start or recreate anything.
+ */
+export function setContainerUpdateBehavior(
+  containerId: string,
+  behavior: UpdateBehavior,
+  options?: RequestOptions,
+): Promise<ContainerUpdateBehavior> {
+  return request<ContainerUpdateBehavior>(
+    `/containers/${encodeURIComponent(containerId)}/update-behavior`,
+    options,
+    "POST",
+    { behavior },
+  );
+}
+
+/**
+ * DELETE /api/v1/containers/{id}/update-behavior — needs `automation:manage`.
+ *
+ * The container returns to whatever policy governs it.
+ */
+export function clearContainerUpdateBehavior(
+  containerId: string,
+  options?: RequestOptions,
+): Promise<ContainerUpdateBehavior> {
+  return request<ContainerUpdateBehavior>(
+    `/containers/${encodeURIComponent(containerId)}/update-behavior`,
+    options,
+    "DELETE",
+  );
 }
 
 /** GET /api/v1/automation */

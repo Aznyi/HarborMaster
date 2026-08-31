@@ -1,3 +1,4 @@
+import { useSession } from "../hooks/useSession";
 import { formatMoment, formatMomentOrNothing } from "../api/presentation";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
@@ -98,6 +99,11 @@ type ConfigView = (typeof CONFIG_VIEWS)[number];
 const RECENT_EVENT_LIMIT = 20;
 
 export function ContainerDetailPage() {
+  const session = useSession();
+  const mayManageAutomation = Boolean(
+    session.user?.permissions.includes("automation:manage"),
+  );
+
   const { id = "" } = useParams();
   const detail = useContainerDetail(id);
   const [tab, setTab] = useState<Tab>("Overview");
@@ -170,7 +176,10 @@ export function ContainerDetailPage() {
       <div role="tabpanel" aria-label={tab}>
         {tab === "Overview" && (
           <div className="flex flex-col gap-6">
-            <ContainerOverview detail={container} />
+            <ContainerOverview
+              detail={container}
+              mayManageAutomation={mayManageAutomation}
+            />
             {/* The state and process detail the old overview carried. */}
             <OverviewTab detail={container} />
           </div>

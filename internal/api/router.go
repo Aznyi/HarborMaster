@@ -89,6 +89,10 @@ type Server struct {
 	// conflating them would let one edit turn a reporting rule into a mutation
 	// rule.
 	updatePolicies UpdatePolicyService
+
+	// containerPreferences answers the per-container update-behaviour endpoints
+	// (C2). It holds no Docker capability: setting a behaviour writes one row.
+	containerPreferences ContainerPreferenceService
 	// dependencies answers the workload-dependency endpoints.
 	//
 	// A READER plus one small table. Nothing on this interface pulls,
@@ -272,6 +276,9 @@ type Options struct {
 	// able to write and review their rules before switching automation on,
 	// which is the order those two things should be done in.
 	UpdatePolicies UpdatePolicyService
+	// ContainerPreferences owns per-container update behaviour (C2). Optional:
+	// without it the routes report the capability as not configured.
+	ContainerPreferences ContainerPreferenceService
 	// PlanApprovals records human review of change plans. Nil disables the
 	// three approval routes, which yields 503 rather than a broken route.
 	//
@@ -359,12 +366,13 @@ func NewServer(opts Options) *Server {
 		executions:   opts.Executions,
 		rollbacks:    opts.Rollbacks,
 
-		automation:        opts.Automation,
-		dependencies:      opts.Dependencies,
-		updatePolicies:    opts.UpdatePolicies,
-		planApprovals:     opts.PlanApprovals,
-		notifications:     opts.Notifications,
-		notificationAdmin: opts.NotificationAdmin,
+		automation:           opts.Automation,
+		dependencies:         opts.Dependencies,
+		updatePolicies:       opts.UpdatePolicies,
+		containerPreferences: opts.ContainerPreferences,
+		planApprovals:        opts.PlanApprovals,
+		notifications:        opts.Notifications,
+		notificationAdmin:    opts.NotificationAdmin,
 
 		auth:    opts.Auth,
 		users:   opts.Users,

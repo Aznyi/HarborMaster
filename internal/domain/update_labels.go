@@ -171,6 +171,15 @@ type EffectivePolicy struct {
 	Policy UpdatePolicy `json:"policy"`
 	// Overrides is what the container's labels asked for.
 	Overrides LabelOverrides `json:"overrides"`
+	// Preference is the behaviour an operator chose for this container, when
+	// one was chosen. Carried unmodified for attribution, exactly like Policy:
+	// the interface has to be able to say "you asked for X and Y decided".
+	Preference UpdateBehavior `json:"preference,omitempty"`
+	// PreferenceApplied reports that the preference actually narrowed something.
+	// False when no preference exists, and ALSO false when the preference asked
+	// for more than the policy already permitted -- which is the case the
+	// interface must never render as though the operator got what they picked.
+	PreferenceApplied bool `json:"preferenceApplied,omitempty"`
 
 	// The resolved settings. These are what the scheduler acts on.
 	Strategy     UpdateStrategy    `json:"strategy"`
@@ -184,20 +193,50 @@ type EffectivePolicy struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// Resolve applies a container's labels to the policy that governs it.
+// Resolve applies a container's labels and its chosen behaviour to the policy
+// that governs it.
 //
 // The single place precedence is implemented. Every caller takes the result;
-// none re-reads a label.
-func Resolve(policy UpdatePolicy, labels map[string]string) EffectivePolicy {
+// none re-reads a label, and none re-derives a preference.
+//
+// # Both inputs may only narrow
+//
+// A label narrows the strategy and never widens it. A preference narrows the
+// MODE and never widens it. Neither can raise a ceiling the governing policy
+// set, so the worst either can do is stop something from happening.
+//
+// That is the whole reason a per-container control can exist without becoming a
+// second authorisation path. An operator who selects "Automatic" on a container
+// an update policy holds for review does not get automatic: they get
+// approvalRequired, and `Preference` and `PreferenceApplied` are what let the
+// interface say so instead of lying about it.
+//
+// Pass the empty behaviour when no preference exists.
+func Resolve(
+	policy UpdatePolicy,
+	labels map[string]string,
+	preference UpdateBehavior,
+) EffectivePolicy {
 	overrides := ParseUpdateLabels(labels)
 
 	effective := EffectivePolicy{
 		Policy:       policy,
 		Overrides:    overrides,
+		Preference:   preference,
 		Strategy:     policy.Strategy,
 		Window:       policy.Window,
 		Mode:         policy.Mode,
 		AutoRollback: policy.Failure.AutoRollback,
+	}
+
+	// A preference may narrow the mode, never widen it.
+	//
+	// `Automatic` caps at nothing and is the same instruction as "no preference
+	// at all": it is stored so the interface can tell a deliberate choice from
+	// an absent one, and it deliberately changes nothing here.
+	if capped := preference.Mode(); capped != "" && narrowerMode(capped, effective.Mode) {
+		effective.Mode = capped
+		effective.PreferenceApplied = true
 	}
 
 	// A label may narrow the strategy, never widen it.

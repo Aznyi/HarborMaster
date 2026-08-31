@@ -90,6 +90,18 @@ func (s *AutomationService) evaluateEstate(
 		pausedBy[pause.ContainerName] = pause
 	}
 
+	// Every per-container behaviour an operator chose, read ONCE for the pass
+	// like the pauses above. A preference may only narrow what the governing
+	// policy permits, so a failure to read them is not a reason to refuse the
+	// pass -- it degrades to the policies alone, which is the SAFER direction
+	// only for the containers whose preference widened nothing. A preference
+	// that narrows is a restriction, so losing it could permit more than the
+	// operator asked for: the pass therefore fails rather than guessing.
+	preferences, err := s.store.ContainerPreferences(ctx)
+	if err != nil {
+		return estateEvaluation{}, fmt.Errorf("load container update preferences: %w", err)
+	}
+
 	// ONE identity reading, for the reason the pass reads one: a refresh
 	// landing mid-evaluation must not make two containers see different
 	// answers to "is this HarborMaster".
@@ -112,6 +124,8 @@ func (s *AutomationService) evaluateEstate(
 		if pause, paused := pausedBy[target.Selection.Name]; paused {
 			input.Pause, input.IsPaused = pause, true
 		}
+		// By NAME, which is what survives the recreation this may authorise.
+		input.Preference = preferences[target.Selection.Name]
 
 		// The only per-container reads, and every one an indexed point lookup.
 		// Skipped entirely for a container a cheaper check already declined --

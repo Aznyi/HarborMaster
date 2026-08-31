@@ -79,6 +79,7 @@ var routedPaths = []string{
 	APIPrefix + "/containers",
 	APIPrefix + "/containers/{id}",
 	APIPrefix + "/containers/{id}/raw",
+	APIPrefix + "/containers/{id}/update-behavior",
 	APIPrefix + "/drift",
 	APIPrefix + "/drift/container/{id}",
 	APIPrefix + "/drift/summary",

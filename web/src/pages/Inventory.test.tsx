@@ -1,4 +1,5 @@
-﻿import { render, screen, waitFor, within } from "@testing-library/react";
+﻿import { TestSessionProvider } from "../test/session";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { setAdvancedTools } from "../hooks/useAdvancedTools";
 import userEvent from "@testing-library/user-event";
 import { SessionProvider } from "../hooks/useSession";
@@ -32,22 +33,26 @@ function renderApp(path = "/") {
 
 function renderContainers() {
   return render(
-    <MemoryRouter initialEntries={["/containers"]}>
+    <TestSessionProvider>
+      <MemoryRouter initialEntries={["/containers"]}>
       <Routes>
         <Route path="/containers" element={<Containers />} />
         <Route path="/containers/:id" element={<ContainerDetailPage />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
+    </TestSessionProvider>,
   );
 }
 
 function renderDetail(id = "abcdef0123456789") {
   return render(
-    <MemoryRouter initialEntries={[`/containers/${id}`]}>
+    <TestSessionProvider>
+      <MemoryRouter initialEntries={[`/containers/${id}`]}>
       <Routes>
         <Route path="/containers/:id" element={<ContainerDetailPage />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
+    </TestSessionProvider>,
   );
 }
 

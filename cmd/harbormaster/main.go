@@ -922,6 +922,19 @@ func run() error {
 		Logger: logger,
 	})
 
+	// Per-container update behaviour (C2).
+	//
+	// Constructed after the automation engine because it reports the ENGINE'S
+	// decision as the effective behaviour rather than deriving a second one.
+	// It holds no Docker capability: setting a behaviour writes one row.
+	containerPreferences := service.NewContainerPreferenceService(service.ContainerPreferenceOptions{
+		Store:      db.ContainerPreferences,
+		Containers: db.Containers,
+		Automation: automation,
+		Audit:      auditRecorder,
+		Logger:     logger,
+	})
+
 	// A plan rests on the inventory, so a committed refresh is the moment its
 	// inputs may have moved. Cheap to trigger: every assessment is
 	// fingerprinted, so a pass over an unchanged estate writes nothing.
@@ -1073,9 +1086,10 @@ func run() error {
 		Executions:   executions,
 		Rollbacks:    rollbacks,
 
-		Automation:     automation,
-		UpdatePolicies: updatePolicies,
-		PlanApprovals:  planApprovals,
+		Automation:           automation,
+		UpdatePolicies:       updatePolicies,
+		ContainerPreferences: containerPreferences,
+		PlanApprovals:        planApprovals,
 		// The same reader the execution service consults for invariant A. One
 		// instance, so what the API shows and what the recreation path enforces
 		// are derived from the same evidence.

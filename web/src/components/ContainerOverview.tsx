@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useState } from "react";
+
 import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
@@ -11,6 +13,16 @@ import { UPDATE_TYPE_LABELS } from "../api/imageTypes";
 import { formatImageReference } from "../api/presentation";
 import { ATTENTION_LABELS, ATTENTION_MEANINGS } from "./AttentionBadges";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { ContainerUpdateBehaviorPanel } from "./ContainerUpdateBehavior";
+import {
+  clearContainerUpdateBehavior,
+  getContainerUpdateBehavior,
+  setContainerUpdateBehavior,
+} from "../api/client";
+import type {
+  ContainerUpdateBehavior as BehaviorState,
+  UpdateBehavior,
+} from "../api/inventoryTypes";
 
 /**
  * One container, answered from one request.
@@ -33,7 +45,22 @@ import { StatusBadge, type BadgeTone } from "./StatusBadge";
  * acting means a workflow, it links to the workspace that owns it rather than
  * growing a second copy of the control.
  */
-export function ContainerOverview({ detail }: { detail: ContainerDetail }) {
+export function ContainerOverview({
+  detail,
+  /**
+   * `automation:manage`, from the page that owns the session.
+   *
+   * A PROP rather than a hook: this component reaches no verdicts of its own
+   * and has never needed a session, and reading one here would make every
+   * caller -- including every test that renders it -- responsible for providing
+   * a provider it does not otherwise need. Defaulting to false means a caller
+   * that omits it gets a read-only control rather than a broken one.
+   */
+  mayManageAutomation = false,
+}: {
+  detail: ContainerDetail;
+  mayManageAutomation?: boolean;
+}) {
   const attention = detail.attention;
   const id = detail.overview.id;
 
@@ -63,6 +90,8 @@ export function ContainerOverview({ detail }: { detail: ContainerDetail }) {
 
         <AutomationPanel attention={attention} />
 
+        <UpdateBehaviorPanel containerId={id} mayManage={mayManageAutomation} />
+
         <ConfigurationPanel attention={attention} containerId={id} />
 
         <RecentPanel attention={attention} />
@@ -88,6 +117,70 @@ function Panel({
       <div className="mt-2 min-w-0 flex-1">{children}</div>
       {action ? <div className="mt-3">{action}</div> : null}
     </section>
+  );
+}
+
+/**
+ * The per-container update behaviour (C2), with its own request state.
+ *
+ * Fetched here rather than threaded through the detail payload: it is a
+ * SETTING, changed from this panel and read back from the server afterwards, so
+ * the panel that owns the control owns the read. The effective behaviour comes
+ * from the engine, so a change is followed by a re-read rather than an
+ * optimistic guess.
+ */
+function UpdateBehaviorPanel({
+  containerId,
+  mayManage,
+}: {
+  containerId: string;
+  mayManage: boolean;
+}) {
+  const [state, setState] = useState<BehaviorState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setState(await getContainerUpdateBehavior(containerId));
+    } catch {
+      // A container whose behaviour cannot be read still renders; the panel
+      // reports the effective state as unknown rather than inventing one.
+      setState(null);
+    }
+  }, [containerId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = async (action: () => Promise<BehaviorState>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await action());
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "This container's update behaviour could not be changed.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ContainerUpdateBehaviorPanel
+      state={state}
+      mayManage={mayManage}
+      busy={busy}
+      error={error}
+      onChoose={(behavior: UpdateBehavior) =>
+        void run(() => setContainerUpdateBehavior(containerId, behavior))
+      }
+      onClear={() => void run(() => clearContainerUpdateBehavior(containerId))}
+    />
   );
 }
 

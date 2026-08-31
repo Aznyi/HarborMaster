@@ -47,14 +47,14 @@ func TestLabelCannotEnrolAContainer(t *testing.T) {
 
 	// And there is nowhere for it to be recorded as an opt-in either: the
 	// override type has no Enabled field, so nothing downstream can consult one.
-	effective := Resolve(basePolicy(), map[string]string{LabelUpdateEnabled: "true"})
+	effective := Resolve(basePolicy(), map[string]string{LabelUpdateEnabled: "true"}, "")
 	if effective.Disabled {
 		t.Fatal("enabled=true changes nothing about a policy that already governs")
 	}
 }
 
 func TestLabelDisableAndPauseAlwaysWin(t *testing.T) {
-	disabled := Resolve(basePolicy(), map[string]string{LabelUpdateEnabled: "false"})
+	disabled := Resolve(basePolicy(), map[string]string{LabelUpdateEnabled: "false"}, "")
 	if !disabled.Disabled {
 		t.Fatal("enabled=false must disable automation for this container")
 	}
@@ -62,12 +62,12 @@ func TestLabelDisableAndPauseAlwaysWin(t *testing.T) {
 		t.Fatal("a disabled container must say which clause disabled it")
 	}
 
-	paused := Resolve(basePolicy(), map[string]string{LabelUpdatePause: "true"})
+	paused := Resolve(basePolicy(), map[string]string{LabelUpdatePause: "true"}, "")
 	if !paused.Disabled {
 		t.Fatal("pause=true must stop automation")
 	}
 
-	notPaused := Resolve(basePolicy(), map[string]string{LabelUpdatePause: "false"})
+	notPaused := Resolve(basePolicy(), map[string]string{LabelUpdatePause: "false"}, "")
 	if notPaused.Disabled {
 		t.Fatal("pause=false leaves the policy alone")
 	}
@@ -76,17 +76,17 @@ func TestLabelDisableAndPauseAlwaysWin(t *testing.T) {
 func TestLabelStrategyMayNarrowButNeverWiden(t *testing.T) {
 	policy := basePolicy() // minor
 
-	narrowed := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyDigestOnly)})
+	narrowed := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyDigestOnly)}, "")
 	if narrowed.Strategy != StrategyDigestOnly {
 		t.Fatalf("strategy = %q, want the narrower label value", narrowed.Strategy)
 	}
 
-	widened := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyMajor)})
+	widened := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyMajor)}, "")
 	if widened.Strategy != StrategyMinor {
 		t.Fatalf("strategy = %q, want the policy's ceiling; a container must not label its way to major", widened.Strategy)
 	}
 
-	same := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyMinor)})
+	same := Resolve(policy, map[string]string{LabelUpdateStrategy: string(StrategyMinor)}, "")
 	if same.Strategy != StrategyMinor {
 		t.Fatalf("strategy = %q, want minor", same.Strategy)
 	}
@@ -94,7 +94,7 @@ func TestLabelStrategyMayNarrowButNeverWiden(t *testing.T) {
 
 func TestUnrecognisedStrategyLabelIsNeverAdopted(t *testing.T) {
 	policy := basePolicy()
-	effective := Resolve(policy, map[string]string{LabelUpdateStrategy: "everything"})
+	effective := Resolve(policy, map[string]string{LabelUpdateStrategy: "everything"}, "")
 	if effective.Strategy != StrategyMinor {
 		t.Fatalf("strategy = %q, want the policy's; an unreadable label must not change the ceiling", effective.Strategy)
 	}
@@ -105,7 +105,7 @@ func TestUnrecognisedStrategyLabelIsNeverAdopted(t *testing.T) {
 
 func TestLabelWindowReplacesTimesButKeepsTheZoneAndDays(t *testing.T) {
 	policy := basePolicy()
-	effective := Resolve(policy, map[string]string{LabelUpdateWindow: "23:00-01:00"})
+	effective := Resolve(policy, map[string]string{LabelUpdateWindow: "23:00-01:00"}, "")
 
 	if effective.Window.Start != "23:00" || effective.Window.End != "01:00" {
 		t.Fatalf("window times = %s-%s, want the label's", effective.Window.Start, effective.Window.End)
@@ -128,7 +128,7 @@ func TestLabelWindowIsIgnoredWhenThePolicyHasNone(t *testing.T) {
 	policy := basePolicy()
 	policy.Window = MaintenanceWindow{AlwaysOpen: true}
 
-	effective := Resolve(policy, map[string]string{LabelUpdateWindow: "02:00-04:00"})
+	effective := Resolve(policy, map[string]string{LabelUpdateWindow: "02:00-04:00"}, "")
 	if !effective.Window.AlwaysOpen {
 		t.Fatalf("window = %+v, want the policy's always-open window", effective.Window)
 	}
@@ -136,7 +136,7 @@ func TestLabelWindowIsIgnoredWhenThePolicyHasNone(t *testing.T) {
 
 func TestMalformedWindowLabelIsReportedNotApplied(t *testing.T) {
 	for _, value := range []string{"", "02:00", "02:00-", "-04:00", "2am-4am", "02:00-02:00", "02:00-04:00-06:00"} {
-		effective := Resolve(basePolicy(), map[string]string{LabelUpdateWindow: value})
+		effective := Resolve(basePolicy(), map[string]string{LabelUpdateWindow: value}, "")
 		if effective.Window.Start != "02:00" || effective.Window.End != "04:00" {
 			t.Fatalf("%q was applied: window is now %s-%s", value, effective.Window.Start, effective.Window.End)
 		}
@@ -149,13 +149,13 @@ func TestMalformedWindowLabelIsReportedNotApplied(t *testing.T) {
 func TestLabelRollbackOverrideGoesBothWays(t *testing.T) {
 	policy := basePolicy() // AutoRollback true
 
-	off := Resolve(policy, map[string]string{LabelUpdateRollback: "false"})
+	off := Resolve(policy, map[string]string{LabelUpdateRollback: "false"}, "")
 	if off.AutoRollback {
 		t.Fatal("rollback=false must turn automatic rollback off")
 	}
 
 	policy.Failure.AutoRollback = false
-	on := Resolve(policy, map[string]string{LabelUpdateRollback: "true"})
+	on := Resolve(policy, map[string]string{LabelUpdateRollback: "true"}, "")
 	if !on.AutoRollback {
 		t.Fatal("rollback=true must turn automatic rollback on")
 	}
@@ -192,7 +192,7 @@ func TestUnknownAndInvalidLabelsAreSurfacedNotDropped(t *testing.T) {
 
 func TestResolveCarriesThePolicyForAttribution(t *testing.T) {
 	policy := basePolicy()
-	effective := Resolve(policy, nil)
+	effective := Resolve(policy, nil, "")
 
 	if effective.Policy.PolicyID != policy.PolicyID {
 		t.Fatal("the governing policy must survive resolution so a decision can name it")
@@ -211,8 +211,7 @@ func TestNoLabelCanChangeTheMode(t *testing.T) {
 	effective := Resolve(policy, map[string]string{
 		"io.harbormaster.update.mode":      "automatic",
 		"io.harbormaster.update.automatic": "true",
-		LabelUpdateEnabled:                 "true",
-	})
+		LabelUpdateEnabled:                 "true"}, "")
 	if effective.Mode != ModeObserve {
 		t.Fatalf("mode = %q, want observe; no label may promote a policy to automatic", effective.Mode)
 	}

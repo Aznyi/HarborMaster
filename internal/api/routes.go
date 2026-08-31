@@ -370,6 +370,26 @@ func (s *Server) routeTable() []route {
 		{http.MethodDelete, p + "/automation/simple-updates", requires(domain.PermAutomationManage).policyBudget(), s.handleSimpleUpdatesDisable, ""},
 		{"", p + "/automation/simple-updates", requires(domain.PermAutomationRead), nil, "GET, HEAD, POST, DELETE"},
 
+		// ---- one container's update behaviour (C2) ---------------------------
+		//
+		// A fact about a container, on the container's own page, so READING it
+		// is the inventory permission. CHANGING it is `automation:manage`: a
+		// preference composes onto an update policy, and whoever may write the
+		// policy may write this.
+		//
+		// POST sets and DELETE withdraws, matching /plan-approvals/{id} -- the
+		// closest existing shape, a singleton sub-resource that is recorded and
+		// withdrawn. This API uses no PUT anywhere, and introducing one here
+		// would be a verb a reader has to check the meaning of. Both carry the
+		// policy write budget, because both write an automation-governing row.
+		//
+		// None of the three touches a container. The service behind them holds
+		// no Docker capability at all.
+		{http.MethodGet, p + "/containers/{id}/update-behavior", requires(domain.PermInventoryRead), s.handleContainerBehavior, ""},
+		{http.MethodPost, p + "/containers/{id}/update-behavior", requires(domain.PermAutomationManage).policyBudget(), s.handleContainerBehaviorSet, ""},
+		{http.MethodDelete, p + "/containers/{id}/update-behavior", requires(domain.PermAutomationManage).policyBudget(), s.handleContainerBehaviorClear, ""},
+		{"", p + "/containers/{id}/update-behavior", requires(domain.PermInventoryRead), nil, "GET, HEAD, POST, DELETE"},
+
 		// ---- the automation engine -------------------------------------------
 		//
 		// Running a pass is `automation:run`, an OPERATOR permission: a manual

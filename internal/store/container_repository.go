@@ -658,3 +658,30 @@ func scanContainerSummary(row rowScanner) (domain.ContainerSummary, error) {
 	}
 	return summary, nil
 }
+
+// ContainerNameByID resolves a container id to its name.
+//
+// The name is the identity HarborMaster's per-container records are keyed by --
+// pauses, image lineage, and update preferences all use it, because a
+// recreation changes the id and the record has to survive that. This is the one
+// translation between the id a caller holds and the name a record is stored
+// under.
+//
+// Returns ErrNotFound for a container the inventory does not hold, which is
+// what stops a caller writing a per-container record for something that does
+// not exist.
+func (r *ContainerRepository) ContainerNameByID(
+	ctx context.Context,
+	containerID string,
+) (string, error) {
+	var name string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT name FROM containers WHERE id = ?`, containerID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("read container name: %w", AsError(err))
+	}
+	return name, nil
+}

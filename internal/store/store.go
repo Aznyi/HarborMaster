@@ -113,6 +113,12 @@ type DB struct {
 	// may update without being asked, how far, and when. Deliberately separate
 	// from Policies, which reports and never acts.
 	UpdatePolicies *UpdatePolicyRepository
+
+	// ContainerPreferences holds one chosen update behaviour per container,
+	// keyed by NAME so a preference survives the recreation it authorised.
+	// Composed onto the governing policy by domain.Resolve, where it may only
+	// narrow what that policy already permits.
+	ContainerPreferences *ContainerPreferenceRepository
 	// Automation holds what the scheduler decided and why -- one row per pass,
 	// one per container considered, plus the pauses and failure counts the
 	// safety logic reads. Bookkeeping only: nothing on it can change a host.
@@ -390,15 +396,16 @@ func OpenWithOptions(ctx context.Context, opts Options) (*DB, error) {
 		Networks:   &NetworkRepository{db: sqlDB},
 		Volumes:    &VolumeRepository{db: sqlDB},
 
-		DockerEvents:  &DockerEventRepository{db: sqlDB},
-		Drift:         &DriftRepository{db: sqlDB},
-		Policies:      &PolicyRepository{db: sqlDB},
-		ImageIntel:    &ImageIntelRepository{db: sqlDB},
-		Plans:         &PlanRepository{db: sqlDB},
-		PlanApprovals: &PlanApprovalRepository{db: sqlDB},
-		Acquisitions:  &AcquisitionRepository{db: sqlDB},
-		Executions:    &ExecutionRepository{db: sqlDB},
-		Rollbacks:     &RollbackRepository{db: sqlDB},
+		DockerEvents:         &DockerEventRepository{db: sqlDB},
+		Drift:                &DriftRepository{db: sqlDB},
+		Policies:             &PolicyRepository{db: sqlDB},
+		ImageIntel:           &ImageIntelRepository{db: sqlDB},
+		ContainerPreferences: &ContainerPreferenceRepository{db: sqlDB},
+		Plans:                &PlanRepository{db: sqlDB},
+		PlanApprovals:        &PlanApprovalRepository{db: sqlDB},
+		Acquisitions:         &AcquisitionRepository{db: sqlDB},
+		Executions:           &ExecutionRepository{db: sqlDB},
+		Rollbacks:            &RollbackRepository{db: sqlDB},
 
 		UpdatePolicies:       &UpdatePolicyRepository{db: sqlDB},
 		Automation:           &AutomationRepository{db: sqlDB},

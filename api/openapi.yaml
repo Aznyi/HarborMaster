@@ -5055,6 +5055,115 @@ paths:
         "503":
           $ref: "#/components/responses/AutomationUnavailable"
 
+  /api/v1/containers/{id}/update-behavior:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The container id. Resolved to the container's NAME, which is
+          what the preference is stored against.
+        schema: { type: string }
+    get:
+      tags: [Containers]
+      summary: How this container should be updated
+      operationId: getContainerUpdateBehavior
+      description: |
+        One container's update behaviour: what an operator asked for, and what
+        the engine will actually do.
+
+        **The two genuinely differ.** A preference may only make automation
+        SAFER — it narrows the mode of the policy that governs the container and
+        can never widen it. So a container an update policy holds for review
+        stays held however this is set, and `effective` says which rule decided
+        that. An interface showing only the saved value would tell somebody
+        their database updates automatically when it does not.
+
+        `effective` is not derived here or in a client. It is the automation
+        engine's own decision for this container, produced by the same
+        evaluation the scheduler runs, so the two cannot disagree. When the
+        engine cannot be consulted `effective.known` is false and no behaviour
+        is assumed.
+
+        **Identity.** The preference is stored against the container NAME, not
+        its id: a successful update recreates the container with a new id, and a
+        preference keyed on the id would be discarded by the first update it
+        permitted. This is the identity `automation_pauses` and `image_lineage`
+        already use for the same reason.
+      responses:
+        "200":
+          description: The requested and effective behaviour.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+    post:
+      tags: [Containers]
+      summary: Choose how this container should be updated
+      operationId: setContainerUpdateBehavior
+      description: |
+        Records an operator's choice. Needs `automation:manage`, the same
+        permission that governs update policies.
+
+        **This changes no container.** It writes one row. The service behind it
+        holds no Docker capability, so there is no path from this endpoint to a
+        stop, a start or a recreation, and no acquisition, execution or rollback
+        record is created. Changing a setting must never restart a workload,
+        which is also why the preference is not stored as a Docker label: Docker
+        has no operation that changes a label on an existing container, so a
+        label would mean recreating it.
+
+        Every existing safety input still outranks this. A container carrying
+        `io.harbormaster.update.enabled=false` is not automated whatever is
+        chosen here, a paused container stays paused, and HarborMaster still
+        refuses to update itself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [behavior]
+              properties:
+                behavior: { $ref: "#/components/schemas/UpdateBehavior" }
+      responses:
+        "200":
+          description: The stored choice, with its effective result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+    delete:
+      tags: [Containers]
+      summary: Withdraw this container's chosen behaviour
+      operationId: clearContainerUpdateBehavior
+      description: |
+        Removes the preference. The container returns to whatever the governing
+        policy says, which is the state it was in before anybody chose.
+
+        Changes no container, and withdrawing a preference that was never set
+        succeeds: the caller asked for "no preference" and that is what they
+        have.
+      responses:
+        "200":
+          description: The preference is gone; the effective behaviour is the
+            policy's again.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
   /api/v1/automation/simple-updates:
     get:
       tags: [Automation]
@@ -11651,6 +11760,79 @@ components:
         from its own records. A label can only ever move a container OUT of this
         scope, never into it.
       enum: [selector, allEligible]
+
+    UpdateBehavior:
+      type: string
+      description: |
+        How one container should be updated. A closed vocabulary, ordered most
+        permissive first.
+
+        Each value maps EXACTLY onto an existing automation mode; none of them
+        is a new concept:
+
+        - `automatic` imposes no restriction. The governing policy decides,
+          which is also what happens when no preference exists. It is stored
+          rather than represented by absence so that "an operator looked and
+          chose to leave it automatic" and "nobody has looked" stay different
+          facts.
+        - `reviewFirst` caps the mode at `approvalRequired`: automation still
+          decides, and a person releases each decision. It does not touch the
+          planner's recommendation — the risk model stays the sole author of
+          that verdict.
+        - `monitorOnly` caps the mode at `observe`: HarborMaster keeps checking
+          registries and reporting what it finds, and never changes the
+          container by itself.
+
+        **There is no separate "excluded".** It would be the same state under a
+        second name: "leave it alone" means stop ACTING, which is `monitorOnly`.
+        Making it stop WATCHING would remove the container from the Updates
+        workspace, so an operator would no longer be told a critical patch is
+        waiting — a worse outcome than the one they were choosing. An operator
+        who genuinely wants HarborMaster to ignore a container sets
+        `io.harbormaster.enabled=false` where the container is defined, which
+        outranks everything here.
+      enum: [automatic, reviewFirst, monitorOnly]
+
+    ContainerUpdateBehavior:
+      type: object
+      required: [containerName, effective]
+      properties:
+        containerName:
+          type: string
+          description: The stable identity the preference is stored against.
+        requested:
+          type: object
+          description: The stored preference. Absent when nobody has chosen.
+          required: [containerName, behavior]
+          properties:
+            containerName: { type: string }
+            behavior: { $ref: "#/components/schemas/UpdateBehavior" }
+            containerId:
+              type: string
+              description: Evidence of the container observed when this was
+                written. Nothing resolves the preference by it.
+            setByUsername: { type: string }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+        effective:
+          type: object
+          required: [known]
+          description: |
+            What the engine will actually do, taken from its own decision rather
+            than re-derived. `known` is false when automation could not be
+            consulted, in which case no behaviour is assumed.
+          properties:
+            known: { type: boolean }
+            verdict: { $ref: "#/components/schemas/AutomationVerdict" }
+            reason: { $ref: "#/components/schemas/AutomationReason" }
+            detail:
+              type: string
+              description: The engine's own sentence, in its own words.
+            policyId:
+              type: string
+              description: The rule that decided, so the interface can name what
+                overrode a preference rather than merely say that something did.
+            policyName: { type: string }
 
     SimpleUpdatesState:
       type: object

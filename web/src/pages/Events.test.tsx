@@ -1,4 +1,5 @@
-﻿import { act, render, screen, waitFor, within } from "@testing-library/react";
+﻿import { TestSessionProvider } from "../test/session";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionProvider } from "../hooks/useSession";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -534,11 +535,13 @@ describe("Container detail events tab", () => {
     const requests: RecordedRequest[] = stubApi();
 
     render(
+    <TestSessionProvider>
       <MemoryRouter initialEntries={["/containers/abcdef0123456789"]}>
         <Routes>
           <Route path="/containers/:id" element={<ContainerDetailPage />} />
         </Routes>
-      </MemoryRouter>,
+      </MemoryRouter>
+    </TestSessionProvider>,
     );
 
     await screen.findByRole("tab", { name: "Activity" });

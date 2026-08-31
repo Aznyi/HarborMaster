@@ -40,8 +40,10 @@ type fakeAutomationStore struct {
 	runs      []domain.AutomationRun
 	decisions []domain.AutomationDecision
 	pauses    []domain.PausedContainer
-	failures  map[string]store.AutomationFailureCount
-	settled   map[string]bool
+	// preferences is the C2 per-container behaviour map, by container name.
+	preferences map[string]domain.UpdateBehavior
+	failures    map[string]store.AutomationFailureCount
+	settled     map[string]bool
 
 	// startErr forces StartRun to fail, for the busy path.
 	startErr error
@@ -315,6 +317,20 @@ func (f *fakeAutomationStore) Resume(
 		}
 	}
 	return store.ErrNotFound
+}
+
+// preferences are the per-container behaviours an operator chose. Settable by
+// a test so the composition can be exercised through the real engine.
+func (f *fakeAutomationStore) ContainerPreferences(
+	_ context.Context,
+) (map[string]domain.UpdateBehavior, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]domain.UpdateBehavior, len(f.preferences))
+	for name, behavior := range f.preferences {
+		out[name] = behavior
+	}
+	return out, nil
 }
 
 func (f *fakeAutomationStore) ActivePauses(_ context.Context) ([]domain.PausedContainer, error) {

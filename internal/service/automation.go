@@ -104,6 +104,10 @@ type AutomationStore interface {
 	Pause(ctx context.Context, pause domain.PausedContainer) (domain.PausedContainer, error)
 	Resume(ctx context.Context, containerName string, by domain.Requester, at time.Time) error
 	ActivePauses(ctx context.Context) ([]domain.PausedContainer, error)
+	// ContainerPreferences is every per-container behaviour an operator chose,
+	// by container NAME. One read for the whole pass: asking per container
+	// would be the N+1 pattern on the path that runs on a timer.
+	ContainerPreferences(ctx context.Context) (map[string]domain.UpdateBehavior, error)
 	PauseFor(ctx context.Context, containerName string) (domain.PausedContainer, error)
 	ListPauses(ctx context.Context, activeOnly bool, page store.Page) ([]domain.PausedContainer, int, error)
 	CountActivePauses(ctx context.Context) (int, error)

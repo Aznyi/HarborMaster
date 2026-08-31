@@ -76,6 +76,15 @@ type AutomationInput struct {
 	Pause    domain.PausedContainer
 	IsPaused bool
 
+	// Preference is the behaviour an operator chose for this container on its
+	// own page, when they chose one. The empty value means nobody has, which is
+	// also what `automatic` means to the engine.
+	//
+	// It is an INPUT to Resolve rather than a check of its own, because it may
+	// only narrow what the governing policy already permits. A preference that
+	// could refuse on its own would be a second place eligibility is decided.
+	Preference domain.UpdateBehavior
+
 	// InFlight reports that work HarborMaster started for this container has
 	// not finished. Submitting a second update on top of the first is how one
 	// pass becomes two concurrent recreations of the same container.
@@ -186,7 +195,7 @@ func DecideAutomation(input AutomationInput) AutomationOutcome {
 		return AutomationOutcome{Decision: decision}
 	}
 
-	effective := domain.Resolve(policy, input.Target.Labels)
+	effective := domain.Resolve(policy, input.Target.Labels, input.Preference)
 	decision.PolicyID = policy.PolicyID
 	decision.PolicyName = policy.Name
 	outcome := AutomationOutcome{Effective: effective, Governed: true}

@@ -1,3 +1,4 @@
+import { TestSessionProvider } from "../test/session";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -122,11 +123,13 @@ function renderQueue() {
 
 function renderContainer() {
   return render(
-    <MemoryRouter initialEntries={[`/containers/${containerID}`]}>
+    <TestSessionProvider>
+      <MemoryRouter initialEntries={[`/containers/${containerID}`]}>
       <Routes>
         <Route path="/containers/:id" element={<ContainerDetailPage />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
+    </TestSessionProvider>,
   );
 }
 

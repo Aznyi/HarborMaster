@@ -215,6 +215,56 @@ export interface ActionOutcome {
  * is derived in the browser, so a row cannot disagree with the container's own
  * detail page about whether an update exists.
  */
+/**
+ * How one container should be updated (C2).
+ *
+ * Three values, each naming an automation mode the engine already has. None is
+ * a new concept, and none can make a container MORE mutable: a preference
+ * narrows the governing policy and can never widen it.
+ *
+ * There is deliberately no `excluded`. It would be `monitorOnly` under a second
+ * name — and the version that stopped WATCHING would remove the container from
+ * the Updates workspace, so an operator would no longer be told a critical
+ * patch was waiting. Somebody who genuinely wants HarborMaster to ignore a
+ * container sets `io.harbormaster.enabled=false` where the container is
+ * defined, which outranks everything here.
+ */
+export type UpdateBehavior = "automatic" | "reviewFirst" | "monitorOnly";
+
+/** One container's stored choice. */
+export interface ContainerUpdatePreference {
+  containerName: string;
+  behavior: UpdateBehavior;
+  /** Evidence of the container observed when this was written. Not the key. */
+  containerId?: string;
+  setByUsername?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * What was asked for, and what the engine will actually do.
+ *
+ * They genuinely differ, which is the whole reason both are sent. A container an
+ * update policy holds for review stays held however the control is set, and
+ * `effective` names the rule that decided. The server derives it from the
+ * engine's own decision; nothing here re-implements policy selection.
+ */
+export interface ContainerUpdateBehavior {
+  containerName: string;
+  /** Absent when nobody has chosen: the container inherits. */
+  requested?: ContainerUpdatePreference;
+  effective: {
+    /** False when the engine could not be consulted. Assume nothing. */
+    known: boolean;
+    verdict?: string;
+    reason?: string;
+    detail?: string;
+    policyId?: string;
+    policyName?: string;
+  };
+}
+
 export interface ContainerAttention {
   state: AttentionState;
   /** Absent when no assessment exists. Never defaulted to "none". */
