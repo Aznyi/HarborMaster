@@ -29,11 +29,19 @@ import (
 type recordingNotifier struct {
 	mu   sync.Mutex
 	sent []domain.Notification
+	// explode makes every Raise panic, modelling a notification path that is
+	// itself broken rather than a destination that is merely unreachable. The
+	// second is the engine's business; the first is the one that could take a
+	// container pipeline down with it.
+	explode bool
 }
 
 func (n *recordingNotifier) Raise(notification domain.Notification) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.explode {
+		panic("the notification path is broken")
+	}
 	n.sent = append(n.sent, notification)
 }
 

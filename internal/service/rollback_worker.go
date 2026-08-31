@@ -369,12 +369,22 @@ func (s *RollbackService) reportOutcome(ctx context.Context, requested domain.Ro
 	// The notification leaves from the same read-back. A failed rollback is the
 	// one event in HarborMaster that always needs a person, and it is raised at
 	// critical whatever an operator's severity threshold says about the rest.
-	switch final.State {
-	case domain.RollbackSucceeded:
+	//
+	// The AUTOMATIC cases are the update's outcome rather than the rollback's,
+	// and they are said as such. Everything they need is on the record already
+	// -- what was attempted, what is running, which execution, which rollback --
+	// so this stays a projection of one row and adds no query to the path.
+	automatic := final.Automatic()
+	switch {
+	case final.State == domain.RollbackSucceeded && automatic:
+		NotifyUpdateRecovered(s.notifier, final.ContainerName,
+			final.ReplacementImage, final.OriginalImage,
+			final.RollbackID, final.ExecutionID)
+	case final.State == domain.RollbackSucceeded:
 		NotifyRollbackSucceeded(s.notifier, final.ContainerName, final.RollbackID)
-	case domain.RollbackFailed:
+	case final.State == domain.RollbackFailed:
 		NotifyRollbackFailed(s.notifier, final.ContainerName, final.RollbackID,
-			rollbackOutcomeReason(final))
+			rollbackOutcomeReason(final), automatic)
 	}
 }
 

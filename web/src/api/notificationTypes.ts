@@ -97,6 +97,7 @@ export type NotificationEvent =
   | "acquisition.failed"
   | "execution.succeeded"
   | "execution.failed"
+  | "update.recovered"
   | "rollback.started"
   | "rollback.succeeded"
   | "rollback.failed"
@@ -117,6 +118,10 @@ export const NOTIFICATION_EVENT_LABELS: Record<string, string> = {
   "acquisition.failed": "An image could not be pulled",
   "execution.succeeded": "A container was updated",
   "execution.failed": "A container could not be updated",
+  // Never "was updated" and never "was rolled back". The update FAILED; the
+  // container is running its previous image. An operator scanning a rule editor
+  // has to be able to tell this apart from a success at a glance.
+  "update.recovered": "An unattended update failed and was undone automatically",
   "rollback.started": "A rollback started",
   "rollback.succeeded": "A container was rolled back",
   "rollback.failed": "A rollback failed",
@@ -150,6 +155,7 @@ export const NOTIFICATION_EVENT_GROUPS: {
     hint: "The set most deployments want. A failed rollback is always critical.",
     events: [
       "execution.failed",
+      "update.recovered",
       "rollback.failed",
       "rollback.started",
       "acquisition.failed",

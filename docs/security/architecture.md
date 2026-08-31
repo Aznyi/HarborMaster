@@ -933,6 +933,66 @@ evidence on every pass, so there is no stored verdict that could go stale and no
 row an attacker could write to mark an image for destruction. The only durable
 record cleanup writes is the audit event for a removal that actually happened.
 
+## 3g-quinquies. Lifecycle notifications
+
+Notifications are a PROJECTION. The persisted lifecycle -- the execution row,
+the rollback row, the automation decision -- is authoritative; a notification is
+a sentence derived from it. Nothing in this subsystem is a source of truth, and
+if every delivery failed the recorded history of what happened to a container
+would be identical.
+
+### The three update outcomes
+
+The lifecycle has always distinguished three things. Until C4B the notifications
+collapsed the third into the other two, and an operator whose container broke
+overnight and was restored automatically was told it "could not be updated" and
+then, separately, that it "was rolled back" -- two alarms, neither of which said
+the service was running.
+
+| Outcome | Event | Severity | What is true |
+| --- | --- | --- | --- |
+| Succeeded | `execution.succeeded` | info | The container is running the approved image |
+| Failed | `execution.failed` | critical | The update did not work and HarborMaster did NOT put it back |
+| Recovered | `update.recovered` | warning | An unattended update failed and HarborMaster restored the container. The service is up; the approved image is not running |
+
+`rollback.succeeded` reports a rollback an OPERATOR asked for. An automatic one
+reports `update.recovered`, because the subject is the update rather than the
+rollback -- and because "was rolled back" reads as a success to somebody
+scanning a phone at three in the morning.
+
+### The properties
+
+| Property | Mechanism | File |
+| --- | --- | --- |
+| Every sentence is written in ONE file | Two architecture tests: no other file may construct a notification, and that file may not use a format verb or an error's `Error()` | `internal/service/notify_raise.go` |
+| A recovered update is never called successful | Its own event, its own severity, and a test that walks the rendered text for "was updated" and its variants | `notify_lifecycle_test.go` |
+| Automatic and manual are read from the DURABLE record | `Execution.Automatic()` and `Rollback.Automatic()` read the persisted request key, never `RequestedBy` -- an operator who triggers an automation pass is carried onto every request it submits, so the requester does not say who asked for any one of them | `domain.AutomationRequestKeyPrefix` |
+| A manual failure never implies automatic recovery | The failure message states which of the two products this is: automation will attempt a rollback if the policy allows; a manual update will not be undone | `NotifyExecutionFailed` |
+| One automatic recovery is ONE message | `rollback.started` is raised for manual rollbacks only. The automatic sequence is the failure and then the recovery, and the message between them said nothing | `RollbackService.Request` |
+| Deduplication is keyed on LIFECYCLE IDENTITY | An execution id, a rollback id, a plan id -- never time, never message text. Two containers with the same problem are two messages; the same record reported twice is one | `notify_raise.go` dedup keys |
+| Level-triggered events carry a cooldown FLOOR | Approval-required and scheduler-error are re-derived from unchanged state on every pass. Their floor is a property of the event, not a setting, because an operator cannot know from a rule editor which events are re-evaluated on a timer. A longer rule cooldown still wins | `NotificationEvent.MinimumCooldown` |
+| Suppression survives a restart | The window is a row in `notification_dedup`, checked and recorded in one transaction. A process that restarts often -- which is what a deployment with a crash-looping container does -- would otherwise be the noisiest one | `NotificationRepository.ShouldSuppress` |
+| Delivery cannot change a lifecycle outcome | `Raise` never blocks, never returns an error, drops rather than stalls, and `raise` recovers a panic. A webhook that is down is a webhook that is down | `notify_raise.go`, `NotificationService.Raise` |
+| A retry reuses ONE delivery record | Same row, attempts incremented. The history shows one notification that took three tries, not three notifications | `NotificationService.attempt` |
+| Routine image cleanup raises NOTHING | `ImageCleanupOptions` has nowhere to put a notifier, pinned by test. Cleanup's record is the audit log, where `image.removed` is written for every removal that happened | `notify_scope_test.go` |
+
+### Monitor-only
+
+A deployment that lets HarborMaster change nothing still learns about updates
+through `update.discovered`, which the PLANNER raises -- not automation, which is
+off by default. It is edge-triggered on a plan the planner classified as new, so
+a planner running hourly says a thing once. C4B preserved this unchanged and
+invented no new default.
+
+### The outbound guard
+
+Unchanged by C4B and re-tested by it. A destination URL must be `https`, must
+not carry userinfo, and must be a plain hostname -- IP literals, `localhost`,
+and any dotless name are refused, so an SSRF target cannot be NAMED. The dialler
+re-checks the RESOLVED literal address at connect time, which is what defeats a
+DNS rebind. Redirects are refused, the response body is read to a small bound
+and discarded, and TLS verification is on with no setting that relaxes it.
+
 ## 3h. Identity, authorization, and audit
 
 Phase 9.5 closed the boundary every earlier phase was compensating for. Before

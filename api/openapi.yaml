@@ -12827,6 +12827,20 @@ components:
       description: |
         What happened. A closed vocabulary written by HarborMaster; no
         third-party text ever becomes one.
+
+        The three update OUTCOMES are distinct and must stay distinct in any
+        client that renders them:
+
+        - `execution.succeeded` — the container is running the approved image.
+        - `execution.failed` — the update did not work and the container was
+          NOT put back by HarborMaster.
+        - `update.recovered` — an unattended update failed and HarborMaster
+          rolled the container back by itself. The service is restored; the
+          approved image is not running. This is not a success.
+
+        `rollback.succeeded` is reported only for a rollback an operator asked
+        for. An automatic one reports `update.recovered`, because the subject is
+        the update rather than the rollback.
       enum:
         - update.discovered
         - update.approvalRequired
@@ -12834,6 +12848,7 @@ components:
         - acquisition.failed
         - execution.succeeded
         - execution.failed
+        - update.recovered
         - rollback.started
         - rollback.succeeded
         - rollback.failed

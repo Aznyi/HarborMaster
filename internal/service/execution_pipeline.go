@@ -988,8 +988,14 @@ func (s *ExecutionService) reportOutcome(ctx context.Context, requested domain.E
 		// Whether the host was left changed is the difference between "act now"
 		// and "nothing happened", and it is the same fact the audit reason
 		// leads with.
+		// Automatic is read from the PERSISTED request key, not from
+		// RequestedBy: an operator who triggered an automation pass is carried
+		// onto every request it submits, so the requester does not say who
+		// asked for this one. It decides only what the message says happens
+		// next, and the two answers are a product promise apart.
 		NotifyExecutionFailed(s.notifier, final.ContainerName, final.ExecutionID,
-			executionOutcomeReason(final), final.Checkpoint.HostChanged())
+			executionOutcomeReason(final), final.Checkpoint.HostChanged(),
+			final.Automatic())
 	}
 }
 

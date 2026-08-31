@@ -345,8 +345,14 @@ func (s *RollbackService) Request(
 	// notification in the pipeline. A rollback takes as long as a container
 	// takes to stop and start, and an operator who is about to be paged wants to
 	// know it has begun rather than reading about it afterwards.
-	NotifyRollbackStarted(s.notifier, created.ContainerName, created.RollbackID,
-		!created.RequestedBy.Known())
+	//
+	// MANUAL rollbacks only. An automatic one is the middle of a sequence whose
+	// ends already speak -- "could not be updated", then "was restored
+	// automatically" -- and a third message between them says nothing and
+	// arrives looking like a third problem.
+	if !created.Automatic() {
+		NotifyRollbackStarted(s.notifier, created.ContainerName, created.RollbackID)
+	}
 
 	s.signal()
 	return created, nil

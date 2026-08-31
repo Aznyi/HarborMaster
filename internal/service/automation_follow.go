@@ -146,7 +146,7 @@ func (s *AutomationService) advanceAcquisition(ctx context.Context, decision dom
 		// recreation uses is derived from the acquisition and re-verified
 		// against the live host by the execution service's own preflight.
 		AcquisitionID: decision.AcquisitionID,
-		RequestKey:    "automation:execute:" + decision.AcquisitionID,
+		RequestKey:    domain.AutomationRequestKeyPrefix + "execute:" + decision.AcquisitionID,
 		// The account the pass was attributed to. Read back off the decision's
 		// run rather than remembered, so a restart does not lose it.
 		RequestedBy: s.requesterForRun(ctx, decision.RunID),
@@ -252,7 +252,7 @@ func (s *AutomationService) handleFailedExecution(
 			// read off the execution record by the rollback service and
 			// re-verified against the live host before anything moves.
 			ExecutionID: decision.ExecutionID,
-			RequestKey:  "automation:rollback:" + decision.ExecutionID,
+			RequestKey:  domain.AutomationRequestKeyPrefix + "rollback:" + decision.ExecutionID,
 			RequestedBy: s.requesterForRun(ctx, decision.RunID),
 		})
 		switch {

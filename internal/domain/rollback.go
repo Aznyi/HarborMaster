@@ -685,6 +685,18 @@ type Rollback struct {
 	RequestedBy Requester `json:"requestedBy,omitzero"`
 }
 
+// Automatic reports whether HarborMaster started this rollback by itself.
+//
+// Read from the persisted request key, so it means the same thing to the worker
+// that reports the outcome minutes later and to a process that restarted in
+// between. See AutomationRequestKeyPrefix for why RequestedBy is not this.
+//
+// The distinction is a product promise, not a detail: a manual update is never
+// rolled back automatically, and a message implying otherwise would tell an
+// operator their failed manual update is being handled when nothing is
+// handling it.
+func (r Rollback) Automatic() bool { return AutomaticRequest(r.RequestKey) }
+
 // Duration reports how long the rollback took, when it has finished.
 func (r Rollback) Duration() time.Duration {
 	if r.StartedAt == nil || r.CompletedAt == nil {

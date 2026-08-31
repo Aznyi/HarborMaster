@@ -1,6 +1,7 @@
 package service
 
 import (
+	"log/slog"
 	"strconv"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -55,10 +56,42 @@ type Notifier interface {
 //
 // Nil-safe, because that is the normal case: notifications are off by default
 // and every service must work identically without one.
+//
+// # Why a recover, in a codebase that otherwise lets panics travel
+//
+// Because this is the ONE call a container pipeline makes whose result it is
+// forbidden to care about. The Notifier interface has no error return
+// precisely so a service in the middle of a recreation cannot wait on a
+// webhook and cannot branch on one failing. That promise is only worth
+// anything if the call cannot take the pipeline with it.
+//
+// Without this, a defect anywhere in the notification path -- the engine, a
+// channel formatter, a future consumer -- would unwind through the caller and
+// abandon a rollback between stopping one container and starting another. The
+// message is the least valuable thing on that stack; losing it is the correct
+// trade, and it is the trade the rest of the subsystem already makes when a
+// queue is full.
+//
+// It is deliberately NOT a general error-swallowing habit. This is the only
+// recover in the service package, it covers one call, and the panic is logged
+// at error rather than discarded -- a notification path that panics is a bug,
+// and this makes it a visible bug instead of an outage.
 func raise(notifier Notifier, notification domain.Notification) {
 	if notifier == nil {
 		return
 	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// The event NAME only. A panic value can carry anything, including
+			// whatever the notification was carrying, and this log line is
+			// subject to the same rule as the notification itself.
+			slog.Default().Error("a notification could not be raised; "+
+				"the operation it describes was not affected",
+				slog.String("event", string(notification.Event)))
+		}
+	}()
+
 	notifier.Raise(notification)
 }
 
@@ -178,11 +211,27 @@ func NotifyExecutionSucceeded(notifier Notifier, containerName, imageRef, execut
 func NotifyExecutionFailed(
 	notifier Notifier,
 	containerName, executionID, reason string,
-	hostChanged bool,
+	hostChanged, automatic bool,
 ) {
 	body := reason
 	if hostChanged {
 		body += " This container was left changed and needs attention."
+	}
+	// What happens NEXT, which is the question an operator reading this at two
+	// in the morning actually has. The two answers are different products, not
+	// different phrasings: HarborMaster never undoes an update a person asked
+	// for, and saying nothing here has let a manual failure read as though
+	// something were coming to fix it.
+	//
+	// Deliberately hedged for the automatic case. Whether a rollback is
+	// permitted is the governing policy's business and is decided after this
+	// message leaves, so this promises an attempt at most. The recovered or
+	// rollback-failed message that follows is the one that states the outcome.
+	if automatic {
+		body += " HarborMaster will attempt to roll it back if the policy allows."
+	} else {
+		body += " HarborMaster does not roll back an update you asked for; " +
+			"roll it back from the update page if you want the previous image."
 	}
 	raise(notifier, domain.Notification{
 		Event:         domain.EventExecutionFailed,
@@ -198,16 +247,17 @@ func NotifyExecutionFailed(
 // -------------------------------------------------------------- rollbacks --
 
 // NotifyRollbackStarted reports a container being put back.
-func NotifyRollbackStarted(notifier Notifier, containerName, rollbackID string, automatic bool) {
-	trigger := "An operator"
-	if automatic {
-		trigger = "HarborMaster"
-	}
+//
+// Raised for a MANUAL rollback only. An automatic one is one stage of a
+// sequence that ends in a message saying what became of the container, and
+// "rolling back" between "could not be updated" and "was recovered" tells an
+// operator nothing they are not about to be told properly.
+func NotifyRollbackStarted(notifier Notifier, containerName, rollbackID string) {
 	raise(notifier, domain.Notification{
 		Event:         domain.EventRollbackStarted,
 		Severity:      domain.NotifyWarning,
 		Title:         "Rolling " + containerName + " back",
-		Body:          trigger + " started a rollback to the previous image.",
+		Body:          "An operator started a rollback to the previous image.",
 		ContainerName: containerName,
 		Fields:        []domain.NotificationField{field("Rollback", rollbackID)},
 		DedupKey:      "rollback:" + rollbackID + ":started",
@@ -227,18 +277,83 @@ func NotifyRollbackSucceeded(notifier Notifier, containerName, rollbackID string
 	})
 }
 
+// NotifyUpdateRecovered reports the third update outcome: failed, then fixed.
+//
+// # Why this is not rollback.succeeded
+//
+// Because the subject is the UPDATE, not the rollback. An operator who rolled a
+// container back by hand knows what they did and gets rollback.succeeded. An
+// operator whose container was updated, broke, and was put back while they
+// slept needs one sentence that says all three things -- and needs it not to
+// say "succeeded", which is what a reader takes from a message about a rollback
+// that worked.
+//
+// # Why it is not the last word on the update either
+//
+// It says the service is restored. It does not say everything is fine: the
+// image somebody approved is not the one running, and automation pauses the
+// container after a rollback, so nothing will try again until a person looks.
+// The body says so, because an operator who reads "recovered" and stops
+// reading has been told the container is up, which is true.
+func NotifyUpdateRecovered(
+	notifier Notifier,
+	containerName, attemptedImage, restoredImage, rollbackID, executionID string,
+) {
+	raise(notifier, domain.Notification{
+		Event:    domain.EventUpdateRecovered,
+		Severity: domain.NotifyWarning,
+		Title:    containerName + " failed to update and was restored automatically",
+		// The images are in the BODY as well as in the fields, and that is
+		// deliberate rather than redundant. The delivery row carries the title
+		// and the body; it does not carry the fields, so a retry, a restart, or
+		// the delivery history in the interface all show the body and only the
+		// body. The two facts an operator needs at three in the morning -- what
+		// broke and what is running now -- must be in the part that always
+		// survives. See the note in the C4B report on the fields gap.
+		Body: "The unattended update to " + attemptedImage + " did not pass " +
+			"verification, so HarborMaster rolled the container back. It is " +
+			"running " + restoredImage + " again and passed verification. " +
+			"Automation is paused for this container until somebody releases it.",
+		ContainerName: containerName,
+		Fields: []domain.NotificationField{
+			field("Attempted", attemptedImage),
+			field("Running", restoredImage),
+			field("Execution", executionID),
+			field("Rollback", rollbackID),
+		},
+		// The ROLLBACK, which is the terminal record this reports. One logical
+		// notification per rollback that reached a succeeded state, whatever a
+		// restart or a retry does around it.
+		DedupKey: "rollback:" + rollbackID + ":recovered",
+	})
+}
+
 // NotifyRollbackFailed reports the worst outcome the pipeline has.
 //
 // Critical without exception. A rollback that fails is a container that is
 // neither on its new image nor back on its old one, and it is the one event in
 // HarborMaster that always needs a person.
-func NotifyRollbackFailed(notifier Notifier, containerName, rollbackID, reason string) {
+func NotifyRollbackFailed(
+	notifier Notifier,
+	containerName, rollbackID, reason string,
+	automatic bool,
+) {
+	// Both need a person now. They are different sentences because they
+	// describe different situations: one operator is watching a rollback they
+	// started, the other has not been told anything yet except that an
+	// unattended update failed.
+	title := containerName + " could not be rolled back"
+	lead := "The rollback did not complete. This container needs attention: "
+	if automatic {
+		title = containerName + " failed to update and could NOT be restored"
+		lead = "The unattended update failed and the automatic rollback did " +
+			"not complete either. This container needs attention now: "
+	}
 	raise(notifier, domain.Notification{
-		Event:    domain.EventRollbackFailed,
-		Severity: domain.NotifyCritical,
-		Title:    containerName + " could not be rolled back",
-		Body: "The rollback did not complete. This container needs attention: " +
-			reason,
+		Event:         domain.EventRollbackFailed,
+		Severity:      domain.NotifyCritical,
+		Title:         title,
+		Body:          lead + reason,
 		ContainerName: containerName,
 		Fields:        []domain.NotificationField{field("Rollback", rollbackID)},
 		DedupKey:      "rollback:" + rollbackID + ":failed",

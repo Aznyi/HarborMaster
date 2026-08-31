@@ -898,7 +898,7 @@ func automationRequester(requestedBy domain.Requester) domain.Requester {
 // from anything a caller supplies, and not random: the whole point is that the
 // same decision submitted twice is one request.
 func automationRequestKey(runID, planID string) string {
-	return "automation:" + runID + ":" + planID
+	return domain.AutomationRequestKeyPrefix + runID + ":" + planID
 }
 
 // registryOfReference extracts the registry host from an image reference.

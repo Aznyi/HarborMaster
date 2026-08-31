@@ -59,6 +59,21 @@ const (
 	EventExecutionSucceeded NotificationEvent = "execution.succeeded"
 	EventExecutionFailed    NotificationEvent = "execution.failed"
 
+	// EventUpdateRecovered is the THIRD update outcome, and the one whose
+	// absence was a defect.
+	//
+	// An unattended update failed and HarborMaster put the container back by
+	// itself. That is neither a success nor an unrecovered failure, and telling
+	// an operator either of those things is telling them something untrue: a
+	// success message would hide that the new image is bad, and leaving the
+	// failure message as the last word would have them get out of bed for a
+	// container that is running.
+	//
+	// Raised ONLY for an automatic rollback. An operator who rolled a container
+	// back themselves already knows; they get rollback.succeeded, which is the
+	// contract that existed before this event did.
+	EventUpdateRecovered NotificationEvent = "update.recovered"
+
 	// Rollback. Started as well as finished, because the interesting minute is
 	// the one in between: a container is down and somebody may want to watch.
 	EventRollbackStarted   NotificationEvent = "rollback.started"
@@ -103,7 +118,7 @@ const (
 var NotificationEvents = []NotificationEvent{
 	EventUpdateDiscovered, EventApprovalRequired,
 	EventAcquisitionSucceeded, EventAcquisitionFailed,
-	EventExecutionSucceeded, EventExecutionFailed,
+	EventExecutionSucceeded, EventExecutionFailed, EventUpdateRecovered,
 	EventRollbackStarted, EventRollbackSucceeded, EventRollbackFailed,
 	EventAutomationPaused, EventSchedulerError, EventRebindFailed,
 	EventDriftDetected, EventPolicyViolation,
@@ -138,11 +153,76 @@ func (e NotificationEvent) DefaultSeverity() NotificationSeverity {
 		EventRebindFailed:
 		return NotifyCritical
 	case EventAcquisitionFailed, EventRollbackStarted, EventSchedulerError,
-		EventRegistryUnavailable, EventPolicyViolation:
+		EventRegistryUnavailable, EventPolicyViolation,
+		// Warning, deliberately between the other two update outcomes. Not
+		// info, because the update failed and the image an operator approved
+		// is not the one running. Not critical, because the container is up
+		// and nobody has to move tonight.
+		EventUpdateRecovered:
 		return NotifyWarning
 	default:
 		return NotifyInfo
 	}
+}
+
+// MinimumCooldown is the shortest suppression window an event may have.
+//
+// # Edge-triggered against level-triggered
+//
+// Almost every notification in HarborMaster is EDGE-triggered: it is raised at
+// the moment a thing changed, by a caller that already worked out the thing had
+// not been seen before. Drift raises only newly inserted records, policy only
+// new violations, discovery only a plan whose fingerprint moved, a registry
+// only on the failure that crosses the threshold, a pause only when a pause is
+// written. Those need no floor, because the condition ending is what stops the
+// messages.
+//
+// Two are LEVEL-triggered: they are re-derived from the same unchanged state on
+// every scheduler pass. An update awaiting approval is decided afresh each
+// pass and stays awaiting until a person acts; a pass that cannot complete
+// usually cannot complete again fifteen minutes later. Left alone, those turn
+// one unchanged condition into ninety-six messages a day, and an operator who
+// gets ninety-six messages turns the channel off -- which loses the failed
+// rollback too.
+//
+// # Why this is a property of the EVENT and not a setting
+//
+// Because it is a fact about how the event is produced, not a preference. An
+// operator cannot know, from a rule editor, that approval-required is
+// re-evaluated on a timer while drift is not. A rule's own cooldown still
+// applies and still WINS when it is longer -- this is a floor, never a cap, so
+// no operator setting is overridden and nothing here can make an event noisier.
+//
+// Returns zero for every other event, which suppresses nothing.
+func (e NotificationEvent) MinimumCooldown() time.Duration {
+	switch e {
+	case EventApprovalRequired:
+		// An hour. Long enough that a pass every fifteen minutes says a thing
+		// four times a day rather than ninety-six, short enough that an
+		// operator who missed the first one is reminded the same working day.
+		// The dedup key is the PLAN id, so approving it or a newer plan
+		// superseding it ends the messages immediately rather than waiting out
+		// the window.
+		return time.Hour
+	case EventSchedulerError:
+		// The dedup key is the failing STAGE, which does not change while the
+		// cause persists. An hour of the same broken pass is one message.
+		return time.Hour
+	default:
+		return 0
+	}
+}
+
+// EffectiveCooldown combines a rule's cooldown with the event's floor.
+//
+// The longer of the two, always. A rule asking for more suppression gets it; a
+// rule asking for less than a level-triggered event's floor -- including the
+// zero that means "tell me every time", which is the default -- gets the floor.
+func (e NotificationEvent) EffectiveCooldown(ruleCooldown time.Duration) time.Duration {
+	if floor := e.MinimumCooldown(); floor > ruleCooldown {
+		return floor
+	}
+	return ruleCooldown
 }
 
 // Describe renders an event in operator-facing words.
@@ -162,6 +242,8 @@ func (e NotificationEvent) Describe() string {
 		return "a container was recreated on a new image and proved"
 	case EventExecutionFailed:
 		return "a container recreation did not succeed"
+	case EventUpdateRecovered:
+		return "an unattended update failed and the container was restored automatically"
 	case EventRollbackStarted:
 		return "a container is being rolled back, and is briefly unavailable"
 	case EventRollbackSucceeded:

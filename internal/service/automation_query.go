@@ -425,7 +425,7 @@ func (s *AutomationService) Approve(
 
 	acquisition, err := s.pipeline.RequestAcquisition(ctx, AcquisitionRequest{
 		PlanID:     decision.PlanID,
-		RequestKey: "automation:approve:" + runID + ":" + decision.PlanID,
+		RequestKey: domain.AutomationRequestKeyPrefix + "approve:" + runID + ":" + decision.PlanID,
 		// The APPROVER, not the pass. A change a person released is that
 		// person's change.
 		RequestedBy: by,

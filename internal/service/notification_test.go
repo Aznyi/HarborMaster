@@ -39,6 +39,10 @@ type fakeNotificationStore struct {
 	// suppress is what ShouldSuppress returns; suppressErr makes it fail.
 	suppress    bool
 	suppressErr error
+	// cooldowns records the window the engine asked for, per event. The floor a
+	// level-triggered event carries is invisible unless the value that reaches
+	// the store is checked.
+	cooldowns map[string]time.Duration
 	// secretErr makes the credential read fail.
 	secretErr error
 	// recordErr makes every delivery write fail, standing in for a database
@@ -167,11 +171,30 @@ func (f *fakeNotificationStore) DueRetries(
 }
 
 func (f *fakeNotificationStore) ShouldSuppress(
-	context.Context, string, string, time.Duration, time.Time,
+	_ context.Context, _, dedupKey string, cooldown time.Duration, _ time.Time,
 ) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.cooldowns == nil {
+		f.cooldowns = map[string]time.Duration{}
+	}
+	f.cooldowns[dedupKey] = cooldown
 	return f.suppress, f.suppressErr
+}
+
+// recorded returns every delivery row written so far.
+func (f *fakeNotificationStore) recorded() []domain.NotificationDelivery {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]domain.NotificationDelivery(nil), f.deliveries...)
+}
+
+// cooldownFor returns the window the engine asked for on one dedup key.
+func (f *fakeNotificationStore) cooldownFor(dedupKey string) (time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cooldown, seen := f.cooldowns[dedupKey]
+	return cooldown, seen
 }
 
 func (f *fakeNotificationStore) PruneDeliveries(context.Context, time.Time, int) (int, error) {

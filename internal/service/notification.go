@@ -467,8 +467,14 @@ func (s *NotificationService) route(ctx context.Context, item queued) {
 		if !rule.Matches(item.notification) {
 			continue
 		}
+		// The rule's cooldown, floored by the event's own. Level-triggered
+		// events -- ones a scheduler pass re-derives from unchanged state --
+		// carry a floor so the default zero cooldown does not turn one standing
+		// condition into a message every pass. A longer rule cooldown still
+		// wins; see NotificationEvent.EffectiveCooldown.
 		suppressed, err := s.store.ShouldSuppress(ctx, rule.RuleID,
-			item.notification.DedupKey, rule.Cooldown(), s.now())
+			item.notification.DedupKey,
+			item.notification.Event.EffectiveCooldown(rule.Cooldown()), s.now())
 		if err != nil {
 			s.logger.ErrorContext(ctx, "could not evaluate a notification cooldown",
 				slog.String("ruleId", rule.RuleID), slog.Any("error", err))

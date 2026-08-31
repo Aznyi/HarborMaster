@@ -821,6 +821,18 @@ func (e Execution) Duration() time.Duration {
 // HostChanged reports whether this execution modified the host.
 func (e Execution) HostChanged() bool { return e.Checkpoint.HostChanged() }
 
+// Automatic reports whether automation submitted this recreation.
+//
+// Read from the persisted request key rather than from RequestedBy, for the
+// reason AutomationRequestKeyPrefix gives: an operator who triggered a pass is
+// carried onto every request that pass submits, so "has a requester" does not
+// mean "a person asked for this one".
+//
+// What it decides is WORDING. A manual update that fails is never rolled back
+// by HarborMaster, and the message an operator gets must not suggest that
+// something is going to put it back.
+func (e Execution) Automatic() bool { return AutomaticRequest(e.RequestKey) }
+
 // NeedsOperator reports whether a person has to settle the host state.
 func (e Execution) NeedsOperator() bool {
 	return e.State == ExecutionFailed && e.Failure.NeedsOperator()

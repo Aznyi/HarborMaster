@@ -904,6 +904,9 @@ type rbHarness struct {
 	// lineage is what the container FOLLOWS. A rollback must put the running
 	// digest back without disturbing the tracking reference.
 	lineage *fakeLineageStore
+	// notifier is nil unless a test asked for one, which is the production
+	// default: notifications are off unless a deployment wired them.
+	notifier *recordingNotifier
 
 	base  time.Time
 	start time.Time
@@ -961,6 +964,9 @@ func newRollbackHarness(t *testing.T, tune ...func(*rbHarness)) *rbHarness {
 		Rollbacker: harness.host,
 		Lineage:    harness.lineage,
 		Hasher:     service.NewHasher(key),
+		// Nil unless a test set one in its tune func. service.raise is
+		// nil-safe, so this is exactly the disabled-notifications case.
+		Notify: harness.notifierOrNil(),
 		Config: config.Rollback{
 			Enabled:              true,
 			MaxConcurrent:        1,
@@ -978,6 +984,18 @@ func newRollbackHarness(t *testing.T, tune ...func(*rbHarness)) *rbHarness {
 		Now:    harness.now,
 	})
 	return harness
+}
+
+// notifierOrNil returns the notifier as an interface, preserving nil.
+//
+// A typed nil pointer assigned to an interface is NOT nil, and `raise` checks
+// the interface. Returning the interface's own nil is what makes an unwired
+// harness behave like a deployment with notifications switched off.
+func (h *rbHarness) notifierOrNil() service.Notifier {
+	if h.notifier == nil {
+		return nil
+	}
+	return h.notifier
 }
 
 // request asks for a rollback, failing the test if it is refused.

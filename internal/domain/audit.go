@@ -617,6 +617,35 @@ type Requester struct {
 // them the same is lying about one of them.
 func (r Requester) Known() bool { return r.UserID != "" || r.Username != "" }
 
+// AutomationRequestKeyPrefix marks a lifecycle request the automation engine
+// submitted rather than a person.
+//
+// # Why the request key and not the requester
+//
+// Because RequestedBy is not the discriminator it looks like. An automation run
+// an operator triggered by hand carries that operator onto every request the
+// run submits -- deliberately, so the audit trail names who set the pass going.
+// Reading "has a requester" as "a person asked for this" therefore reports an
+// automatic rollback as one an operator started, which is the single most
+// misleading thing a notification could say about a container that went down
+// on its own.
+//
+// The request key is set by the automation engine at submission, is persisted
+// on the acquisition, execution, and rollback records, and survives a restart.
+// It is what the engine's own idempotency depends on, so it cannot quietly stop
+// being written without automation breaking loudly.
+//
+// A caller-supplied key cannot forge this: every request-key path in the API
+// derives the key from the authenticated request, and nothing accepts a
+// caller's raw string. Even if one did, the only thing a forged prefix changes
+// is the WORDING of a message -- no gate, no capability, no mutation reads it.
+const AutomationRequestKeyPrefix = "automation:"
+
+// AutomaticRequest reports whether a request key marks an unattended request.
+func AutomaticRequest(requestKey string) bool {
+	return strings.HasPrefix(requestKey, AutomationRequestKeyPrefix)
+}
+
 // Describe renders the requester for an audit reason or a log line.
 func (r Requester) Describe() string {
 	if r.Username != "" {
