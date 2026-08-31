@@ -577,6 +577,24 @@ func upsertVolumes(ctx context.Context, tx *sql.Tx, volumes []domain.Volume, gen
 // Child rows are deleted and re-inserted rather than merged: a container's
 // labels, networks, and mounts are a set, and diffing them would risk leaving
 // a stale row behind that the UI would then present as current.
+// canonicalImageRef derives the intelligence key from a declared reference.
+//
+// The ONE place raw becomes canonical on the write path, so the column can
+// never disagree with the reference it is derived from. Empty when
+// domain.NormalizeImageRef refuses: an image built on this host, or a reference
+// naming no registry. Empty asserts nothing rather than guessing an identity --
+// see migration 0033.
+func canonicalImageRef(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	reference, err := domain.NormalizeImageRef(raw)
+	if err != nil {
+		return ""
+	}
+	return reference.Canonical
+}
+
 func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, generation int64, now time.Time) error {
 	overview := record.Detail.Overview
 	if overview.ID == "" {
@@ -590,19 +608,24 @@ func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, ge
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO containers
-			(id, host_id, short_id, name, image_id, image_ref, image_repository,
+			(id, host_id, short_id, name, image_id, image_ref, image_canonical,
+			 image_repository,
 			 image_tag, image_digest, state, raw_state, status, health,
 			 created_at, started_at, finished_at, exit_code, restart_count,
 			 restart_policy_name, restart_policy_max_retry,
 			 compose_project, compose_service, compose_container_number, compose_oneoff,
 			 hm_enabled, ports, present, first_seen_at, last_seen_at, generation, warning_count,
 			 network_mode, ipc_mode, pid_mode, namespaces_observed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
 		ON CONFLICT (id) DO UPDATE SET
 			short_id                 = excluded.short_id,
 			name                     = excluded.name,
 			image_id                 = excluded.image_id,
 			image_ref                = excluded.image_ref,
+			-- Rewritten with the raw reference it is derived from, never
+			-- independently. See migration 0033: this is a projection of
+			-- image_ref, so the two cannot drift.
+			image_canonical          = excluded.image_canonical,
 			image_repository         = excluded.image_repository,
 			image_tag                = excluded.image_tag,
 			image_digest             = excluded.image_digest,
@@ -636,7 +659,8 @@ func upsertContainer(ctx context.Context, tx *sql.Tx, record ContainerRecord, ge
 			pid_mode                 = excluded.pid_mode,
 			namespaces_observed      = 1`,
 		overview.ID, hostIDOrDefault(overview.HostID), overview.ShortID, overview.Name,
-		overview.ImageID, overview.Image.Raw, overview.Image.Repository,
+		overview.ImageID, overview.Image.Raw, canonicalImageRef(overview.Image.Raw),
+		overview.Image.Repository,
 		overview.Image.Tag, overview.Image.Digest,
 		string(overview.State), record.Detail.State.RawState, overview.Status,
 		string(overview.Health), formatTime(overview.CreatedAt),

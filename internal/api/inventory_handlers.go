@@ -243,9 +243,7 @@ func (s *Server) withAttention(
 
 	keys := make([]store.ContainerKey, 0, len(summaries))
 	for _, summary := range summaries {
-		keys = append(keys, store.ContainerKey{
-			ID: summary.ID, Name: summary.Name, ImageRef: summary.Image.Raw,
-		})
+		keys = append(keys, store.ContainerKey{ID: summary.ID, Name: summary.Name})
 	}
 
 	evidence, err := s.containers.Attention(ctx, keys)
@@ -351,11 +349,7 @@ func (s *Server) handleContainerDetail(w http.ResponseWriter, r *http.Request) {
 	// uses, which is what keeps the two definitions from drifting apart.
 	response := containerDetailResponse{ContainerDetail: *detail}
 	evidence, attentionErr := s.containers.Attention(r.Context(),
-		[]store.ContainerKey{{
-			ID:       detail.Overview.ID,
-			Name:     detail.Overview.Name,
-			ImageRef: detail.Overview.Image.Raw,
-		}})
+		[]store.ContainerKey{{ID: detail.Overview.ID, Name: detail.Overview.Name}})
 	if attentionErr != nil {
 		s.logger.ErrorContext(r.Context(), "container attention lookup failed",
 			slog.String("error", attentionErr.Error()))

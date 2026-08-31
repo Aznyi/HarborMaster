@@ -1,0 +1,65 @@
+-- 0033_container_image_canonical: the canonical image reference, denormalised.
+--
+-- # Why this column exists
+--
+-- image_intel is keyed by the CANONICAL reference ("docker.io/library/nginx:1.25")
+-- and a container carries the RAW one ("nginx:1.25"). Those never match, and
+-- migration 0015 records what happened to the last query that assumed they did:
+-- container_count was a correlated subquery matching containers.image_ref
+-- against image_intel.reference, so every image reported zero containers
+-- affected -- the number an operator prioritises updates by. It was fixed the
+-- same way this is: by storing the value where the mapping is still known.
+--
+-- The mapping is domain.NormalizeImageRef. It is a Go function -- it resolves
+-- implicit registries and namespaces, refuses IP literals and ports, and is the
+-- single source of every network destination HarborMaster will contact -- and
+-- it does not exist in SQL. Re-implementing it here in string functions would
+-- create a second, subtly different canonicaliser deciding which registry gets
+-- contacted, which is the last thing this schema should contain.
+--
+-- Without the column, every current-state read that needs to know whether a
+-- container's image has settled had to leave SQL, normalise in Go, and come
+-- back: two extra round trips on the plan-currency path (C3B) and a Go-side
+-- pass over every page (C3A). With it, currency is one join.
+--
+-- # This is DERIVED data, not a second source of truth
+--
+-- The invariant, which upsertContainer maintains on every write:
+--
+--     image_canonical = NormalizeImageRef(image_ref).Canonical   when it parses
+--     image_canonical = ''                                       when it does not
+--
+-- image_ref remains the source input: what the daemon reported, untouched.
+-- image_canonical is a projection of it and nothing else, recomputed from the
+-- raw value every time the row is written. It cannot drift, because there is no
+-- path that writes one without the other -- upsertContainer is the only
+-- statement that inserts or updates a container row, and both the full refresh
+-- and the targeted single-container refresh go through it.
+--
+-- # Empty asserts NOTHING
+--
+-- A reference NormalizeImageRef refuses -- an image built on this host, a
+-- reference naming no registry -- gets the empty string. Empty is not "no
+-- registry": it is "HarborMaster will not claim a canonical identity for this".
+-- Every consumer treats it as absent evidence, so a container with an odd
+-- reference keeps exactly the verdicts it had before this column existed.
+--
+-- # Existing rows
+--
+-- Deliberately NOT backfilled by this migration, because a correct backfill
+-- would require calling Go from SQL. Existing rows carry '' until their next
+-- inventory refresh rewrites them, which is the startup refresh every
+-- deployment performs seconds after upgrading. Until then those rows assert no
+-- canonical identity, which is the same conservative state as a reference that
+-- does not parse: currency reads fall back to "not retired", so an upgrade can
+-- only ever show MORE plans as current, never fewer. Nothing is hidden by a
+-- column that has not been populated yet.
+
+ALTER TABLE containers ADD COLUMN image_canonical TEXT NOT NULL DEFAULT '';
+
+-- The lookup this exists for: joining a container to its image intelligence.
+-- Partial, because the empty string is the common "no canonical identity" case
+-- and indexing it would store a large useless bucket.
+CREATE INDEX idx_containers_image_canonical
+    ON containers (image_canonical)
+    WHERE image_canonical <> '';

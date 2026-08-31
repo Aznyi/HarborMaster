@@ -32,6 +32,19 @@ import (
 // deleted, which is how a preference comes to outlive its container.
 func commitContainers(t *testing.T, db *store.DB, names ...string) {
 	t.Helper()
+	commitContainersWithImage(t, db, "ghcr.io/acme/service:1.0.0", names...)
+}
+
+// commitContainersWithImage is the same, with a chosen declared reference.
+//
+// The reference matters since migration 0033: the write path derives
+// containers.image_canonical from it, and a reference domain.NormalizeImageRef
+// refuses stores the empty string -- which is how a test exercises "this
+// container asserts no canonical identity".
+func commitContainersWithImage(
+	t *testing.T, db *store.DB, imageRef string, names ...string,
+) {
+	t.Helper()
 
 	records := make([]store.ContainerRecord, 0, len(names))
 	for _, name := range names {
@@ -43,7 +56,7 @@ func commitContainers(t *testing.T, db *store.DB, names ...string) {
 					ID:        id,
 					ShortID:   domain.ShortenID(id),
 					Name:      name,
-					Image:     domain.ParseImageRef("ghcr.io/acme/service:1.0.0"),
+					Image:     domain.ParseImageRef(imageRef),
 					ImageID:   "sha256:image1",
 					State:     domain.StateRunning,
 					Health:    domain.HealthNone,

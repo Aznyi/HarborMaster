@@ -70,9 +70,7 @@ func seedIntel(
 func c3aKeys(names ...string) []store.ContainerKey {
 	keys := make([]store.ContainerKey, 0, len(names))
 	for _, name := range names {
-		keys = append(keys, store.ContainerKey{
-			ID: name + "-id", Name: name, ImageRef: c3aImage,
-		})
+		keys = append(keys, store.ContainerKey{ID: name + "-id", Name: name})
 	}
 	return keys
 }
@@ -201,14 +199,15 @@ func TestOneImageIsOneQueryHoweverManyContainersRunIt(t *testing.T) {
 }
 
 func TestAnUnnormalisableReferenceAssertsNothing(t *testing.T) {
-	// A reference NormalizeImageRef refuses has no intelligence record to find.
-	// That is the same state as having none, and must stay the zero value
-	// rather than becoming a claim.
+	// A reference NormalizeImageRef refuses gets an EMPTY canonical column on
+	// the write path, so it has no intelligence record to join to. That is the
+	// same state as having none, and must stay the zero value rather than
+	// becoming a claim.
 	db, ctx := preferenceRepo(t)
-	commitContainers(t, db, "svc-a")
+	commitContainersWithImage(t, db, "not a valid @@ reference", "svc-a")
 
 	evidence, err := db.Containers.Attention(ctx, []store.ContainerKey{
-		{ID: "svc-a-id", Name: "svc-a", ImageRef: "not a valid @@ reference"},
+		{ID: "svc-a-id", Name: "svc-a"},
 	})
 	if err != nil {
 		t.Fatalf("an odd reference must not fail the page: %v", err)

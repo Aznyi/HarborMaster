@@ -329,6 +329,35 @@ type ChangePlan struct {
 //   - History queries legitimately want the newest RECORDED plan and should
 //     keep using it -- duplicate suppression and the planner-version readout
 //     are asking a different question and are correct as they are.
+//
+// # Currency is keyed by container ID, and a recreation starts a new lineage
+//
+// C2 and C3A made the container NAME HarborMaster's stable identity, and
+// deliberately did not extend that here. The two are answering different
+// questions.
+//
+// Name-keyed identity exists for things that must SURVIVE a recreation because
+// they are the operator's settings or the workload's continuity: an automation
+// pause, a container update preference, image lineage, and resolving which
+// container id is current now. Losing any of those on the update they
+// authorised would be the defect.
+//
+// A plan is not a setting. It is an assessment of ONE container as it was: its
+// configuration snapshot, its open drift, its policy violations and its
+// running digest, frozen together with the verdict they produced. The
+// replacement is a different container with a different id, a different
+// snapshot and its own evidence, so a plan written for the original is not an
+// assessment of it. Making the replacement's first plan "supersede" the
+// original's would be a claim about history -- that an assessment of one
+// container was replaced by an assessment of another -- and change_plans is
+// immutable evidence precisely so that cannot happen.
+//
+// So a recreation starts a NEW plan lineage, and the original's plans stay
+// current-for-a-container-that-is-gone rather than becoming superseded. Nothing
+// can act on them: every preflight re-resolves the container and refuses
+// `containerMissing`, and the retirement predicate requires a PRESENT
+// container, so an absent one is never retired on evidence either -- it is
+// simply no longer a container anybody can act on.
 
 // ErrPlanTargetCrossed reports a plan whose proposed reference and proposed
 // digest were not resolved for each other.

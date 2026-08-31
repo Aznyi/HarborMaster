@@ -111,6 +111,67 @@ type PlanFilter struct {
 	Page      Page
 }
 
+// retiredByEvidenceSQL is THE definition of a retired plan, in one place.
+//
+// A plan is retired when the registry comparison behind its container has
+// ANSWERED and found nothing newer -- the state in which the planner's own rule
+// declines to write a plan at all:
+//
+//	if hasIntel && intel.Update == UpdateNone && intel.Status == CheckOK {
+//		return ChangePlan{}, planSkipped
+//	}
+//
+// It never writes a superseding row for such a container, so "newest row" and
+// "current decision" are different questions. This fragment answers the second.
+//
+// # Why one string
+//
+// Four current-state consumers need it -- Current, the currentOnly listing, the
+// dashboard Summary and the container attention projection -- and C3B
+// implemented it twice in Go with slightly different shapes. Two definitions of
+// "current" is how a dashboard comes to disagree with the page it links to. One
+// fragment, textually shared, so they cannot.
+//
+// # Why it is SQL now
+//
+// It joins on containers.image_canonical, which migration 0033 added precisely
+// so this could stop leaving SQL to normalise a reference in Go and come back.
+// The canonicaliser is still domain.NormalizeImageRef -- nothing here parses a
+// reference; it compares a value that function already produced.
+//
+// # Failure direction
+//
+// Every uncertain case fails to NOT RETIRED: no present container, an empty
+// canonical reference (unsupported, or a row an inventory refresh has not
+// rewritten since the upgrade), no intelligence record, or a check that never
+// answered. Retiring on absent evidence would HIDE an actionable update, which
+// is the one direction this must never fail in.
+//
+// The placeholder-free, parameter-free text is a constant: no caller value is
+// ever concatenated into it.
+const retiredByEvidenceSQL = `
+	EXISTS (
+		SELECT 1
+		  FROM containers c
+		  JOIN image_intel i ON i.reference = c.image_canonical
+		 WHERE c.id = %s
+		   AND c.present = 1
+		   AND c.image_canonical <> ''
+		   AND i.check_status = 'ok'
+		   AND i.last_success_at IS NOT NULL
+		   AND i.update_type = 'none'
+	)`
+
+// retiredFor renders the fragment against a container-id expression.
+//
+// The argument is a COLUMN REFERENCE chosen by this file -- "p.container_id" or
+// "container_id" -- never caller text. It exists because the fragment is used
+// from queries that alias the plans table differently, and duplicating the
+// EXISTS to suit each one is exactly the drift the shared constant prevents.
+func retiredFor(containerIDColumn string) string {
+	return fmt.Sprintf(retiredByEvidenceSQL, containerIDColumn)
+}
+
 // superseded is derived rather than stored: a plan is superseded when a newer
 // one exists for the same container. Storing it would mean writing to an
 // immutable row.
@@ -632,125 +693,7 @@ func (r *PlanRepository) List(ctx context.Context, filter PlanFilter) ([]domain.
 		return nil, 0, err
 	}
 
-	// CurrentOnly asks for the CURRENT decisions, and the SQL above answers a
-	// narrower question: the newest row per container. The two differ for a
-	// plan whose evidence has since settled into the state where the planner
-	// would decline to write it -- see retiredByEvidence. Excluding them here
-	// is what stops the Updates workspace offering a review for a container the
-	// registry has already confirmed is current.
-	//
-	// Batched: one pass over the page, not a lookup per row. Retired rows are
-	// dropped from BOTH the page and the total, so a caller is never told there
-	// are three current plans and shown two.
-	if filter.CurrentOnly && len(plans) > 0 {
-		kept, retired, err := r.withoutRetired(ctx, plans)
-		if err != nil {
-			return nil, 0, err
-		}
-		plans, total = kept, total-retired
-		if total < 0 {
-			total = 0
-		}
-	}
 	return plans, total, nil
-}
-
-// withoutRetired drops plans whose evidence has retired them.
-//
-// Two queries for the whole page whatever its size: the containers, then the
-// intelligence for the distinct references they run. The SAME predicate
-// retiredByEvidence applies -- one definition of "retired", so a listing and a
-// preflight cannot disagree about which plans are current.
-func (r *PlanRepository) withoutRetired(
-	ctx context.Context,
-	plans []domain.ChangePlan,
-) ([]domain.ChangePlan, int, error) {
-	ids := make([]any, 0, len(plans))
-	seen := make(map[string]struct{}, len(plans))
-	for _, plan := range plans {
-		if _, dup := seen[plan.ContainerID]; dup {
-			continue
-		}
-		seen[plan.ContainerID] = struct{}{}
-		ids = append(ids, plan.ContainerID)
-	}
-
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, image_ref FROM containers
-		  WHERE present = 1 AND id IN (`+placeholders(len(ids))+`)`, ids...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read plan container images: %w", AsError(err))
-	}
-	defer func() { _ = rows.Close() }()
-
-	// container id -> canonical reference, and the distinct references to read.
-	canonicalByContainer := make(map[string]string, len(ids))
-	references := make([]any, 0, len(ids))
-	referenceSeen := make(map[string]struct{}, len(ids))
-	for rows.Next() {
-		var id, imageRef string
-		if err := rows.Scan(&id, &imageRef); err != nil {
-			return nil, 0, fmt.Errorf("scan plan container image: %w", AsError(err))
-		}
-		canonical, resolvable := canonicalReferenceOf(imageRef)
-		if !resolvable {
-			continue
-		}
-		canonicalByContainer[id] = canonical
-		if _, dup := referenceSeen[canonical]; !dup {
-			referenceSeen[canonical] = struct{}{}
-			references = append(references, canonical)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("read plan container images: %w", AsError(err))
-	}
-	if len(references) == 0 {
-		return plans, 0, nil
-	}
-
-	settled, err := r.settledCurrentReferences(ctx, references)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	kept := make([]domain.ChangePlan, 0, len(plans))
-	retired := 0
-	for _, plan := range plans {
-		if _, gone := settled[canonicalByContainer[plan.ContainerID]]; gone {
-			retired++
-			continue
-		}
-		kept = append(kept, plan)
-	}
-	return kept, retired, nil
-}
-
-// settledCurrentReferences returns the references a comparison ANSWERED for and
-// found nothing newer.
-func (r *PlanRepository) settledCurrentReferences(
-	ctx context.Context,
-	references []any,
-) (map[string]struct{}, error) {
-	rows, err := r.db.QueryContext(ctx,
-		selectImageIntelColumns+`
-		WHERE i.reference IN (`+placeholders(len(references))+`)`, references...)
-	if err != nil {
-		return nil, fmt.Errorf("read plan listing intel: %w", AsError(err))
-	}
-	defer func() { _ = rows.Close() }()
-
-	records, err := scanImageIntel(rows)
-	if err != nil {
-		return nil, err
-	}
-	settled := make(map[string]struct{}, len(records))
-	for _, record := range records {
-		if record.ComparisonSettled() && record.Update == domain.UpdateNone {
-			settled[record.Reference] = struct{}{}
-		}
-	}
-	return settled, nil
 }
 
 // Get returns one plan by its immutable id.
@@ -773,8 +716,20 @@ func (r *PlanRepository) Get(ctx context.Context, planID string) (domain.ChangeP
 
 // Current returns the newest plan for one container.
 func (r *PlanRepository) Current(ctx context.Context, containerID string) (domain.ChangePlan, error) {
+	// ONE query. The newest plan for the container, unless the evidence behind
+	// it has settled into the state where the planner would decline to write
+	// it -- see retiredByEvidenceSQL.
+	//
+	// C3B answered this in three round trips: the plan, the container's raw
+	// reference, then the intelligence for the canonical form it normalised to
+	// in Go. Migration 0033 stores that canonical form on the container row, so
+	// the join happens where the rest of the question already is. The rule is
+	// unchanged; only the number of trips is.
 	rows, err := r.db.QueryContext(ctx,
-		selectPlanColumns+` WHERE p.container_id = ? ORDER BY p.id DESC LIMIT 1`, containerID)
+		selectPlanColumns+`
+		 WHERE p.container_id = ?
+		   AND NOT `+retiredFor("p.container_id")+`
+		 ORDER BY p.id DESC LIMIT 1`, containerID)
 	if err != nil {
 		return domain.ChangePlan{}, fmt.Errorf("query current plan: %w", AsError(err))
 	}
@@ -787,140 +742,7 @@ func (r *PlanRepository) Current(ctx context.Context, containerID string) (domai
 	if len(plans) == 0 {
 		return domain.ChangePlan{}, ErrNotFound
 	}
-
-	retired, err := r.retiredByEvidence(ctx, plans[0])
-	if err != nil {
-		return domain.ChangePlan{}, err
-	}
-	if retired {
-		return domain.ChangePlan{}, ErrNotFound
-	}
 	return plans[0], nil
-}
-
-// retiredByEvidence reports whether newer registry evidence has ended this
-// plan's currency.
-//
-// # The gap this closes
-//
-// A plan is superseded by a NEWER PLAN -- that is the derivation in
-// selectPlanColumns, and it is correct as far as it goes. It cannot see the
-// other way a plan stops being current, which is the planner's own skip rule:
-//
-//	if hasIntel && intel.Update == UpdateNone && intel.Status == CheckOK {
-//		return ChangePlan{}, planSkipped
-//	}
-//
-// A plan is written before the first registry check settles, when nothing is
-// established and the honest verdict is `unknown` (B1.1). Once the check
-// settles on "nothing newer", the planner skips that container FOREVER -- so it
-// never writes a superseding row, and the pre-check plan stays newest
-// indefinitely. Read as "the current decision", it is an opinion the planner
-// stopped holding the moment the registry answered.
-//
-// So currency has two ends, not one. A plan stops being current when a newer
-// plan replaces it, OR when the evidence it rests on settles into the state
-// where the planner would decline to write it at all. This is the second.
-//
-// # Why it is derived rather than stored
-//
-// Migration 0008 is explicit: change_plans has no `status`, `applied_at` or
-// `superseded` column, because adding one would make an immutable row mutable
-// and would be the first step toward treating plans as work items. Supersession
-// is derived at read time. This follows that rule exactly -- nothing is
-// written, and the historical row is untouched and still readable through
-// History and the plan endpoints.
-//
-// # Why the lookup is in Go rather than the query
-//
-// image_intel is keyed by the CANONICAL reference and a container carries the
-// RAW one. Migration 0015 records what happens to anyone who joins them in SQL:
-// container_count matched containers.image_ref against image_intel.reference,
-// those never match, and every image reported zero containers affected. The
-// mapping is domain.NormalizeImageRef and it does not exist in SQL, so it is
-// applied here.
-//
-// # Failure direction
-//
-// Every uncertain path returns false -- not retired. A plan that cannot be
-// evaluated keeps the currency it already had, which is the behaviour before
-// this existed. Retiring a plan on a failed lookup would HIDE an actionable
-// update, and that is the one direction this must never fail in; the gates that
-// stop a stale plan being acted on are separate and unchanged.
-func (r *PlanRepository) retiredByEvidence(
-	ctx context.Context,
-	plan domain.ChangePlan,
-) (bool, error) {
-	var imageRef string
-	err := r.db.QueryRowContext(ctx,
-		`SELECT image_ref FROM containers WHERE id = ? AND present = 1`,
-		plan.ContainerID).Scan(&imageRef)
-	if errors.Is(err, sql.ErrNoRows) {
-		// No present container. Its plan's currency is not this function's
-		// question -- the preflights refuse a missing container on their own,
-		// and answering here would be a second place to keep that rule.
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read plan container image: %w", AsError(err))
-	}
-
-	canonical, resolvable := canonicalReferenceOf(imageRef)
-	if !resolvable {
-		return false, nil
-	}
-
-	intel, err := r.intelByReference(ctx, canonical)
-	if errors.Is(err, ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	// The SAME predicate the planner and the attention model use. One
-	// definition of "this was actually compared", so the three cannot drift
-	// apart about what counts as evidence.
-	return intel.ComparisonSettled() && intel.Update == domain.UpdateNone, nil
-}
-
-// canonicalReferenceOf resolves a declared reference to its intelligence key.
-//
-// The refusal is a STATE, not an error: a reference domain.NormalizeImageRef
-// will not canonicalise has no intelligence record to find, which is the same
-// answer as having none. Returned as a bool so that reads as the classification
-// it is rather than as a swallowed failure.
-func canonicalReferenceOf(imageRef string) (string, bool) {
-	reference, err := domain.NormalizeImageRef(imageRef)
-	if err != nil {
-		return "", false
-	}
-	return reference.Canonical, true
-}
-
-// intelByReference reads one image intelligence record.
-//
-// The shared column list and scanner, never a fourth hand-written SELECT over
-// this table: two used to exist and they drifted.
-func (r *PlanRepository) intelByReference(
-	ctx context.Context,
-	reference string,
-) (domain.ImageIntel, error) {
-	rows, err := r.db.QueryContext(ctx,
-		selectImageIntelColumns+` WHERE i.reference = ? LIMIT 1`, reference)
-	if err != nil {
-		return domain.ImageIntel{}, fmt.Errorf("read plan image intel: %w", AsError(err))
-	}
-	defer func() { _ = rows.Close() }()
-
-	records, err := scanImageIntel(rows)
-	if err != nil {
-		return domain.ImageIntel{}, err
-	}
-	if len(records) == 0 {
-		return domain.ImageIntel{}, ErrNotFound
-	}
-	return records[0], nil
 }
 
 // History returns a page of a container's plans, newest first.
@@ -968,9 +790,18 @@ func (r *PlanRepository) Summary(ctx context.Context) (domain.ChangePlanSummary,
 	}
 
 	// The current-plan set, defined once and reused by every aggregate below.
-	const currentPlans = `
+	//
+	// "Current" here means the same thing it means in Current and in the
+	// currentOnly listing, and it did not before C3C: this counted the newest
+	// row per container and nothing more, so a plan the registry had since
+	// retired still contributed to every figure on the dashboard -- the
+	// available-update count, the needs-review count, the risk bands and the
+	// container total. An operator saw one more update than existed and could
+	// not find it on any page, because the pages had already stopped listing it.
+	currentPlans := `
 		SELECT * FROM change_plans
-		WHERE id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)`
+		WHERE id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)
+		  AND NOT ` + retiredFor("container_id")
 
 	for _, group := range []struct {
 		query string
@@ -1117,8 +948,12 @@ func planWhere(filter PlanFilter) (string, []any) {
 		args = append(args, filter.ContainerID)
 	}
 	if filter.CurrentOnly {
+		// Newest per container, AND not retired by settled evidence. The second
+		// half is the same fragment Current and Summary use, so the three
+		// cannot disagree about which plans are current.
 		clauses = append(clauses,
-			"p.id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)")
+			"p.id IN (SELECT MAX(id) FROM change_plans GROUP BY container_id)",
+			"NOT "+retiredFor("p.container_id"))
 	}
 	if filter.MinRisk > 0 {
 		clauses = append(clauses, "p.risk_score >= ?")

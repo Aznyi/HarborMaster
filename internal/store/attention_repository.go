@@ -57,19 +57,6 @@ var ErrTooManyAttentionKeys = fmt.Errorf(
 type ContainerKey struct {
 	ID   string
 	Name string
-	// ImageRef is the reference the container DECLARED, exactly as the daemon
-	// reports it -- "nginx:1.27.0-alpine", not the canonical form.
-	//
-	// Carried because image intelligence is keyed by the CANONICAL reference
-	// and the two cannot be joined in SQL. Migration 0015 records what happens
-	// when somebody tries: `container_count` matched containers.image_ref
-	// against image_intel.reference, those never match, and every image
-	// reported zero containers affected. The mapping is a domain function, so
-	// it is applied here in Go rather than guessed at in a query.
-	//
-	// Empty is fine and means "no intelligence for this row", which asserts
-	// nothing.
-	ImageRef string
 }
 
 // Attention returns evidence for the given containers, keyed by container ID.
@@ -91,28 +78,9 @@ func (r *ContainerRepository) Attention(
 	ids := make([]any, 0, len(keys))
 	names := make([]any, 0, len(keys))
 	byName := make(map[string][]string, len(keys))
-	// Canonical image reference -> the rows running it. Many containers share
-	// one image, so this is a set rather than a list: the IN clause must not
-	// repeat a reference fifty times because fifty containers run it.
-	references := make([]any, 0, len(keys))
-	byReference := make(map[string][]string, len(keys))
 	for _, key := range keys {
 		evidence[key.ID] = domain.ContainerEvidence{}
 		ids = append(ids, key.ID)
-
-		// The one place raw becomes canonical. A reference NormalizeImageRef
-		// refuses has no intelligence record to find, which is the same state
-		// as having no record at all and is left as the zero value.
-		if key.ImageRef != "" {
-			if reference, err := domain.NormalizeImageRef(key.ImageRef); err == nil {
-				if _, seen := byReference[reference.Canonical]; !seen {
-					references = append(references, reference.Canonical)
-				}
-				byReference[reference.Canonical] = append(
-					byReference[reference.Canonical], key.ID)
-			}
-		}
-
 		if key.Name == "" {
 			continue
 		}
@@ -125,15 +93,6 @@ func (r *ContainerRepository) Attention(
 	// name-keyed fact belongs to whichever rows carry that name.
 	forName := func(name string, apply func(*domain.ContainerEvidence)) {
 		for _, id := range byName[name] {
-			row := evidence[id]
-			apply(&row)
-			evidence[id] = row
-		}
-	}
-	// Applied to every container running the image. One intelligence record
-	// answers for all of them, which is the whole reason this is one query.
-	forReference := func(reference string, apply func(*domain.ContainerEvidence)) {
-		for _, id := range byReference[reference] {
 			row := evidence[id]
 			apply(&row)
 			evidence[id] = row
@@ -158,7 +117,7 @@ func (r *ContainerRepository) Attention(
 		func() error { return r.gatherPreserved(ctx, names, forName) },
 		func() error { return r.gatherLastUpdate(ctx, names, forName) },
 		func() error { return r.gatherLastRollback(ctx, names, forName) },
-		func() error { return r.gatherImageIntel(ctx, references, forReference) },
+		func() error { return r.gatherImageIntel(ctx, ids, forID) },
 	} {
 		if err := gather(); err != nil {
 			return nil, err
@@ -180,9 +139,15 @@ func (r *ContainerRepository) Attention(
 
 // gatherPlans reads the CURRENT plan per container.
 //
-// `MAX(id)` per container is the same definition PlanRepository.Summary uses
-// for "current". Doing it in the subquery rather than filtering afterwards is
-// what keeps this one query for the whole page.
+// Newest per container, AND not retired by settled registry evidence -- the
+// same definition PlanRepository.Current, the currentOnly listing and the
+// dashboard Summary use, from the same shared fragment. Before C3C this was
+// MAX(id) alone, so a row could carry the update type and proposed image of a
+// plan the registry had already retired: C3A stopped that reaching the
+// VERDICT, but the fields travelled to the client beside it.
+//
+// Doing both in the subquery rather than filtering afterwards is what keeps
+// this one query for the whole page.
 func (r *ContainerRepository) gatherPlans(
 	ctx context.Context, ids []any, forID func(string, func(*domain.ContainerEvidence)),
 ) error {
@@ -195,7 +160,8 @@ func (r *ContainerRepository) gatherPlans(
 		 WHERE id IN (
 		       SELECT MAX(id) FROM change_plans
 		        WHERE container_id IN (`+placeholders(len(ids))+`)
-		        GROUP BY container_id)`, ids...)
+		        GROUP BY container_id)
+		   AND NOT `+retiredFor("container_id"), ids...)
 	if err != nil {
 		return fmt.Errorf("read current plans: %w", AsError(err))
 	}
@@ -226,25 +192,36 @@ func (r *ContainerRepository) gatherPlans(
 // ordinary case left no trace in the one subsystem the row was reading, and
 // every current container reported "not checked".
 //
-// The evidence exists; it lives on the image intelligence record, which is
-// where the registry comparison happens. This reads it for the page in ONE
-// query keyed by canonical reference, so a hundred containers on one image cost
-// one row rather than a hundred lookups.
+// The evidence exists; it lives on the image intelligence record. This reads it
+// for the page in ONE query, joined through containers.image_canonical, so a
+// hundred containers on one image cost one row rather than a hundred lookups.
+//
+// C3A did this by normalising every declared reference in Go and passing the
+// canonical forms back in. Migration 0033 stores that value on the container
+// row, so the join is now the same one every other current-state read uses and
+// there is one fewer place deriving canonical form.
 //
 // It does not make anything actionable. UpdateNone and UpdateUnknown are both
 // refused by UpdateStrategy.Permits, so nothing here can cause an update; it
 // changes only what a row is allowed to SAY.
 func (r *ContainerRepository) gatherImageIntel(
 	ctx context.Context,
-	references []any,
-	forReference func(string, func(*domain.ContainerEvidence)),
+	ids []any,
+	forID func(string, func(*domain.ContainerEvidence)),
 ) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	byReference, references, err := r.imageIdentities(ctx, ids)
+	if err != nil {
+		return err
+	}
 	if len(references) == 0 {
 		return nil
 	}
-	// The shared column list and the shared scanner, not a third hand-written
-	// SELECT over this table. Two used to exist and they drifted -- see
-	// gatherIntel in plan_repository.go.
+
+	// The shared column list and the shared scanner, not another hand-written
+	// SELECT over this table -- two used to exist and they drifted.
 	rows, err := r.db.QueryContext(ctx,
 		selectImageIntelColumns+`
 		WHERE i.reference IN (`+placeholders(len(references))+`)`, references...)
@@ -258,11 +235,7 @@ func (r *ContainerRepository) gatherImageIntel(
 		return err
 	}
 	for _, record := range records {
-		forReference(record.Reference, func(row *domain.ContainerEvidence) {
-			// ComparisonSettled is the domain's own predicate, and the SAME one
-			// the planner applies. A row that has never been successfully
-			// compared sets nothing, so its zero value continues to assert
-			// nothing at all.
+		apply := func(row *domain.ContainerEvidence) {
 			// A reference with no registry behind it. Permanent, and the one
 			// fact worth carrying from a record that never settled: it is why
 			// this container will never have a comparison rather than merely
@@ -270,6 +243,10 @@ func (r *ContainerRepository) gatherImageIntel(
 			if record.Status == domain.CheckUnsupported {
 				row.CheckNotComparable = true
 			}
+			// ComparisonSettled is the domain's own predicate, and the SAME one
+			// the planner applies. A row that has never been successfully
+			// compared sets nothing, so its zero value continues to assert
+			// nothing at all.
 			if !record.ComparisonSettled() {
 				return
 			}
@@ -277,9 +254,54 @@ func (r *ContainerRepository) gatherImageIntel(
 			row.CheckedUpdate = record.ObservedUpdate()
 			row.CheckStatus = record.Status
 			row.LastSuccessAt = record.LastSuccessAt
-		})
+		}
+		// One intelligence row answers for every container running that image,
+		// which is the whole reason this is not a lookup per container.
+		for _, id := range byReference[record.Reference] {
+			forID(id, apply)
+		}
 	}
 	return rows.Err()
+}
+
+// imageIdentities maps the page's containers to the canonical references they
+// run, and returns the distinct references to read intelligence for.
+//
+// Read from the column migration 0033 added. NOTHING is normalised here: the
+// value was produced by domain.NormalizeImageRef on the write path, so this
+// derives no identity of its own and cannot disagree with the rest of the
+// estate about which registry an image belongs to.
+//
+// A container whose reference the domain refused carries the empty string and
+// is skipped, which leaves its evidence at the zero value -- asserting nothing,
+// exactly as before this existed.
+func (r *ContainerRepository) imageIdentities(
+	ctx context.Context, ids []any,
+) (map[string][]string, []any, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, image_canonical FROM containers
+		 WHERE image_canonical <> '' AND id IN (`+placeholders(len(ids))+`)`, ids...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read container image identity: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	byReference := make(map[string][]string, len(ids))
+	references := make([]any, 0, len(ids))
+	for rows.Next() {
+		var id, canonical string
+		if err := rows.Scan(&id, &canonical); err != nil {
+			return nil, nil, fmt.Errorf("scan container image identity: %w", AsError(err))
+		}
+		if _, seen := byReference[canonical]; !seen {
+			references = append(references, canonical)
+		}
+		byReference[canonical] = append(byReference[canonical], id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("read container image identity: %w", AsError(err))
+	}
+	return byReference, references, nil
 }
 
 // gatherApprovals reads which containers the LATEST pass is holding.
