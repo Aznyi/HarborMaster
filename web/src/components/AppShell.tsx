@@ -394,8 +394,16 @@ function Sidebar({
  * The heading is a HEADING: no route, no handler, no tabindex. It names the
  * run of links below it for a screen reader through `aria-labelledby`, and is
  * skipped entirely by keyboard navigation, so grouping costs no keystrokes.
- * It is rendered a step quieter than the entries themselves -- a subject label
- * has to read as subordinate to the destinations it labels.
+ * It reads as subordinate to the destinations it labels through TYPOGRAPHY --
+ * smaller, uppercase, letter-spaced -- and not through a dimmer colour.
+ *
+ * It carried `text-content-muted/70` until the release-candidate pass measured
+ * it: 70% of the muted token over the sidebar gives 3.79:1 in dark and 2.96:1
+ * in light, against a WCAG AA floor of 4.5:1 for text this size. Subordinate
+ * cannot be bought by making a label harder to read, and the two text tokens
+ * this theme defines are the whole vocabulary -- so the heading uses the muted
+ * token at full strength (5.50:1 light, 6.33:1 dark) and earns its hierarchy
+ * from the type instead.
  */
 function AdvancedGroup({ group }: { group: NavGroup }) {
   const headingId = `advanced-group-${group.heading
@@ -407,7 +415,7 @@ function AdvancedGroup({ group }: { group: NavGroup }) {
     <div className="flex flex-col gap-1">
       <h3
         id={headingId}
-        className="px-3 text-[0.6875rem] font-medium uppercase tracking-wide text-content-muted/70"
+        className="px-3 text-[0.6875rem] font-medium uppercase tracking-wide text-content-muted"
       >
         {group.heading}
       </h3>
