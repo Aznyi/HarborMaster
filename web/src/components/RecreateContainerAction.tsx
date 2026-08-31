@@ -76,8 +76,26 @@ export function RecreateContainerAction({
    * swallowed: "HarborMaster could not establish what depends on this" is a
    * different answer from "nothing does", and the preflight will refuse on the
    * same condition anyway.
+   *
+   * # Why this is currentContainerId and not containerId
+   *
+   * `acquisition.containerId` is the container the acquisition was requested
+   * for, and it is history: an update RECREATES the container, so the moment
+   * one has been applied that id names something no longer on the host. Asking
+   * about it produced a 404 on every Activity and Updates row for a container
+   * that was running perfectly well under a new id.
+   *
+   * `currentContainerId` is resolved server-side from the container NAME --
+   * HarborMaster's stable identity across a recreation -- in the same query
+   * that reads the acquisition, so this costs no extra request and cannot
+   * become a per-row lookup.
+   *
+   * Absent means no container of that name is present. The hook skips the
+   * request entirely for an undefined id, so the honest outcome is NO REQUEST
+   * rather than one that 404s. Falling back to `containerId` here would
+   * reintroduce exactly the defect.
    */
-  const dependencies = useContainerDependencies(acquisition.containerId);
+  const dependencies = useContainerDependencies(acquisition.currentContainerId);
 
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
@@ -93,6 +111,27 @@ export function RecreateContainerAction({
       <p className="text-xs text-content-muted">
         This image has not been downloaded and verified, so there is nothing to
         recreate the container onto.
+      </p>
+    );
+  }
+
+  /*
+   * No container of this name is on the host.
+   *
+   * Said plainly rather than left to the confirmation dialog. The recreation
+   * preflight re-resolves the container itself and would refuse, but an
+   * operator reading a history row deserves to know why the control is not
+   * offered -- and the alternative renders a button that cannot work beside a
+   * dependency panel that silently shows nothing, which reads as "nothing
+   * depends on this" when the truth is "there is nothing to ask about".
+   */
+  if (!acquisition.currentContainerId) {
+    return (
+      <p className="text-xs text-content-muted">
+        No container named{" "}
+        <span className="font-mono">{acquisition.containerName}</span> is on
+        this host, so there is nothing to recreate. This record is kept as
+        evidence of what was acquired.
       </p>
     );
   }

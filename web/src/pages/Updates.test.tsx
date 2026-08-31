@@ -56,6 +56,7 @@ function plan(overrides: Partial<ChangePlan> = {}): ChangePlan {
   return {
     planId: "plan_00000000000000000001",
     containerId: "c1",
+    currentContainerId: "c1",
     containerName: "redis",
     currentImage: "redis:7.2.4",
     proposedImage: "redis:7.2.5",
@@ -87,6 +88,7 @@ function decision(overrides: Partial<AutomationDecision> = {}): AutomationDecisi
   return {
     runId: "",
     containerId: "c1",
+    currentContainerId: "c1",
     containerName: "redis",
     verdict: "skip",
     reason: "noPolicy",
@@ -101,6 +103,7 @@ function acquisition(overrides: Partial<Acquisition> = {}): Acquisition {
     acquisitionId: "acq_00000000000000000001",
     planId: "plan_00000000000000000001",
     containerId: "c1",
+    currentContainerId: "c1",
     containerName: "redis",
     state: "succeeded",
     requestedAt: "2026-08-01T00:00:00Z",

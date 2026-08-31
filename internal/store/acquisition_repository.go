@@ -96,6 +96,14 @@ type AcquisitionFilter struct {
 
 const selectAcquisitionColumns = `
 	SELECT a.id, a.acquisition_id, a.plan_id, a.container_id, a.container_name,
+	       -- The id a container of this NAME has right now, or '' when none is
+	       -- present. Resolved in THIS statement rather than by a lookup per
+	       -- row: a page of fifty acquisitions must not become fifty queries,
+	       -- which is the amplification the attention repository exists to
+	       -- avoid and the same shape as the C2.2 preference summary.
+	       COALESCE((SELECT MAX(c.id) FROM containers c
+	                  WHERE c.name = a.container_name AND c.present = 1), '')
+	           AS current_container_id,
 	       a.target_registry, a.target_repository, a.target_digest, a.target_reference,
 	       a.target_os, a.target_arch, a.target_variant,
 	       a.state, a.failure, a.refusal, a.message,
@@ -893,6 +901,7 @@ func scanAcquisitions(rows *sql.Rows) ([]domain.Acquisition, error) {
 		if err := rows.Scan(
 			&acquisition.ID, &acquisition.AcquisitionID, &acquisition.PlanID,
 			&acquisition.ContainerID, &acquisition.ContainerName,
+			&acquisition.CurrentContainerID,
 			&acquisition.Target.Registry, &acquisition.Target.Repository,
 			&acquisition.Target.Digest, &acquisition.Target.Reference,
 			&acquisition.Target.Platform.OS, &acquisition.Target.Platform.Architecture,

@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // What a Docker administrator needs to know about a container without opening
 // it.
@@ -276,6 +279,37 @@ type ContainerEvidence struct {
 	Recommendation Recommendation
 	ProposedImage  string
 
+	// From image intelligence: the registry comparison itself.
+	//
+	// # Why this is here as well as the plan
+	//
+	// A ChangePlan is a proposed CHANGE. The planner deliberately writes none
+	// for a settled "nothing to do", because a plan recording a non-event is
+	// not a plan -- which left a container HarborMaster had successfully
+	// checked and found current indistinguishable from one it had never looked
+	// at. Both had no plan, and both reported "not checked".
+	//
+	// The evidence was never missing; it was in the wrong subsystem. The
+	// registry comparison lives on the image intelligence record, and that
+	// record knows both whether a lookup ever answered and what it found.
+	//
+	// CheckSettled is domain.ImageIntel.ComparisonSettled -- the SAME predicate
+	// the planner uses -- and it is the only thing that may license an
+	// up-to-date verdict without a plan. The zero value asserts nothing, so a
+	// deployment whose image intelligence has not run produces exactly the
+	// verdicts it produced before this existed.
+	CheckSettled bool
+	// CheckedUpdate is what the settled comparison found. Meaningless unless
+	// CheckSettled, and never read otherwise.
+	CheckedUpdate UpdateType
+	// CheckStatus is the state of the MOST RECENT attempt, which is a different
+	// question from whether one ever succeeded. Carried so a container whose
+	// last lookup failed can be presented as what it is -- a real earlier
+	// verdict that could not be reconfirmed -- rather than as fresh certainty.
+	CheckStatus CheckStatus
+	// LastSuccessAt is when the most recent lookup ANSWERED. Nil unless one has.
+	LastSuccessAt *time.Time
+
 	// LineageKnown distinguishes "we looked and there is nothing to follow"
 	// from "we have not looked".
 	LineageKnown      bool
@@ -354,6 +388,24 @@ type ContainerAttention struct {
 	Recommendation Recommendation `json:"recommendation,omitempty"`
 	ProposedImage  string         `json:"proposedImage,omitempty"`
 
+	// When the registry comparison behind this row last ANSWERED, and the
+	// state of the most recent attempt.
+	//
+	// Both absent unless a comparison has actually settled, so they can never
+	// be read as a claim that one has. Present together they let an interface
+	// distinguish the two states this model deliberately keeps apart:
+	//
+	//	checkStatus "ok"      the verdict was reconfirmed just now
+	//	checkStatus not "ok"  a real earlier verdict that could not be
+	//	                      reconfirmed -- true as of lastCheckedOkAt, and
+	//	                      not a claim about this moment
+	//
+	// HarborMaster preserves the earlier verdict rather than discarding it
+	// (Batch B1.1), so the honest presentation of the second is "up to date as
+	// of <time>", never bare certainty.
+	CheckStatus     CheckStatus `json:"checkStatus,omitempty"`
+	LastCheckedOkAt *time.Time  `json:"lastCheckedOkAt,omitempty"`
+
 	// Tracking is the reference update discovery follows, when there is one.
 	Tracking string `json:"tracking,omitempty"`
 	// TrackingKnown is false when HarborMaster has not yet established
@@ -418,6 +470,14 @@ func AssessContainer(evidence ContainerEvidence) ContainerAttention {
 		attention.DependencyState = evidence.DependencyState
 		attention.DependencyBlockedBy = evidence.DependencyBlockedBy
 	}
+	// Carried only when a comparison actually settled, for the same reason
+	// every other pair here is conditional: a timestamp on a row nothing was
+	// ever established about would be read as evidence that something was.
+	if evidence.CheckSettled {
+		attention.CheckStatus = evidence.CheckStatus
+		attention.LastCheckedOkAt = evidence.LastSuccessAt
+	}
+
 	// Carried only when an assessment exists. A zero UpdateType would
 	// serialise as the empty string anyway; being explicit here means a future
 	// caller that defaults it to "none" has to do so deliberately.
@@ -486,6 +546,56 @@ func assessState(evidence ContainerEvidence) AttentionState {
 		(evidence.DependencyState == DependencyBlocked ||
 			evidence.DependencyState == DependencyIneligible)
 
+	// A registry comparison that ANSWERED and found nothing newer.
+	//
+	// # Why this outranks the plan rather than filling a gap beside it
+	//
+	// The planner's own rule, in one line of planner.go:
+	//
+	//	if hasIntel && intel.Update == UpdateNone && intel.Status == CheckOK {
+	//		return ChangePlan{}, planSkipped
+	//	}
+	//
+	// A plan is a proposed CHANGE, so the planner writes NONE for a container
+	// whose image is current. That is correct, and it has two consequences the
+	// row has to survive.
+	//
+	// The first is the obvious one: a settled current container has no plan, so
+	// a model that reads only plans reports "not checked" for the single most
+	// common state an estate is in -- HarborMaster looked, confirmed the image
+	// was current, and then said it had not looked.
+	//
+	// The second is worse and is what set-and-forget runs into. Plans are
+	// written before the first registry check completes, when nothing is
+	// established and the honest verdict is `unknown` (B1.1). Once the check
+	// settles, the planner SKIPS the container forever -- so it never writes a
+	// superseding row, and the pre-check plan survives indefinitely. Reading
+	// the newest plan therefore returns "unknown" for a container HarborMaster
+	// has known to be current for weeks.
+	//
+	// So a settled `none` is not merely evidence the plan lacks; it is the
+	// state in which the planner declines to stand behind any plan at all. Any
+	// surviving row is one it would not write today, which is why this is
+	// checked BEFORE the plan rather than only in its absence.
+	//
+	// The bar stays POSITIVE EVIDENCE and nothing weaker. CheckSettled comes
+	// from ImageIntel.ComparisonSettled -- the same predicate the planner uses
+	// -- and is false unless a lookup actually answered, so a defaulted
+	// update_type can never reach here. That is the invariant Batches B1 and
+	// B1.1 established, and this branch is written to preserve it.
+	if evidence.CheckSettled && evidence.CheckedUpdate == UpdateNone {
+		// The same guard the plan's own UpdateNone branch carries: a container
+		// running an unattributable digest cannot be declared current, because
+		// "nothing newer" there means "nothing to compare against".
+		if evidence.LineageKnown && !evidence.Tracked {
+			return AttentionNotTracked
+		}
+		// And, as in that branch, a container with nothing to update is not
+		// usefully described as blocked: reporting the block would put a row on
+		// the attention list for an update nobody wanted.
+		return AttentionUpToDate
+	}
+
 	// Everything from here down is about the proposed image, so a container
 	// with no assessment cannot reach any of it.
 	if !evidence.PlanKnown {
@@ -496,6 +606,7 @@ func assessState(evidence ContainerEvidence) AttentionState {
 		if evidence.LineageKnown && !evidence.Tracked {
 			return AttentionNotTracked
 		}
+
 		if blockedByDependency {
 			return AttentionDependencyBlocked
 		}

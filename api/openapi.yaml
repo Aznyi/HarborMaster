@@ -8260,6 +8260,27 @@ components:
         recommendation:
           allOf: [{ $ref: "#/components/schemas/Recommendation" }]
           description: Absent when no assessment exists.
+        checkStatus:
+          allOf: [{ $ref: "#/components/schemas/CheckStatus" }]
+          description: |
+            The state of the most recent registry lookup for this container's
+            image.
+
+            Absent unless a comparison has actually settled, so it can never be
+            read as a claim that one has. When present and not `ok`, the row's
+            verdict came from an EARLIER successful comparison that the latest
+            attempt could not reconfirm -- true as of `lastCheckedOkAt`, and not
+            a claim about this moment.
+        lastCheckedOkAt:
+          type: string
+          format: date-time
+          description: |
+            When the most recent registry lookup for this image ANSWERED.
+
+            Absent unless one has. This is what makes an `upToDate` row
+            honest: "up to date, checked 8 minutes ago" is a different
+            statement from bare certainty, and after a failed re-check it is
+            the only one HarborMaster can support.
         proposedImage:
           type: string
           description: The reference the current assessment proposes, if any.
@@ -10190,6 +10211,13 @@ components:
 
         **No field here describes a container being changed**, because that
         operation does not exist.
+
+        **Two container ids, deliberately.** `containerId` is history and never
+        moves: it is the container this acquisition was requested for. An update
+        RECREATES the container, so once one has been applied that id names
+        something no longer on the host. `currentContainerId` is resolved at
+        read time from `containerName` -- HarborMaster's stable identity across
+        a recreation -- and is what any question about the host NOW must use.
       required:
         - acquisitionId
         - planId
@@ -10209,8 +10237,24 @@ components:
           description: |
             The change plan that approved this image. A plain reference: an
             audit record must survive its plan being pruned.
-        containerId: { type: string }
+        containerId:
+          type: string
+          description: |
+            The container this acquisition was requested for. **Historical and
+            immutable.** After an update recreates the container this names an
+            id that is no longer on the host, which is correct: it records what
+            happened. Do not use it to ask the host a question now.
         containerName: { type: string }
+        currentContainerId:
+          type: string
+          description: |
+            The id a container of `containerName` has on the host right now.
+
+            Absent when none is present -- the container was removed, renamed,
+            or never came back. A client must treat absence as "there is no
+            current container to ask about" and skip the request entirely,
+            rather than falling back to `containerId` and producing a 404 for a
+            container that was legitimately replaced.
         target: { $ref: "#/components/schemas/AcquisitionTarget" }
         state: { $ref: "#/components/schemas/AcquisitionState" }
         failure: { $ref: "#/components/schemas/AcquisitionFailure" }

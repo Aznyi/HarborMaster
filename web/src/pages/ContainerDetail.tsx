@@ -790,7 +790,7 @@ function HeadlineSection({
       <div className="flex flex-wrap items-center gap-2">
         <ContainerStateBadge state={overview.state} />
         <ContainerHealthBadge health={overview.health} />
-        <AttentionBadge state={attention.state} />
+        <AttentionBadge state={attention.state} checkStatus={attention.checkStatus} />
       </div>
 
       <p className="mt-3 text-sm">{ATTENTION_MEANINGS[attention.state] ?? ""}</p>

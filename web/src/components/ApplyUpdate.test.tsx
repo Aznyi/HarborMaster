@@ -31,6 +31,7 @@ function acquisition(overrides: Partial<Acquisition> = {}): Acquisition {
     acquisitionId: "acq-1",
     planId: "plan-1",
     containerId: "c1",
+    currentContainerId: "c1",
     containerName: "vaultwarden",
     state: "succeeded",
     requestedAt: "2026-08-27T10:00:00Z",

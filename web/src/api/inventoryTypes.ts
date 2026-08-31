@@ -11,6 +11,7 @@ import type { HealthComponent } from "./types";
 import type { UpdateType } from "./imageTypes";
 import type { Recommendation } from "./planTypes";
 import type { PolicySeverity } from "./policyTypes";
+import type { CheckStatus } from "./imageTypes";
 
 // ---------------------------------------------------------------- shared --
 
@@ -305,6 +306,24 @@ export interface ContainerAttention {
   updateType?: UpdateType;
   recommendation?: Recommendation;
   proposedImage?: string;
+  /**
+   * The state of the most recent registry lookup for this container's image,
+   * and when one last ANSWERED.
+   *
+   * Both absent unless a comparison has actually settled, so neither may be
+   * read as a claim that one has. Together they separate two states the model
+   * deliberately keeps apart:
+   *
+   *   checkStatus "ok"      the verdict was reconfirmed just now
+   *   checkStatus not "ok"  a real EARLIER verdict the latest attempt could
+   *                         not reconfirm — true as of `lastCheckedOkAt`, and
+   *                         not a claim about this moment
+   *
+   * HarborMaster preserves the earlier verdict rather than discarding it, so
+   * the honest rendering of the second is "up to date as of <time>".
+   */
+  checkStatus?: CheckStatus;
+  lastCheckedOkAt?: string;
   /** The tag update discovery follows, when there is one. */
   tracking?: string;
   /** False when HarborMaster has not yet established what this follows. */

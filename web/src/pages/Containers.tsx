@@ -512,7 +512,7 @@ function ContainerRow({ container }: { container: ContainerListRow }) {
       </td>
 
       <td className="px-4 py-3">
-        <AttentionBadge state={attention.state} />
+        <AttentionBadge state={attention.state} checkStatus={attention.checkStatus} />
         {attention.preserved ? (
           <p className="mt-1">
             <PreservedNote

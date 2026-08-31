@@ -5,6 +5,7 @@ import type {
   ContainerAttention,
   PreservedKind,
 } from "../api/inventoryTypes";
+import type { CheckStatus } from "../api/imageTypes";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
 
 /**
@@ -178,12 +179,45 @@ export function needsOperator(state: AttentionState): boolean {
  * anything: a verdict this build has never heard of must be visible as
  * something new, not silently painted as "up to date".
  */
-export function AttentionBadge({ state }: { state: AttentionState }) {
+export function AttentionBadge({
+  state,
+  /**
+   * The state of the most recent registry lookup, when a comparison has
+   * settled. Optional: every existing caller renders exactly what it did
+   * before, and only a caller that has the fact can qualify the verdict.
+   */
+  checkStatus,
+}: {
+  state: AttentionState;
+  checkStatus?: CheckStatus;
+}) {
+  /*
+   * "Up to date" after a re-check that did not answer.
+   *
+   * HarborMaster preserves the earlier successful comparison rather than
+   * discarding it — it is still the best knowledge available — so the verdict
+   * is correct. What it must not become is a claim about RIGHT NOW: the latest
+   * lookup failed, and the honest statement is that this was true when it was
+   * last confirmed.
+   *
+   * The badge stays green because nothing is wrong with the container; only
+   * the sentence changes.
+   */
+  const unconfirmed =
+    state === "upToDate" && checkStatus !== undefined && checkStatus !== "ok";
+
   return (
     <StatusBadge
       tone={ATTENTION_TONES[state] ?? "neutral"}
       label={ATTENTION_LABELS[state] ?? state}
-      title={ATTENTION_MEANINGS[state] ?? state}
+      title={
+        unconfirmed
+          ? "HarborMaster compared the running image against the tag it " +
+            "follows and found nothing newer. The most recent check did not " +
+            "answer, so this was true when it was last confirmed rather than " +
+            "a statement about right now."
+          : (ATTENTION_MEANINGS[state] ?? state)
+      }
     />
   );
 }

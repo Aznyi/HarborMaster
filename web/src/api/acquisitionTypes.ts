@@ -94,8 +94,24 @@ export interface AcquisitionTarget {
 export interface Acquisition {
   acquisitionId: string;
   planId: string;
+  /**
+   * The container this acquisition was requested for. HISTORICAL and
+   * immutable — after an update recreates the container this names an id that
+   * is no longer on the host, which is correct: it records what happened.
+   * Render it as evidence; never ask the host about it.
+   */
   containerId: string;
   containerName: string;
+  /**
+   * The id a container of `containerName` has on the host right now, resolved
+   * server-side. Absent when none is present.
+   *
+   * This is the id any CURRENT question uses. Absence means there is nothing to
+   * ask about, so the correct handling is to skip the request — never to fall
+   * back to `containerId`, which would 404 for a container that was
+   * legitimately replaced.
+   */
+  currentContainerId?: string;
 
   target: AcquisitionTarget;
   state: AcquisitionState;

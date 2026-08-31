@@ -22,7 +22,7 @@ import (
 // rollback-eligibility defect was exactly that shape and it is the precedent
 // here: a read-heavy page must not amplify.
 //
-// So this file runs a FIXED NUMBER OF QUERIES -- nine -- whatever the page
+// So this file runs a FIXED NUMBER OF QUERIES -- ten -- whatever the page
 // size. Each takes the page's identifiers as bound parameters and returns at
 // most one row per container. `TestAttentionCostDoesNotGrowWithPageSize` counts
 // them.
@@ -57,6 +57,19 @@ var ErrTooManyAttentionKeys = fmt.Errorf(
 type ContainerKey struct {
 	ID   string
 	Name string
+	// ImageRef is the reference the container DECLARED, exactly as the daemon
+	// reports it -- "nginx:1.27.0-alpine", not the canonical form.
+	//
+	// Carried because image intelligence is keyed by the CANONICAL reference
+	// and the two cannot be joined in SQL. Migration 0015 records what happens
+	// when somebody tries: `container_count` matched containers.image_ref
+	// against image_intel.reference, those never match, and every image
+	// reported zero containers affected. The mapping is a domain function, so
+	// it is applied here in Go rather than guessed at in a query.
+	//
+	// Empty is fine and means "no intelligence for this row", which asserts
+	// nothing.
+	ImageRef string
 }
 
 // Attention returns evidence for the given containers, keyed by container ID.
@@ -78,9 +91,28 @@ func (r *ContainerRepository) Attention(
 	ids := make([]any, 0, len(keys))
 	names := make([]any, 0, len(keys))
 	byName := make(map[string][]string, len(keys))
+	// Canonical image reference -> the rows running it. Many containers share
+	// one image, so this is a set rather than a list: the IN clause must not
+	// repeat a reference fifty times because fifty containers run it.
+	references := make([]any, 0, len(keys))
+	byReference := make(map[string][]string, len(keys))
 	for _, key := range keys {
 		evidence[key.ID] = domain.ContainerEvidence{}
 		ids = append(ids, key.ID)
+
+		// The one place raw becomes canonical. A reference NormalizeImageRef
+		// refuses has no intelligence record to find, which is the same state
+		// as having no record at all and is left as the zero value.
+		if key.ImageRef != "" {
+			if reference, err := domain.NormalizeImageRef(key.ImageRef); err == nil {
+				if _, seen := byReference[reference.Canonical]; !seen {
+					references = append(references, reference.Canonical)
+				}
+				byReference[reference.Canonical] = append(
+					byReference[reference.Canonical], key.ID)
+			}
+		}
+
 		if key.Name == "" {
 			continue
 		}
@@ -93,6 +125,15 @@ func (r *ContainerRepository) Attention(
 	// name-keyed fact belongs to whichever rows carry that name.
 	forName := func(name string, apply func(*domain.ContainerEvidence)) {
 		for _, id := range byName[name] {
+			row := evidence[id]
+			apply(&row)
+			evidence[id] = row
+		}
+	}
+	// Applied to every container running the image. One intelligence record
+	// answers for all of them, which is the whole reason this is one query.
+	forReference := func(reference string, apply func(*domain.ContainerEvidence)) {
+		for _, id := range byReference[reference] {
 			row := evidence[id]
 			apply(&row)
 			evidence[id] = row
@@ -117,6 +158,7 @@ func (r *ContainerRepository) Attention(
 		func() error { return r.gatherPreserved(ctx, names, forName) },
 		func() error { return r.gatherLastUpdate(ctx, names, forName) },
 		func() error { return r.gatherLastRollback(ctx, names, forName) },
+		func() error { return r.gatherImageIntel(ctx, references, forReference) },
 	} {
 		if err := gather(); err != nil {
 			return nil, err
@@ -169,6 +211,65 @@ func (r *ContainerRepository) gatherPlans(
 			row.UpdateType = domain.UpdateType(updateType)
 			row.Recommendation = domain.Recommendation(recommendation)
 			row.ProposedImage = proposed
+		})
+	}
+	return rows.Err()
+}
+
+// gatherImageIntel reads the registry comparison behind each row.
+//
+// # Why a list row needs this at all
+//
+// A ChangePlan means "HarborMaster is proposing a change". The planner writes
+// none when it compares an image and finds nothing newer, because a plan
+// recording a non-event is not a plan -- so the settled, successful, entirely
+// ordinary case left no trace in the one subsystem the row was reading, and
+// every current container reported "not checked".
+//
+// The evidence exists; it lives on the image intelligence record, which is
+// where the registry comparison happens. This reads it for the page in ONE
+// query keyed by canonical reference, so a hundred containers on one image cost
+// one row rather than a hundred lookups.
+//
+// It does not make anything actionable. UpdateNone and UpdateUnknown are both
+// refused by UpdateStrategy.Permits, so nothing here can cause an update; it
+// changes only what a row is allowed to SAY.
+func (r *ContainerRepository) gatherImageIntel(
+	ctx context.Context,
+	references []any,
+	forReference func(string, func(*domain.ContainerEvidence)),
+) error {
+	if len(references) == 0 {
+		return nil
+	}
+	// The shared column list and the shared scanner, not a third hand-written
+	// SELECT over this table. Two used to exist and they drifted -- see
+	// gatherIntel in plan_repository.go.
+	rows, err := r.db.QueryContext(ctx,
+		selectImageIntelColumns+`
+		WHERE i.reference IN (`+placeholders(len(references))+`)`, references...)
+	if err != nil {
+		return fmt.Errorf("read image intelligence: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	records, err := scanImageIntel(rows)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		forReference(record.Reference, func(row *domain.ContainerEvidence) {
+			// ComparisonSettled is the domain's own predicate, and the SAME one
+			// the planner applies. A row that has never been successfully
+			// compared sets nothing, so its zero value continues to assert
+			// nothing at all.
+			if !record.ComparisonSettled() {
+				return
+			}
+			row.CheckSettled = true
+			row.CheckedUpdate = record.ObservedUpdate()
+			row.CheckStatus = record.Status
+			row.LastSuccessAt = record.LastSuccessAt
 		})
 	}
 	return rows.Err()

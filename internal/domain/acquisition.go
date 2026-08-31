@@ -446,6 +446,28 @@ type Acquisition struct {
 	PlanID        string `json:"planId"`
 	ContainerID   string `json:"containerId"`
 	ContainerName string `json:"containerName"`
+	// CurrentContainerID is the id a container of that NAME has on the host
+	// right now, resolved at read time. Absent when none is present.
+	//
+	// # Why a record carries two container ids
+	//
+	// ContainerID is history and must never move: it is the container this
+	// acquisition was requested for, and rewriting it would destroy the record
+	// of what actually happened. But an update RECREATES the container, and the
+	// replacement has a different id -- so the moment an acquisition succeeds
+	// and is applied, ContainerID names something that no longer exists.
+	//
+	// Anything asking the host a question NOW needs the current id, and asking
+	// with the historical one produces a 404 for a container that is running
+	// perfectly well under a new id. The two are different questions and this
+	// record answers both rather than making a caller choose wrongly.
+	//
+	// Resolved from ContainerName, which is HarborMaster's stable identity
+	// across a recreation -- the same identity automation pauses, container
+	// preferences and image lineage are keyed by. Never persisted: it is a
+	// projection of the live inventory, and storing it would create a second
+	// copy of a fact that changes without this record being touched.
+	CurrentContainerID string `json:"currentContainerId,omitempty"`
 
 	Target AcquisitionTarget `json:"target"`
 

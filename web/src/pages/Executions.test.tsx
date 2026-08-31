@@ -113,6 +113,7 @@ function acquisition(overrides: Partial<Acquisition> = {}): Acquisition {
     acquisitionId: acquisitionID,
     planId: planID,
     containerId: containerID,
+    currentContainerId: containerID,
     containerName: "web",
     target: {
       registry: "docker.io",

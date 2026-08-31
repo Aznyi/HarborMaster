@@ -600,16 +600,17 @@ func (s *PlannerService) planOne(
 // places UpdateNone is -- UpdateType.Available() is false for both, and
 // UpdateStrategy.Permits refuses both -- so moving between them changes what an
 // operator is TOLD and never what may be DONE.
+//
+// # Where the rule now lives
+//
+// The two conditions above are domain.ImageIntel.ObservedUpdate, and this is a
+// thin call to it. C3A gave the container READ projection the same question to
+// answer -- "has this image actually been compared?" -- and a second copy of
+// the reasoning would have been a second thing to keep correct. Moving it to
+// the record it is about means the planner and the attention model cannot drift
+// apart on what counts as evidence.
 func observedUpdateType(intel domain.ImageIntel) domain.UpdateType {
-	// Never comparable again, so a stored verdict can never be refreshed.
-	if intel.Status == domain.CheckUnsupported {
-		return domain.UpdateUnknown
-	}
-	// Never compared at all, so a stored verdict is the column default.
-	if intel.LastSuccessAt == nil {
-		return domain.UpdateUnknown
-	}
-	return intel.Update
+	return intel.ObservedUpdate()
 }
 
 // lineageFor reads the lineage of every container in the batch, by name.

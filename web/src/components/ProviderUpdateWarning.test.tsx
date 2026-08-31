@@ -253,6 +253,7 @@ function acquisition(overrides: Partial<Acquisition> = {}): Acquisition {
   return {
     acquisitionId: "acq_0123456789abcdef0123",
     containerId: "c-gluetun",
+    currentContainerId: "c-gluetun",
     containerName: "gluetun",
     state: "succeeded",
     target: {

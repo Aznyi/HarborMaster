@@ -244,6 +244,55 @@ func (i ImageIntel) UpdateAvailable() bool {
 	return i.Update.Available()
 }
 
+// ComparisonSettled reports whether a registry lookup ever positively
+// ESTABLISHED this record's verdict.
+//
+// # The question this answers
+//
+// `Update` is a column with a default. Read on its own it cannot distinguish
+// "a comparison ran and found nothing newer" from "nothing has ever been
+// compared, and the default happens to say none". Those are opposite claims,
+// and only the first may ever be presented as up to date.
+//
+// Two facts settle it, and both are recorded on the row itself:
+//
+//   - An UNSUPPORTED reference is never queued, so it will never be compared
+//     again. Any verdict it carries -- from before a normalisation rule
+//     tightened around its reference -- is frozen with no possibility of
+//     refresh or contradiction, so it establishes nothing whatever its history.
+//   - LastSuccessAt is the most recent lookup that ANSWERED. Nil means no
+//     lookup ever has, so `Update` is the column default and nothing more.
+//
+// Deliberately says nothing about FRESHNESS. A record whose last attempt
+// failed still has a real earlier comparison, and Batch B1.1 established that
+// such a verdict is preserved rather than discarded -- it remains the best
+// knowledge available. Callers that need to know whether the latest attempt
+// succeeded read Status, and callers that need to say WHEN read LastSuccessAt.
+//
+// This is the single definition. internal/service's planner and the container
+// read projection both call it, so the two cannot disagree about whether a
+// container has been checked. Batches B1 and B1.1 pinned this reasoning; see
+// TestUpdateNoneRequiresPositiveEvidence.
+func (i ImageIntel) ComparisonSettled() bool {
+	if i.Status == CheckUnsupported {
+		return false
+	}
+	return i.LastSuccessAt != nil
+}
+
+// ObservedUpdate is the verdict a settled comparison established.
+//
+// UpdateUnknown whenever nothing did. Non-actionable in exactly the places
+// UpdateNone is -- UpdateType.Available() is false for both and
+// UpdateStrategy.Permits refuses both -- so the distinction changes what an
+// operator is TOLD and never what may be DONE.
+func (i ImageIntel) ObservedUpdate() UpdateType {
+	if !i.ComparisonSettled() {
+		return UpdateUnknown
+	}
+	return i.Update
+}
+
 // ImageUpdateEvent is one observed CHANGE for a reference.
 //
 // Append-only, and written only when something actually moved: a digest
