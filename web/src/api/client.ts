@@ -127,6 +127,7 @@ import type {
   UpdatePolicyListResponse,
   UpdatePolicyQuery,
   UpdatePolicyRequest,
+  SimpleUpdatesState,
   UpdatePolicyResult,
 } from "./automationTypes";
 import type {
@@ -1780,6 +1781,43 @@ export function archiveUpdatePolicy(
     options,
     "DELETE",
   );
+}
+
+/**
+ * GET /api/v1/automation/simple-updates
+ *
+ * The automatic-updates switch: one setting standing for one ordinary update
+ * policy. A read — it writes nothing.
+ */
+export function getSimpleUpdates(
+  options?: RequestOptions,
+): Promise<SimpleUpdatesState> {
+  return request<SimpleUpdatesState>("/automation/simple-updates", options);
+}
+
+/**
+ * POST /api/v1/automation/simple-updates — needs `automation:manage`.
+ *
+ * Writes ONE policy row. No container is touched by this call; the next
+ * scheduler pass reads the policy and every gate between it and a running
+ * container is unchanged.
+ */
+export function enableSimpleUpdates(
+  options?: RequestOptions,
+): Promise<UpdatePolicyResult> {
+  return request<UpdatePolicyResult>("/automation/simple-updates", options, "POST");
+}
+
+/**
+ * DELETE /api/v1/automation/simple-updates — needs `automation:manage`.
+ *
+ * Disables the managed policy and nothing else. No policy an operator wrote is
+ * read, edited or withdrawn, and no history is removed.
+ */
+export function disableSimpleUpdates(
+  options?: RequestOptions,
+): Promise<UpdatePolicyResult> {
+  return request<UpdatePolicyResult>("/automation/simple-updates", options, "DELETE");
 }
 
 /** GET /api/v1/automation */

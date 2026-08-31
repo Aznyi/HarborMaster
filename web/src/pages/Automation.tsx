@@ -18,6 +18,8 @@ import {
   SelfUpdateNotice,
 } from "../components/AutomationBadges";
 import { AutomationOnboarding } from "../components/AutomationOnboarding";
+import { SimpleUpdatesPanel } from "../components/SimpleUpdatesPanel";
+import { enableSimpleUpdates, disableSimpleUpdates } from "../api/client";
 import type { FirstRunFacts } from "../api/firstRun";
 import { describeFirstRun, firstRunExplanation } from "../api/firstRun";
 import type { HealthReport } from "../api/types";
@@ -35,6 +37,7 @@ import {
   useAutomationPauses,
   useAutomationRuns,
   useAutomationStatus,
+  useSimpleUpdates,
   useAutomationUpcoming,
   useUpdatePolicies,
   useRunAutomationPass,
@@ -93,6 +96,33 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
   const session = useSession();
   const engine = status.data?.status;
   const mayManage = Boolean(session.user?.permissions.includes("automation:manage"));
+
+  // The automatic-updates switch. Its own request state, because a failure to
+  // flip it must be reported on the panel that owns it rather than as a page
+  // error that says nothing about which control failed.
+  const simple = useSimpleUpdates();
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+
+  const flipSimpleUpdates = async (on: boolean) => {
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      await (on ? enableSimpleUpdates() : disableSimpleUpdates());
+      // Re-read rather than assume. The server owns the resulting policy, and
+      // the panel describes the EFFECTIVE behaviour from it.
+      simple.refresh();
+      status.refresh();
+    } catch (error) {
+      setSwitchError(
+        error instanceof Error
+          ? error.message
+          : "The automatic updates setting could not be changed.",
+      );
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   // Every fact below comes from a server response. Nothing here decides
   // whether a container may be updated; see web/src/api/firstRun.ts.
@@ -164,6 +194,22 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
         safety warning -- which is NOT shortened, because the thing it warns
         about has not changed.
       */}
+      {/*
+        The switch comes FIRST, because for most homelab operators it is the
+        whole page: turn it on and stop reading. Everything below is the
+        engine's own reporting, which matters once something has happened.
+      */}
+      {simple.data ? (
+        <SimpleUpdatesPanel
+          state={simple.data}
+          mayManage={mayManage}
+          busy={switching}
+          error={switchError}
+          onEnable={() => void flipSimpleUpdates(true)}
+          onDisable={() => void flipSimpleUpdates(false)}
+        />
+      ) : null}
+
       <AutomationSummary state={status} note={settledNote}>
         <AutomationWarningNotice enabled={Boolean(engine?.enabled)} />
       </AutomationSummary>

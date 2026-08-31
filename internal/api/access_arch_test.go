@@ -163,6 +163,8 @@ var auditedElsewhere = map[string]string{
 	APIPrefix + "/automation/approve":   "AutomationService.Approve records the release, and the refusal when the plan moved on",
 	APIPrefix + "/automation/pause":     "AutomationService.PauseContainer records the pause",
 	APIPrefix + "/automation/resume":    "AutomationService.Resume records who cleared it",
+	APIPrefix + "/automation/simple-updates": "UpdatePolicyService.EnableSimpleUpdates and DisableSimpleUpdates record " +
+		"the switch, and what the managed policy covers, through the same recorder every policy write uses",
 
 	APIPrefix + "/plan-approvals/{id}": "PlanApprovalService records the approval and the withdrawal, " +
 		"and the refusal when the plan is superseded or does not ask for review",

@@ -257,6 +257,43 @@ func (f *fakeUpdatePolicies) List(
 	return f.items, len(f.items), nil
 }
 
+// The automatic-updates switch. Recorded like every other write so a test can
+// assert that reading the switch mutates nothing.
+func (f *fakeUpdatePolicies) SimpleUpdates(_ context.Context) (service.SimpleUpdatesState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.items {
+		if domain.IsSimpleUpdatesPolicy(p.PolicyID) {
+			return service.SimpleUpdatesState{
+				Enabled: p.Enabled && !p.Archived, Configured: true, Policy: &p,
+			}, nil
+		}
+	}
+	return service.SimpleUpdatesState{}, nil
+}
+
+func (f *fakeUpdatePolicies) EnableSimpleUpdates(
+	_ context.Context, _ service.Actor,
+) (service.UpdatePolicyResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	policy := domain.SimpleUpdatesPolicy()
+	f.created = append(f.created, policy)
+	return service.UpdatePolicyResult{Policy: policy}, nil
+}
+
+func (f *fakeUpdatePolicies) DisableSimpleUpdates(
+	_ context.Context, _ service.Actor,
+) (service.UpdatePolicyResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	policy := domain.SimpleUpdatesPolicy()
+	policy.Enabled = false
+	disabled := false
+	f.updated = append(f.updated, store.UpdatePolicyChange{Enabled: &disabled})
+	return service.UpdatePolicyResult{Policy: policy}, nil
+}
+
 func (f *fakeUpdatePolicies) writes() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

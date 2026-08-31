@@ -77,6 +77,14 @@ type UpdatePolicyService interface {
 	Archive(ctx context.Context, policyID string, actor service.Actor) error
 	Get(ctx context.Context, policyID string) (service.UpdatePolicyResult, error)
 	List(ctx context.Context, filter store.UpdatePolicyFilter) ([]domain.UpdatePolicy, int, error)
+
+	// The automatic-updates switch. Three operations over the ONE managed
+	// policy, on this interface rather than a new one because the switch is an
+	// update policy and nothing else -- giving it a separate capability would
+	// imply it could reach something the methods above cannot.
+	SimpleUpdates(ctx context.Context) (service.SimpleUpdatesState, error)
+	EnableSimpleUpdates(ctx context.Context, actor service.Actor) (service.UpdatePolicyResult, error)
+	DisableSimpleUpdates(ctx context.Context, actor service.Actor) (service.UpdatePolicyResult, error)
 }
 
 // automationUnavailable writes the disabled response, and reports whether it

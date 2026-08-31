@@ -60,6 +60,7 @@ var routedPaths = []string{
 	APIPrefix + "/automation/approve",
 	APIPrefix + "/automation/pause",
 	APIPrefix + "/automation/paused",
+	APIPrefix + "/automation/simple-updates",
 	APIPrefix + "/automation/resume",
 	APIPrefix + "/automation/run",
 	APIPrefix + "/automation/runs",

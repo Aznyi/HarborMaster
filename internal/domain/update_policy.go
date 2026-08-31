@@ -43,12 +43,24 @@ const UpdatePolicyIDPrefix = "upd_"
 const UpdatePolicyIDHexLength = 20
 
 // NewUpdatePolicyID generates a policy identifier.
+//
+// Never returns SimpleUpdatesPolicyID. That value is RESERVED for the policy
+// the automatic-updates switch manages, and ownership of it is what lets the
+// switch withdraw its own rule without touching anybody else's. Drawing it by
+// chance is a 2^-80 event, which is to say it will not happen -- but the loop
+// makes the reservation structural, and a structural guarantee is the kind that
+// survives somebody later shortening the id or swapping the entropy source.
 func NewUpdatePolicyID() string {
-	var raw [UpdatePolicyIDHexLength / 2]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		panic("update policy id: " + err.Error())
+	for {
+		var raw [UpdatePolicyIDHexLength / 2]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			panic("update policy id: " + err.Error())
+		}
+		id := UpdatePolicyIDPrefix + hex.EncodeToString(raw[:])
+		if id != SimpleUpdatesPolicyID {
+			return id
+		}
 	}
-	return UpdatePolicyIDPrefix + hex.EncodeToString(raw[:])
 }
 
 // ValidUpdatePolicyID reports whether id has the generated shape.

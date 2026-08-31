@@ -7,6 +7,7 @@ import {
   createUpdatePolicy,
   getAutomationRun,
   getAutomationStatus,
+  getSimpleUpdates,
   getAutomationUpcoming,
   listAutomationPauses,
   listAutomationRuns,
@@ -17,6 +18,7 @@ import {
   updateUpdatePolicy,
 } from "../api/client";
 import type {
+  SimpleUpdatesState,
   AutomationDecision,
   AutomationApprovalListResponse,
   AutomationPauseListResponse,
@@ -166,6 +168,21 @@ export function useAutomationPauses(
 }
 
 /** The automation rules. */
+/**
+ * The automatic-updates switch.
+ *
+ * A plain read. Not polled: the switch changes only when somebody flips it, and
+ * this page already polls the engine's status for the things that move on their
+ * own.
+ */
+export function useSimpleUpdates(): ResourceState<SimpleUpdatesState> {
+  const fetcher = useCallback(
+    ({ signal }: { signal: AbortSignal }) => getSimpleUpdates({ signal }),
+    [],
+  );
+  return useApiResource<SimpleUpdatesState>(fetcher, { key: "simple-updates" });
+}
+
 export function useUpdatePolicies(
   query: UpdatePolicyQuery,
 ): ResourceState<UpdatePolicyListResponse> {

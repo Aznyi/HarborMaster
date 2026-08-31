@@ -5055,6 +5055,116 @@ paths:
         "503":
           $ref: "#/components/responses/AutomationUnavailable"
 
+  /api/v1/automation/simple-updates:
+    get:
+      tags: [Automation]
+      summary: Whether automatic updates are on
+      operationId: getSimpleUpdates
+      description: |
+        The automatic-updates switch: one setting that stands for one ordinary
+        update policy.
+
+        It exists so a homelab operator can get "keep my containers updated"
+        without first learning what a selector, a priority, a strategy ceiling
+        and a recommendation floor are. It is a facade, not a second engine —
+        turning it on writes a single `UpdatePolicy` through the same service,
+        the same validation and the same repository a hand-written policy goes
+        through, and from that moment nothing in the scheduler, the planner, the
+        acquisition service or the execution service can tell the difference.
+
+        **Precedence.** The managed policy is built to LOSE. It carries the
+        minimum priority, the broadest scope, and the largest possible policy id,
+        which are the three keys `SelectUpdatePolicy` orders on — so any policy
+        an operator wrote outranks it for every container that policy governs.
+        Turning the switch on cannot reinterpret an existing rule. `overriddenBy`
+        reports the policies that take precedence, so an operator can see why the
+        switch appears inert for some containers rather than guess.
+
+        **`engineEnabled` is not the same thing as `enabled`.** The first says
+        this deployment can run automation at all; the second says the switch is
+        on. A deployment with the engine off cannot turn the switch on, and the
+        response names the environment variable that changes that.
+      responses:
+        "200":
+          description: The switch's state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SimpleUpdatesState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+    post:
+      tags: [Automation]
+      summary: Turn automatic updates on
+      operationId: enableSimpleUpdates
+      description: |
+        Creates the managed policy, or re-enables it if the switch has been on
+        before. The compiled settings are rewritten on every enable, so an
+        installation that turns the switch on after an upgrade gets the current
+        recommended behaviour rather than whatever it was the first time.
+
+        **No container is changed by this call.** It writes one policy row. The
+        next scheduler pass reads it, and every gate between that pass and a
+        running container is unchanged: the planner still decides whether a
+        change exists, the recommendation floor still holds review-required
+        changes back, `io.harbormaster.update.enabled=false` still opts a
+        container out, pauses still stop it, dependencies still order it, the
+        acquisition and execution preflights still re-verify against the live
+        host, and HarborMaster still refuses to update itself.
+
+        Returns the stored policy together with its warnings, which are the
+        honest description of what the operator has just switched on.
+
+        Refused with 503 when the automation engine is not enabled for this
+        deployment: writing a policy nothing would ever read, and reporting that
+        as success, is the one failure this endpoint exists to avoid.
+      responses:
+        "200":
+          description: Automatic updates are on.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            The managed policy was archived by hand through the advanced policy
+            surface and cannot be reinstated. Archiving is how a policy becomes
+            history, and the repository refuses to edit an archived row.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+    delete:
+      tags: [Automation]
+      summary: Turn automatic updates off
+      operationId: disableSimpleUpdates
+      description: |
+        Disables the managed policy and NOTHING else.
+
+        No policy an operator wrote is read, edited, archived or deleted. No
+        container is touched. No decision, pause, approval or history row is
+        removed. The managed policy itself is disabled rather than archived, so
+        the switch can be turned back on and the records that reference it stay
+        intact.
+
+        Turning off a switch that was never on succeeds: off is the state the
+        caller asked for and the state they have.
+
+        This is not the same as turning the automation engine off, which is a
+        deployment setting and cannot be changed through the API.
+      responses:
+        "200":
+          description: Automatic updates are off.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
   /api/v1/automation/paused:
     get:
       tags: [Automation]
@@ -11541,6 +11651,59 @@ components:
         from its own records. A label can only ever move a container OUT of this
         scope, never into it.
       enum: [selector, allEligible]
+
+    SimpleUpdatesState:
+      type: object
+      required: [enabled, configured, engineEnabled, engineVariable]
+      properties:
+        enabled:
+          type: boolean
+          description: The managed policy exists and is in force.
+        configured:
+          type: boolean
+          description: |
+            The managed policy exists at all, in force or not. Distinguishes
+            "never turned on" from "turned off" — different sentences on screen.
+        policy:
+          allOf:
+            - $ref: "#/components/schemas/UpdatePolicy"
+          description: |
+            The managed rule, when there is one, so a client can describe the
+            EFFECTIVE behaviour from the stored values rather than restating it
+            from a constant that might drift.
+        warnings:
+          type: array
+          items: { type: string }
+          description: |
+            The managed policy's own warnings. These are the honest disclosure
+            text for a confirmation dialog, generated by the same code that
+            warns about a hand-written policy.
+        overriddenBy:
+          type: array
+          description: |
+            Active policies that outrank the managed one. A narrower or
+            higher-priority rule winning is the designed behaviour; this reports
+            it so an operator is not left wondering why the switch seems inert.
+          items:
+            type: object
+            required: [policyId, name, scope, priority, mode]
+            properties:
+              policyId: { type: string }
+              name: { type: string }
+              scope: { $ref: "#/components/schemas/UpdateScope" }
+              priority: { type: integer }
+              mode: { $ref: "#/components/schemas/AutomationMode" }
+        engineEnabled:
+          type: boolean
+          description: |
+            Whether this deployment can run automation at all. When false the
+            switch cannot be turned on however it is set, and a client must say
+            so rather than render a control that does nothing.
+        engineVariable:
+          type: string
+          description: |
+            The environment variable that enables the engine, so a client can be
+            specific without hardcoding the name.
 
     UpdateSelector:
       type: object

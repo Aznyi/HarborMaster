@@ -355,6 +355,21 @@ func (s *Server) routeTable() []route {
 		{http.MethodDelete, p + "/update-policies/{id}", requires(domain.PermAutomationManage).policyBudget(), s.handleUpdatePolicyDelete, ""},
 		{"", p + "/update-policies/{id}", requires(domain.PermAutomationRead), nil, "GET, HEAD, PATCH, DELETE"},
 
+		// ---- the automatic-updates switch ------------------------------------
+		//
+		// A facade over ONE update policy, not a second automation surface. The
+		// permissions are therefore the policy permissions exactly: reading the
+		// switch is `automation:read`, flipping it is `automation:manage`. A
+		// viewer can see whether automatic updates are on and cannot change it.
+		//
+		// POST turns it on and DELETE turns it off, so neither verb can be
+		// mistaken for the other by a client that got the body wrong. Both carry
+		// the policy write budget, because both write a policy row.
+		{http.MethodGet, p + "/automation/simple-updates", requires(domain.PermAutomationRead), s.handleSimpleUpdates, ""},
+		{http.MethodPost, p + "/automation/simple-updates", requires(domain.PermAutomationManage).policyBudget(), s.handleSimpleUpdatesEnable, ""},
+		{http.MethodDelete, p + "/automation/simple-updates", requires(domain.PermAutomationManage).policyBudget(), s.handleSimpleUpdatesDisable, ""},
+		{"", p + "/automation/simple-updates", requires(domain.PermAutomationRead), nil, "GET, HEAD, POST, DELETE"},
+
 		// ---- the automation engine -------------------------------------------
 		//
 		// Running a pass is `automation:run`, an OPERATOR permission: a manual
