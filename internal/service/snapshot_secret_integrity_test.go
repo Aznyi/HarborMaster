@@ -35,6 +35,10 @@ func integrityMasker(t *testing.T, keyHex string) *domain.Masker {
 // what a secret scanner is FOR, and it cannot tell a test fixture from a real
 // credential -- nor should it try. Composing them keeps the scanner honest and
 // the values identical in every way the tests care about. See validKeyHex.
+//
+// The literals this replaced are still in history, where they are suppressed
+// by exact fingerprint in .gitleaksignore -- together with the reasoning for
+// why neither could ever have authenticated anywhere.
 var (
 	integrityKeyA = strings.Repeat("1a", secretKeyBytes)
 	integrityKeyB = strings.Repeat("2b", secretKeyBytes)

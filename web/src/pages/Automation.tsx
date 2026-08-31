@@ -18,6 +18,7 @@ import {
   SelfUpdateNotice,
 } from "../components/AutomationBadges";
 import { AutomationOnboarding } from "../components/AutomationOnboarding";
+import { ContainerBehaviorOverrides } from "../components/ContainerBehaviorOverrides";
 import { SimpleUpdatesPanel } from "../components/SimpleUpdatesPanel";
 import { enableSimpleUpdates, disableSimpleUpdates } from "../api/client";
 import type { FirstRunFacts } from "../api/firstRun";
@@ -37,6 +38,7 @@ import {
   useAutomationPauses,
   useAutomationRuns,
   useAutomationStatus,
+  useContainerBehaviorSummary,
   useSimpleUpdates,
   useAutomationUpcoming,
   useUpdatePolicies,
@@ -92,6 +94,10 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
   const pauses = useAutomationPauses();
   const dependencies = useDependencies();
   const plans = usePlans({ page: 1, pageSize: 1 });
+  // ONE more request, whatever the number of overrides. The alternative --
+  // listing preferences and then asking about each container -- is the request
+  // explosion this section exists without.
+  const containerBehaviors = useContainerBehaviorSummary();
 
   const session = useSession();
   const engine = status.data?.status;
@@ -247,6 +253,15 @@ export function Automation({ health }: { health: ResourceState<HealthReport> }) 
         policies={policies.data?.items ?? []}
         mayManage={mayManage}
       />
+
+      {/*
+        The other half of "what is configured". A policy describes the estate
+        only until a container is given its own behaviour, and until now nothing
+        on this page said which containers had been. READ-ONLY: every row links
+        to the container's page, which stays the one place a behaviour is
+        chosen.
+      */}
+      <ContainerBehaviorOverrides state={containerBehaviors} />
 
       {/* Held containers, using the paused page's own confirmed resume rather
           than a second implementation of it. */}

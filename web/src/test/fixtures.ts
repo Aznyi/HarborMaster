@@ -13,6 +13,7 @@ import type {
   ContainerDetail,
   ContainerAttention,
   ContainerListRow,
+  ContainerBehaviorSummary,
   ContainerSummary,
   FilterOptions,
   ImageUsage,
@@ -214,6 +215,26 @@ export function containerPage(
       hasNext: totalItems > 25,
       hasPrevious: false,
     },
+  };
+}
+
+/**
+ * The saved-behaviour summary an estate with no overrides returns.
+ *
+ * Every field the schema declares `required`, including a count key for EVERY
+ * behaviour. The server sends real zeros rather than omitting keys, so a
+ * fixture that omitted them would let a page pass here and read `undefined` in
+ * production.
+ */
+export function emptyBehaviorSummary(
+  overrides: Partial<ContainerBehaviorSummary> = {},
+): ContainerBehaviorSummary {
+  return {
+    items: [],
+    counts: { automatic: 0, reviewFirst: 0, monitorOnly: 0 },
+    total: 0,
+    stale: 0,
+    ...overrides,
   };
 }
 
@@ -505,6 +526,7 @@ export interface ApiStubOptions {
   inventory?: InventoryStatus | Error | HttpFailure;
   containers?: ListResponse<ContainerSummary> | Error;
   detail?: ContainerDetail | Error;
+  containerBehaviors?: ContainerBehaviorSummary | Error;
   raw?: RawInspection | Error;
   images?: ListResponse<ImageUsage> | Error;
   filters?: FilterOptions;
@@ -764,6 +786,16 @@ export function stubApi(options: ApiStubOptions = {}): RecordedRequest[] {
       }
       if (url.includes("/raw")) {
         return respond(options.raw, rawInspection);
+      }
+      /*
+        The saved-behaviour summary, BEFORE the "/containers/" detail branch.
+
+        "/containers/update-behaviors" contains "/containers/", so the detail
+        branch first would answer a summary request with a ContainerDetail --
+        exactly the class of lie C2.1 removed from this file.
+      */
+      if (url.includes("/containers/update-behaviors")) {
+        return respond(options.containerBehaviors, emptyBehaviorSummary());
       }
       if (url.includes("/containers/")) {
         return respond(options.detail, containerDetail());

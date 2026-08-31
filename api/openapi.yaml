@@ -5055,6 +5055,51 @@ paths:
         "503":
           $ref: "#/components/responses/AutomationUnavailable"
 
+  /api/v1/containers/update-behaviors:
+    get:
+      tags: [Containers]
+      summary: Which containers carry a saved update behaviour
+      operationId: listContainerUpdateBehaviors
+      description: |
+        Every container an operator has given an explicit update behaviour, so
+        the automation workspace can say which containers deviate from their
+        policy without asking about each one.
+
+        **This is a summary of what was SAVED, not of what will happen.** The
+        two differ: a preference may only make automation safer, so a policy can
+        still hold a container this lists as `automatic`. The effective
+        behaviour is deliberately absent — it is a per-container engine
+        evaluation, and computing it for every row would turn one page load into
+        one estate evaluation per preference. Ask
+        `GET /api/v1/containers/{id}/update-behavior` for the container whose
+        real outcome is in question.
+
+        **A container with no saved behaviour is not listed.** Absence from this
+        list means the container follows whichever update policy governs it,
+        which is the normal state and not a finding.
+
+        **Stale entries.** A preference is stored against the container NAME and
+        outlives the container's id, so a preference remains after its container
+        is removed or renamed. Those rows are reported in `stale` and appear in
+        `items` with `present: false`. They are never counted in `counts`,
+        because they describe nothing currently running, and they are never
+        deleted here: this endpoint changes no state, and a name that comes back
+        should find its setting waiting.
+
+        Requires `inventory:read` — the same permission as reading one
+        container's behaviour. Seeing which containers deviate is not a
+        management action.
+      responses:
+        "200":
+          description: The saved behaviours.
+          content:
+            application/json:
+              schema:
+                { $ref: "#/components/schemas/ContainerBehaviorSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
   /api/v1/containers/{id}/update-behavior:
     parameters:
       - name: id
@@ -11792,6 +11837,56 @@ components:
         `io.harbormaster.enabled=false` where the container is defined, which
         outranks everything here.
       enum: [automatic, reviewFirst, monitorOnly]
+
+    ContainerBehaviorSummary:
+      type: object
+      description: |
+        Which containers carry a saved update behaviour.
+
+        Every field is always present. `counts` carries a key for EVERY
+        behaviour, including the ones nobody chose, so a client reads a real
+        zero rather than an absence — a missing key and a genuine zero would
+        otherwise be indistinguishable.
+      required: [items, counts, total, stale]
+      properties:
+        items:
+          type: array
+          description: One entry per saved behaviour, ordered by container name.
+            Includes stale entries, marked `present: false`.
+          items: { $ref: "#/components/schemas/ContainerBehaviorItem" }
+        counts:
+          type: object
+          description: How many PRESENT containers carry each behaviour. Always
+            carries every key in `UpdateBehavior`, zero included.
+          additionalProperties: { type: integer, minimum: 0 }
+        total:
+          type: integer
+          minimum: 0
+          description: Present containers with a saved behaviour. Equals the sum
+            of `counts`, and excludes stale entries.
+        stale:
+          type: integer
+          minimum: 0
+          description: Saved behaviours whose container is not currently present.
+            Kept, not deleted — the name may come back.
+
+    ContainerBehaviorItem:
+      type: object
+      required: [containerName, behavior, present]
+      properties:
+        containerName:
+          type: string
+          description: The name the preference is stored against.
+        behavior: { $ref: "#/components/schemas/UpdateBehavior" }
+        present:
+          type: boolean
+          description: Whether a container with this name is currently present.
+        containerId:
+          type: string
+          description: The CURRENT container's id, when one is present. Omitted
+            otherwise. Re-resolved from the name rather than read from the
+            stored row, whose id is stale the moment an update recreates the
+            container.
 
     ContainerUpdateBehavior:
       type: object

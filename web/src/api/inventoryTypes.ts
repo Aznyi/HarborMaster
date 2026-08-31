@@ -265,6 +265,40 @@ export interface ContainerUpdateBehavior {
   };
 }
 
+/**
+ * Which containers carry a saved update behaviour.
+ *
+ * A summary of what was SAVED, not of what will happen. The two differ — a
+ * preference may only make automation safer, so a policy can still hold a
+ * container listed here as `automatic` — and the effective behaviour is
+ * deliberately absent, because computing it per container turns one page load
+ * into one estate evaluation per preference.
+ *
+ * Every field is always sent. `counts` carries a key for every behaviour,
+ * including the ones nobody chose, so a client renders a real zero rather than
+ * an absence.
+ */
+export interface ContainerBehaviorSummary {
+  /** One entry per saved behaviour, by container name. Stale entries included. */
+  items: ContainerBehaviorItem[];
+  /** Present containers per behaviour. Every behaviour has a key. */
+  counts: Record<UpdateBehavior, number>;
+  /** Present containers with a saved behaviour. The sum of `counts`. */
+  total: number;
+  /** Saved behaviours whose container is not here. Kept, never deleted. */
+  stale: number;
+}
+
+/** One saved behaviour, resolved against the live inventory. */
+export interface ContainerBehaviorItem {
+  containerName: string;
+  behavior: UpdateBehavior;
+  /** Whether a container of this name is currently present. */
+  present: boolean;
+  /** The CURRENT container's id, when one is present. Never the stored one. */
+  containerId?: string;
+}
+
 export interface ContainerAttention {
   state: AttentionState;
   /** Absent when no assessment exists. Never defaulted to "none". */

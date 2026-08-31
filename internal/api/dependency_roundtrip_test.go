@@ -114,7 +114,20 @@ func (f *fakeDependencies) CreateOperatorDependency(
 	created := f.created
 	if created.DependencyID == "" {
 		created = domain.WorkloadDependency{
-			DependencyID: "dep_0123456789abcdef0123",
+			// The fixture id every case in this file uses: the prefix plus
+			// twenty hex characters, well-formed and accepted by the validator.
+			//
+			// A repeated character rather than a varied run, on purpose.
+			// Nothing here tests entropy -- what the id CONTAINS is never
+			// asserted, only that requests carrying it are answered
+			// identically. One probe below appends an SQL injection payload to
+			// this id, and the probe beside it names /etc/passwd; a varied hex
+			// run in that position is a secret-scanner keyword and a
+			// high-entropy token sitting next to each other, which is the exact
+			// shape such a scanner exists to catch. Keeping the id dull keeps
+			// the scanner useful and changes nothing these tests prove.
+			// See .gitleaksignore for the finding this file used to produce.
+			DependencyID: "dep_aaaaaaaaaaaaaaaaaaaa",
 			Dependent:    dependent,
 			Dependency:   dependency,
 			Source:       domain.DependencyOperator,
@@ -394,7 +407,7 @@ func TestDependencyWritesAreRefusedBelowAdministrator(t *testing.T) {
 		}{
 			{http.MethodPost, APIPrefix + "/dependencies",
 				`{"dependent":"api","dependency":"postgres"}`},
-			{http.MethodDelete, APIPrefix + "/dependencies/dep_0123456789abcdef0123", ""},
+			{http.MethodDelete, APIPrefix + "/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", ""},
 		} {
 			deps := populatedDependencies()
 			srv, _ := dependencyServer(role, deps)
@@ -426,7 +439,7 @@ func TestDependencyWritesRefuseAnonymousCallers(t *testing.T) {
 		t.Errorf("anonymous POST = %d, want 401", rec.Code)
 	}
 	rec = send(srv, anonymous(request(http.MethodDelete,
-		APIPrefix+"/dependencies/dep_0123456789abcdef0123", "")))
+		APIPrefix+"/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", "")))
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("anonymous DELETE = %d, want 401", rec.Code)
 	}
@@ -442,7 +455,7 @@ func TestDependencyWritesRequireTheCSRFHeader(t *testing.T) {
 	for _, call := range []struct{ method, target, body string }{
 		{http.MethodPost, APIPrefix + "/dependencies",
 			`{"dependent":"api","dependency":"postgres"}`},
-		{http.MethodDelete, APIPrefix + "/dependencies/dep_0123456789abcdef0123", ""},
+		{http.MethodDelete, APIPrefix + "/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", ""},
 	} {
 		deps := populatedDependencies()
 		srv, auth, _ := asRole(Options{
@@ -597,11 +610,11 @@ func TestDependencyDeleteSucceedsForAnAdministrator(t *testing.T) {
 	srv, audit := dependencyServer(domain.RoleAdministrator, deps)
 
 	rec := send(srv, authed(request(http.MethodDelete,
-		APIPrefix+"/dependencies/dep_0123456789abcdef0123", "")))
+		APIPrefix+"/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", "")))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE = %d (%s), want 204", rec.Code, rec.Body.String())
 	}
-	if deps.lastDelete != "dep_0123456789abcdef0123" {
+	if deps.lastDelete != "dep_aaaaaaaaaaaaaaaaaaaa" {
 		t.Errorf("the service received %q", deps.lastDelete)
 	}
 	if rec.Body.Len() != 0 {
@@ -639,7 +652,7 @@ func TestDependencyDeleteAnswersNotFoundIdentically(t *testing.T) {
 		"not-an-id",
 		"dep_",
 		"..%2F..%2Fetc%2Fpasswd",
-		"dep_0123456789abcdef0123'%20OR%20'1'='1",
+		"dep_aaaaaaaaaaaaaaaaaaaa'%20OR%20'1'='1",
 		"%3Cscript%3Ealert(1)%3C%2Fscript%3E",
 		strings.Repeat("a", 400),
 	} {
@@ -711,7 +724,7 @@ func TestDependencyResponsesLeakNoStorageDetail(t *testing.T) {
 		{http.MethodGet, APIPrefix + "/dependencies/graph", ""},
 		{http.MethodGet, APIPrefix + "/dependencies/container/abcdef0123456789", ""},
 		{http.MethodPost, APIPrefix + "/dependencies", `{"dependent":"api","dependency":"postgres"}`},
-		{http.MethodDelete, APIPrefix + "/dependencies/dep_0123456789abcdef0123", ""},
+		{http.MethodDelete, APIPrefix + "/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", ""},
 	}
 
 	// Once healthy, once with the store failing underneath: an error path is
@@ -795,7 +808,7 @@ func TestDependencyRoutesReportBeingUnwired(t *testing.T) {
 		{http.MethodGet, APIPrefix + "/dependencies/graph", ""},
 		{http.MethodGet, APIPrefix + "/dependencies/container/abcdef0123456789", ""},
 		{http.MethodPost, APIPrefix + "/dependencies", `{"dependent":"api","dependency":"postgres"}`},
-		{http.MethodDelete, APIPrefix + "/dependencies/dep_0123456789abcdef0123", ""},
+		{http.MethodDelete, APIPrefix + "/dependencies/dep_aaaaaaaaaaaaaaaaaaaa", ""},
 	} {
 		rec := send(srv, authed(request(call.method, call.target, call.body)))
 		if rec.Code != http.StatusServiceUnavailable {

@@ -24,7 +24,7 @@ vulnerabilities:
     #
     # There is no fixed version and there will not be one: the advisory is
     # that the package exists, not that a release broke it. Upgrading cannot
-    # clear this, and v0.54.0 is already the latest release of the module.
+    # clear this, and v0.55.0 is already the latest release of the module.
     #
     # HarborMaster does not use the package. `go list -deps ./...` resolves
     # exactly two packages from this module -- golang.org/x/crypto/argon2 for

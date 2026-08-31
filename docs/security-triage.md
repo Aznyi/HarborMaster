@@ -284,7 +284,7 @@ Docker daemon.
 | | |
 |---|---|
 | Package | `golang.org/x/crypto` (Go module) |
-| Installed | v0.54.0 — **the latest release** |
+| Installed | v0.55.0 — **the latest release** |
 | Affected package | `golang.org/x/crypto/openpgp` |
 | Severity | UNKNOWN (GitHub renders it as **Note**) |
 | Fixed version | **None, and there will not be one** |
@@ -298,7 +298,7 @@ package is unmaintained, unsafe by design, and has known security issues"* —
 a statement about the package's existence. `openpgp` was frozen years ago and
 the Go team's guidance is to use a maintained OpenPGP implementation instead.
 
-There is therefore no `Fixed Version`, and `v0.54.0` is already the newest
+There is therefore no `Fixed Version`, and `v0.55.0` is already the newest
 release of the module. **No dependency change can clear this alert.**
 
 ### Why it does not apply to HarborMaster

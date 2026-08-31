@@ -35,6 +35,10 @@ type ContainerPreferenceStore interface {
 	ClearContainerPreference(ctx context.Context, containerName string) error
 	ContainerPreference(ctx context.Context, containerName string) (domain.ContainerUpdatePreference, error)
 	ListContainerPreferences(ctx context.Context) ([]domain.ContainerUpdatePreference, error)
+	// Resolved against the inventory in ONE query, so the summary can tell an
+	// active preference from a saved one whose container is gone without asking
+	// per row.
+	ListContainerPreferencesWithPresence(ctx context.Context) ([]store.ContainerPreferenceRow, error)
 }
 
 // ContainerLookup resolves a container id to the name preferences are keyed by.
@@ -234,6 +238,102 @@ func (s *ContainerPreferenceService) List(
 	ctx context.Context,
 ) ([]domain.ContainerUpdatePreference, error) {
 	return s.store.ListContainerPreferences(ctx)
+}
+
+// ContainerBehaviorSummary is what the Automation workspace shows.
+//
+// # What it counts, and what it deliberately does not
+//
+// It counts STORED CHOICES -- the three behaviours C2 persists -- for
+// containers that are currently on the host. It does not count effective
+// decisions: `labelDisabled`, `selfUpdate`, `paused` and `observeMode` are
+// things the ENGINE concluded, not things an operator saved here, and adding
+// them to this total would make "3 containers have custom behaviour" mean
+// something nobody chose.
+//
+// It also performs no effective evaluation. Reading the engine's verdict per
+// container is an estate evaluation each, which is exactly the N+1 an overview
+// page must not introduce.
+type ContainerBehaviorSummary struct {
+	// Items is every stored choice, present containers and absent ones alike,
+	// each saying which it is. Bounded by the repository.
+	Items []ContainerBehaviorItem `json:"items"`
+
+	// Counts covers PRESENT containers only, by requested behaviour. Every
+	// behaviour in the vocabulary has a key, so a client renders a real zero
+	// rather than a missing one.
+	Counts map[domain.UpdateBehavior]int `json:"counts"`
+
+	// Total is how many present containers carry a stored choice: the sum of
+	// Counts, stated once so a client need not add up to find the headline.
+	Total int `json:"total"`
+
+	// Stale is how many saved choices name a container that is not here.
+	//
+	// Reported rather than hidden or deleted. A preference is keyed by name so
+	// it survives the recreation it authorises, which means one can outlive its
+	// container; that row is inert, and counting it among active containers
+	// would overstate what is configured.
+	Stale int `json:"stale"`
+}
+
+// ContainerBehaviorItem is one stored choice.
+type ContainerBehaviorItem struct {
+	ContainerName string                `json:"containerName"`
+	Behavior      domain.UpdateBehavior `json:"behavior"`
+	// Present is false for a saved choice whose container is not on the host.
+	Present bool `json:"present"`
+	// ContainerID is the container's id NOW, and is absent when it is not here.
+	// Never the id stored with the preference: that is evidence of what was
+	// observed when the choice was made, and a recreation has changed it.
+	ContainerID string `json:"containerId,omitempty"`
+}
+
+// BehaviorSummary reports which containers deviate from what they inherit.
+//
+// ONE query behind it, and no mutation of any kind.
+func (s *ContainerPreferenceService) BehaviorSummary(
+	ctx context.Context,
+) (ContainerBehaviorSummary, error) {
+	rows, err := s.store.ListContainerPreferencesWithPresence(ctx)
+	if err != nil {
+		return ContainerBehaviorSummary{}, err
+	}
+
+	// Every behaviour gets a key, so an absent count is a real zero on screen
+	// rather than a gap a client has to guess the meaning of.
+	counts := make(map[domain.UpdateBehavior]int, len(domain.UpdateBehaviors))
+	for _, behavior := range domain.UpdateBehaviors {
+		counts[behavior] = 0
+	}
+
+	summary := ContainerBehaviorSummary{
+		Items:  make([]ContainerBehaviorItem, 0, len(rows)),
+		Counts: counts,
+	}
+	for _, row := range rows {
+		// A behaviour outside the vocabulary is not counted and not shown. The
+		// column has a CHECK constraint so this cannot arise from HarborMaster,
+		// and a value that reached the table another way must not become a
+		// category on an operator's screen.
+		if !domain.ValidUpdateBehavior(string(row.Behavior)) {
+			continue
+		}
+
+		summary.Items = append(summary.Items, ContainerBehaviorItem{
+			ContainerName: row.ContainerName,
+			Behavior:      row.Behavior,
+			Present:       row.Present,
+			ContainerID:   row.CurrentContainerID,
+		})
+		if row.Present {
+			counts[row.Behavior]++
+			summary.Total++
+		} else {
+			summary.Stale++
+		}
+	}
+	return summary, nil
 }
 
 // effectiveFor reads the engine's own decision for one container.

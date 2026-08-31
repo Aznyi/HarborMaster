@@ -385,6 +385,20 @@ func (s *Server) routeTable() []route {
 		//
 		// None of the three touches a container. The service behind them holds
 		// no Docker capability at all.
+		// The collection, read-only.
+		//
+		// GET-only with no bare companion, for the same reason "/images/updates"
+		// has none: a bare entry matches EVERY method on this literal, while
+		// "GET /containers/{id}" matches GET on every segment, and ServeMux
+		// refuses that ambiguous pair. A non-GET request still gets an honest
+		// 405 from "/containers/{id}".
+		//
+		// `inventory:read`, the SAME permission as reading one container's
+		// behaviour. Seeing which containers deviate is not a management action,
+		// and requiring `automation:manage` would hide from a viewer a fact they
+		// can already read one container at a time.
+		{http.MethodGet, p + "/containers/update-behaviors", requires(domain.PermInventoryRead), s.handleContainerBehaviors, ""},
+
 		{http.MethodGet, p + "/containers/{id}/update-behavior", requires(domain.PermInventoryRead), s.handleContainerBehavior, ""},
 		{http.MethodPost, p + "/containers/{id}/update-behavior", requires(domain.PermAutomationManage).policyBudget(), s.handleContainerBehaviorSet, ""},
 		{http.MethodDelete, p + "/containers/{id}/update-behavior", requires(domain.PermAutomationManage).policyBudget(), s.handleContainerBehaviorClear, ""},

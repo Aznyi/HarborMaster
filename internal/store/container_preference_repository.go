@@ -187,3 +187,65 @@ func (r *AutomationRepository) ContainerPreferences(
 ) (map[string]domain.UpdateBehavior, error) {
 	return (&ContainerPreferenceRepository{db: r.db}).ContainerPreferences(ctx)
 }
+
+// ContainerPreferenceRow is one stored choice, resolved against the inventory.
+//
+// A preference is keyed by container NAME so it survives a recreation, which
+// also means a row can outlive the container it describes. Resolving here --
+// once, in SQL -- is what lets a caller tell an ACTIVE preference from a saved
+// one whose container is gone, without asking the inventory per row.
+type ContainerPreferenceRow struct {
+	domain.ContainerUpdatePreference
+	// Present is true when a container of this name is currently on the host.
+	Present bool
+	// CurrentContainerID is that container's id NOW, empty when it is absent.
+	//
+	// Deliberately not the id stored on the preference: that one is evidence of
+	// what was observed when the choice was made, and a recreation has almost
+	// certainly changed it. A link built from the stored id would 404 for
+	// exactly the containers that have been updated most.
+	CurrentContainerID string
+}
+
+// ListContainerPreferencesWithPresence reads every stored choice and says, for
+// each, whether its container is still here.
+//
+// ONE query. The obvious implementation -- list the preferences, then look up
+// each container -- is the N+1 pattern on a page an operator opens to get an
+// overview, and the index on (present, name) is what makes the join cheap.
+//
+// A container name is not unique across rows: an absent container keeps its row
+// after a recreation, so the same name can appear twice. MAX(id) over the
+// PRESENT rows picks one deterministically, matching how the rest of this
+// package resolves "the container by that name now".
+func (r *ContainerPreferenceRepository) ListContainerPreferencesWithPresence(
+	ctx context.Context,
+) ([]ContainerPreferenceRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT p.container_name, p.behavior, p.container_id,
+		       p.set_by_username, p.created_at, p.updated_at,
+		       COALESCE((SELECT MAX(c.id) FROM containers c
+		                  WHERE c.name = p.container_name AND c.present = 1), '')
+		  FROM container_update_preferences p
+		 ORDER BY p.container_name
+		 LIMIT ?`, maxContainerPreferences)
+	if err != nil {
+		return nil, fmt.Errorf("list container update preferences: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ContainerPreferenceRow
+	for rows.Next() {
+		var row ContainerPreferenceRow
+		var behavior string
+		if err := rows.Scan(&row.ContainerName, &behavior, &row.ContainerID,
+			&row.SetByUsername, &row.CreatedAt, &row.UpdatedAt,
+			&row.CurrentContainerID); err != nil {
+			return nil, fmt.Errorf("scan container update preference: %w", err)
+		}
+		row.Behavior = domain.UpdateBehavior(behavior)
+		row.Present = row.CurrentContainerID != ""
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

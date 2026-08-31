@@ -33,10 +33,34 @@ import (
 // depends on.
 type ContainerPreferenceService interface {
 	Behavior(ctx context.Context, containerID string) (service.ContainerUpdateBehavior, error)
+	BehaviorSummary(ctx context.Context) (service.ContainerBehaviorSummary, error)
 	SetBehavior(ctx context.Context, containerID string, behavior domain.UpdateBehavior,
 		actor service.Actor) (service.ContainerUpdateBehavior, error)
 	ClearBehavior(ctx context.Context, containerID string,
 		actor service.Actor) (service.ContainerUpdateBehavior, error)
+}
+
+// handleContainerBehaviors summarises which containers carry a stored choice.
+//
+// A READ, and the only surface that shows this set. It offers no control: the
+// container's own page remains the one place a behaviour is chosen, so
+// Automation cannot become a second editor for the same state.
+//
+// One query behind it, and no effective evaluation: asking the engine what it
+// would do per container is an estate evaluation each, which is exactly the
+// N+1 an overview page must not introduce.
+func (s *Server) handleContainerBehaviors(w http.ResponseWriter, r *http.Request) {
+	if s.containerPreferenceUnavailable(w, r) {
+		return
+	}
+	summary, err := s.containerPreferences.BehaviorSummary(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "container update behaviour summary failed",
+			slog.String("error", err.Error()))
+		writeError(w, r, s.logger, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+	writeJSON(w, r, s.logger, http.StatusOK, summary)
 }
 
 // containerBehaviorRequest is a PUT body.

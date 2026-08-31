@@ -7,6 +7,7 @@ import {
   createUpdatePolicy,
   getAutomationRun,
   getAutomationStatus,
+  getContainerBehaviorSummary,
   getSimpleUpdates,
   getAutomationUpcoming,
   listAutomationPauses,
@@ -17,6 +18,7 @@ import {
   runAutomationPass,
   updateUpdatePolicy,
 } from "../api/client";
+import type { ContainerBehaviorSummary } from "../api/inventoryTypes";
 import type {
   SimpleUpdatesState,
   AutomationDecision,
@@ -181,6 +183,24 @@ export function useSimpleUpdates(): ResourceState<SimpleUpdatesState> {
     [],
   );
   return useApiResource<SimpleUpdatesState>(fetcher, { key: "simple-updates" });
+}
+
+/**
+ * Which containers carry a saved update behaviour (C2.2).
+ *
+ * ONE request, whatever the number of preferences. The workspace shows the SET
+ * of containers an operator has given an explicit behaviour; asking what each
+ * would actually do is a per-container engine evaluation, and belongs on the
+ * container's own page where exactly one is asked for.
+ */
+export function useContainerBehaviorSummary(): ResourceState<ContainerBehaviorSummary> {
+  const fetcher = useCallback(
+    ({ signal }: { signal: AbortSignal }) => getContainerBehaviorSummary({ signal }),
+    [],
+  );
+  return useApiResource<ContainerBehaviorSummary>(fetcher, {
+    key: "container-behavior-summary",
+  });
 }
 
 export function useUpdatePolicies(

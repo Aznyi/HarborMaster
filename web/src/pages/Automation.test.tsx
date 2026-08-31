@@ -249,6 +249,16 @@ function stub(options: StubOptions = {}) {
           history: { total: 1 },
         });
       }
+      // Before any looser match. Its own shape, with a count key for EVERY
+      // behaviour, because that is what the server sends.
+      if (url.includes("/containers/update-behaviors")) {
+        return jsonResponse({
+          items: [],
+          counts: { automatic: 0, reviewFirst: 0, monitorOnly: 0 },
+          total: 0,
+          stale: 0,
+        });
+      }
       if (url.includes("/update-policies")) {
         const items = options.policies ?? [];
         return jsonResponse({ items, pagination: pagination(items.length) });
@@ -843,6 +853,21 @@ it("reads each endpoint once and never per container", async () => {
     ).toBeLessThanOrEqual(1);
   }
 
-  // No per-container reads: nothing addresses a single container by id.
-  expect(requests.some((r) => /\/containers\/[^/?]+/.test(r.url))).toBe(false);
+  /*
+    No per-container reads: nothing addresses a single container by id.
+
+    "/containers/update-behaviors" is a LITERAL collection, not a container id
+    -- it is the one bounded request that answers "which containers have their
+    own setting" for the whole page, and it exists precisely so the page does
+    not ask per container. Every other second segment would be an id.
+  */
+  const perContainer = requests.filter(
+    (r) => /\/containers\/[^/?]+/.test(r.url) && !r.url.includes("/containers/update-behaviors"),
+  );
+  expect(perContainer.map((r) => r.url)).toEqual([]);
+
+  // And the collection itself is read once, not once per override.
+  expect(
+    requests.filter((r) => r.url.includes("/containers/update-behaviors")),
+  ).toHaveLength(1);
 });

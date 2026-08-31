@@ -1,0 +1,71 @@
+# Gitleaks exceptions.
+#
+# Every line below is one FINGERPRINT: commit, file, rule and line. That is the
+# narrowest exception Gitleaks offers. It suppresses one known finding in one
+# frozen commit and nothing else -- not the rule, not the file, not the
+# directory, not the next line of the same file, and not the same value if it
+# ever appears again anywhere else. A new secret is still a build failure.
+#
+# There are exactly three, and all three are in HISTORY rather than in the
+# working tree. The current tree is clean on its own: each fixture below has
+# been rewritten at HEAD so it no longer resembles a credential. These entries
+# exist only because `gitleaks git` scans every commit, and the commits that
+# introduced the original values cannot be changed without rewriting published
+# history -- which is warranted for a leaked credential and not for a test
+# fixture that was never one.
+#
+# Adding to this file is a security decision. Before adding a line, establish
+# that the value cannot authenticate to anything, say so here, and fix the
+# working tree so the finding does not recur.
+
+# ---------------------------------------------------------------------------
+# internal/service/snapshot_secret_integrity_test.go:30 and :31
+#
+# Two synthetic HarborMaster installation keys, as 64-character hex literals:
+# the digits 0-f in order, and the same digits reversed. They are the two most
+# obviously fabricated 32-byte values that can be written down, and the first
+# of them is the placeholder hex string this repository already uses for
+# container ids in a dozen other tests.
+#
+# WHAT THE KEY IS. An installation key for HMAC-SHA-256 over environment
+# values, so HarborMaster can record whether a secret CHANGED without storing
+# what it was. It is generated per installation, it is never transmitted, and
+# there is no service anywhere that accepts it -- no API, no registry, no
+# database, no notification destination. It is not a credential in the sense
+# this rule is looking for, and neither of these two values has ever been a
+# real installation's key.
+#
+# WHY THE RULE FIRED. A 64-character hex literal assigned to an identifier
+# containing "key". That is a good rule and it was doing its job.
+#
+# FIXED AT HEAD. Both are now composed with strings.Repeat, matching how
+# validKeyHex is already built in secret_key_test.go. The tests are unchanged
+# in what they prove: they need two DISTINCT valid keys, and they still get
+# them.
+95de97d24fe1b8a5fac2f8bc497fdbe4bf9b7610:internal/service/snapshot_secret_integrity_test.go:generic-api-key:30
+95de97d24fe1b8a5fac2f8bc497fdbe4bf9b7610:internal/service/snapshot_secret_integrity_test.go:generic-api-key:31
+
+# ---------------------------------------------------------------------------
+# internal/api/dependency_roundtrip_test.go:641
+#
+# Not a credential and not even a value that looks like one on its own. This
+# is the collision of two ADJACENT attack probes in a test that proves a
+# malformed dependency id is refused indistinguishably from an absent one:
+#
+#   line 641   a path traversal probe naming /etc/passwd
+#   line 642   an SQL injection payload appended to the fixture id
+#
+# The rule anchors on the keyword "passwd" and then captures the highest
+# entropy token near it, which was the fixture id on the following line. The
+# id is a test dependency identifier that exists only in an in-memory stub;
+# it authenticates nothing, and it is not accepted by any live system.
+#
+# One fingerprint covers both reported findings -- Gitleaks reports this twice,
+# once raw and once percent-decoded, under the same fingerprint.
+#
+# FIXED AT HEAD. The fixture id is now a repeated character instead of a
+# varied hex run, which is still well-formed and still the id the probe is
+# built from. The probes themselves are untouched: the test still sends path
+# traversal, SQL injection, script injection and an overlong id, and still
+# requires every one to answer exactly as an absent id does.
+81fc2c25970ff03994876c36f0cd4f259fd0183a:internal/api/dependency_roundtrip_test.go:generic-api-key:641

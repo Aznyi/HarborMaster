@@ -123,7 +123,19 @@ function mockApi(extra: [string, unknown, number?][] = []) {
     }
     if (url.includes("/inventory")) return jsonResponse({ generation: 4 });
     if (url.includes("/dependencies")) return jsonResponse({ items: [], total: 0 });
-    return jsonResponse({ items: [], pagination: pagination() });
+    /*
+      An unmodelled endpoint is a 404, not a list envelope.
+
+      It used to answer everything with `{ items, pagination }`, which is a
+      SHAPE -- and any page reading a different one got a response the server
+      could never send. That is the C2.1 defect, in this file's own stub. A 404
+      is what an unmodelled endpoint honestly is, and a case that needs one adds
+      it above with the shape the server returns.
+    */
+    return jsonResponse(
+      { error: { code: "not_found", message: `this stub does not model ${url}` } },
+      404,
+    );
   }) as typeof fetch;
 }
 
@@ -146,6 +158,12 @@ function withState(options: {
       { items: [], total: options.dependencies ?? 0 },
     ],
     ["/plans", { items: [], planner: { lastRunAt: "2026-08-01T00:00:00Z" }, pagination: pagination() }],
+    // The saved-behaviour summary. Its own shape, with a count key for EVERY
+    // behaviour, because that is what the server sends.
+    [
+      "/containers/update-behaviors",
+      { items: [], counts: { automatic: 0, reviewFirst: 0, monitorOnly: 0 }, total: 0, stale: 0 },
+    ],
   ];
 }
 

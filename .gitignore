@@ -67,3 +67,9 @@ coverage.txt
 *.swp
 .DS_Store
 Thumbs.db
+
+# Scan reports. Running the Gitleaks command from the security workflow by hand
+# writes results.sarif into the working tree; it is an artifact of a run, not
+# part of the repository.
+results.sarif
+*.sarif

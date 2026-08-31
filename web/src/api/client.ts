@@ -44,6 +44,7 @@ import type {
   ContainerDetail,
   ContainerQuery,
   ContainerListRow,
+  ContainerBehaviorSummary,
   ContainerUpdateBehavior,
   UpdateBehavior,
   FilterOptions,
@@ -1820,6 +1821,22 @@ export function disableSimpleUpdates(
   options?: RequestOptions,
 ): Promise<UpdatePolicyResult> {
   return request<UpdatePolicyResult>("/automation/simple-updates", options, "DELETE");
+}
+
+/**
+ * GET /api/v1/containers/update-behaviors
+ *
+ * Which containers carry a saved update behaviour. ONE bounded request answers
+ * the whole question: a page that listed preferences and then asked about each
+ * container would turn an overview into an estate evaluation.
+ *
+ * Needs `inventory:read`, the same permission as reading one container's
+ * behaviour. A read; it changes nothing, and it deletes no stale entry.
+ */
+export function getContainerBehaviorSummary(
+  options?: RequestOptions,
+): Promise<ContainerBehaviorSummary> {
+  return request<ContainerBehaviorSummary>("/containers/update-behaviors", options);
 }
 
 /**
