@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { formatMoment } from "../api/presentation";
 import { Link } from "react-router";
 
 import type {
@@ -10,7 +9,7 @@ import type {
   ImageRef,
 } from "../api/inventoryTypes";
 import { UPDATE_TYPE_LABELS } from "../api/imageTypes";
-import { formatImageReference } from "../api/presentation";
+import { formatImageReference, formatMoment } from "../api/presentation";
 import { ATTENTION_LABELS, ATTENTION_MEANINGS } from "./AttentionBadges";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
 import { ContainerUpdateBehaviorPanel } from "./ContainerUpdateBehavior";
@@ -227,6 +226,7 @@ const NO_UPDATE_STATES = new Set<AttentionState>([
   "upToDate",
   "notChecked",
   "notTracked",
+  "notComparable",
   "cannotAdvise",
 ]);
 
@@ -257,6 +257,28 @@ function UpdatePanel({ attention }: { attention?: ContainerAttention }) {
       <Panel title="Update">
         <p className="text-sm">{ATTENTION_LABELS[verdict]}</p>
         <p className="mt-1 text-xs text-content-muted">{ATTENTION_MEANINGS[verdict]}</p>
+        {/*
+          When the comparison behind this verdict last ANSWERED.
+
+          An ABSOLUTE time, from the shared helper, because this module's own
+          header rules out relative formatting: an operator correlating an
+          update with a log line needs the actual time rather than "8 minutes
+          ago". Shown only where the server sent it, which is only where a
+          comparison actually settled -- so it can never appear beside a verdict
+          nothing established.
+
+          The sentence changes when the latest attempt did not answer. "Up to
+          date" then rests on an EARLIER comparison that HarborMaster preserved
+          (B1.1) and could not reconfirm, and saying so is the difference
+          between a dated fact and a claim about right now.
+        */}
+        {attention?.lastCheckedOkAt ? (
+          <p className="mt-1 text-xs text-content-muted">
+            {attention.checkStatus && attention.checkStatus !== "ok"
+              ? `Last confirmed ${formatMoment(attention.lastCheckedOkAt)}; the most recent check did not answer`
+              : `Checked ${formatMoment(attention.lastCheckedOkAt)}`}
+          </p>
+        ) : null}
       </Panel>
     );
   }

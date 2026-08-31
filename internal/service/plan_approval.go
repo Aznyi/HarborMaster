@@ -266,12 +266,24 @@ func (s *PlanApprovalService) validate(
 		mutated = true
 	}
 
+	// Both a plan and a definitive "there is none" are ANSWERS; only a real
+	// error leaves currency unestablished. Collapsing the first two into an
+	// empty string was the fail-open: a retired plan looked exactly like a
+	// lookup that had not happened.
 	currentID := ""
-	if current, err := s.plans.Current(ctx, plan.ContainerID); err == nil {
-		currentID = current.PlanID
+	currentResolved := false
+	switch current, err := s.plans.Current(ctx, plan.ContainerID); {
+	case err == nil:
+		currentID, currentResolved = current.PlanID, true
+	case errors.Is(err, store.ErrNotFound):
+		currentResolved = true
+	default:
+		s.logger.WarnContext(ctx,
+			"could not establish which plan is current; currency is not asserted",
+			slog.Any("error", err))
 	}
 
-	return domain.PlanApprovalValid(approval, plan, currentID, mutated), nil
+	return domain.PlanApprovalValid(approval, plan, currentID, currentResolved, mutated), nil
 }
 
 // supersededBy reports whether a newer plan has replaced this one.

@@ -169,10 +169,28 @@ func PlanApprovable(recommendation Recommendation) bool {
 // that, applying the same plan again is a new decision and needs a new one --
 // the caller reads that fact from `executions.mutated_at` rather than from a
 // state stored here.
+//
+// `currentPlanID` is the plan that is current for the container, and
+// `currentResolved` says whether that was ESTABLISHED. The pair is deliberate:
+// an empty id means two opposite things, and reading it as one of them was a
+// fail-open.
+//
+//	resolved, id set    that plan is current
+//	resolved, id empty  NOTHING is current -- the container has no plan, or
+//	                    settled registry evidence retired the one it had
+//	unresolved          currency could not be established, so this asserts
+//	                    nothing and the other checks decide
+//
+// A retired plan reaches here as (resolved, empty). Before C3B that was
+// indistinguishable from "could not look", and the check was skipped -- so an
+// approval granted while the registry was still pending stayed valid after the
+// registry answered "nothing newer". It authorised a change that no longer
+// existed.
 func PlanApprovalValid(
 	approval PlanApproval,
 	plan ChangePlan,
 	currentPlanID string,
+	currentResolved bool,
 	mutatedAlready bool,
 ) PlanApprovalRefusal {
 	switch {
@@ -185,7 +203,10 @@ func PlanApprovalValid(
 		return PlanApprovalRefusalSuperseded
 	case !PlanApprovable(plan.Risk.Recommendation):
 		return PlanApprovalRefusalNotApprovable
-	case currentPlanID != "" && currentPlanID != plan.PlanID:
+	case currentResolved && currentPlanID != plan.PlanID:
+		// Covers both "a different plan is current" and "no plan is current at
+		// all". The second is what a settled comparison produces: the planner
+		// would not write this plan today, so nothing stands behind it.
 		return PlanApprovalRefusalSuperseded
 	case approval.ApprovedInputDigest != "" &&
 		approval.ApprovedInputDigest != plan.InputDigest:

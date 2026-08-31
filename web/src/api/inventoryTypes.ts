@@ -187,6 +187,7 @@ export type AttentionState =
   | "cannotAdvise"
   | "updateAvailable"
   | "notTracked"
+  | "notComparable"
   | "notChecked"
   | "upToDate";
 

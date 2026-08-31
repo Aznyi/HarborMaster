@@ -490,6 +490,9 @@ describe("the container attention vocabulary", () => {
       cannotAdvise: false,
       updateAvailable: false,
       notTracked: false,
+      // A permanent absence of evidence, not work for a person. The operator
+      // may want to act on it, but nothing is waiting on them.
+      notComparable: false,
       notChecked: false,
       upToDate: false,
     };

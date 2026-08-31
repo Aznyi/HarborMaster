@@ -47,6 +47,7 @@ export const ATTENTION_LABELS: Record<AttentionState, string> = {
   cannotAdvise: "Cannot determine",
   updateAvailable: "Update available",
   notTracked: "Not tracked",
+  notComparable: "Not comparable",
   notChecked: "Not checked",
   upToDate: "Up to date",
 };
@@ -91,6 +92,11 @@ export const ATTENTION_MEANINGS: Record<AttentionState, string> = {
     "HarborMaster cannot attribute the running image to any tag, so it will " +
     "never find an update for this container. An empty update column here " +
     "means it cannot tell you, not that there is nothing to tell.",
+  notComparable:
+    "This image has no registry to compare against, so HarborMaster will " +
+    "never find an update for it. Unlike “cannot determine” this " +
+    "does not resolve on a later pass — the fix is to run the container " +
+    "on an image from a registry.",
   notChecked:
     "HarborMaster has not assessed this container yet. That is not the same " +
     "as finding it up to date.",
@@ -125,6 +131,7 @@ const ATTENTION_TONES: Record<AttentionState, BadgeTone> = {
   cannotAdvise: "neutral",
   updateAvailable: "warn",
   notTracked: "neutral",
+  notComparable: "neutral",
   notChecked: "neutral",
   upToDate: "ok",
 };

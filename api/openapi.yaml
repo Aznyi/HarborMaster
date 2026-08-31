@@ -8227,6 +8227,7 @@ components:
         - cannotAdvise
         - updateAvailable
         - notTracked
+        - notComparable
         - notChecked
         - upToDate
 

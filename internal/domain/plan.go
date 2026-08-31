@@ -280,8 +280,55 @@ type ChangePlan struct {
 	// Superseded reports that a newer plan exists for this container. Derived
 	// at read time rather than stored, because storing it would mean writing to
 	// an immutable row.
+	//
+	// Note what this is NOT: it is not "this plan is no longer current". A plan
+	// can stop being current with no newer plan behind it -- see the currency
+	// contract below -- so a reader deciding whether to ACT on a plan must ask
+	// for the current plan rather than trust this flag's absence.
 	Superseded bool `json:"superseded"`
 }
+
+// # The ChangePlan currency contract
+//
+// A plan is an IMMUTABLE ASSESSMENT: what HarborMaster believed about one
+// container at one moment. It is never updated in place, it is never a work
+// item, and it is never deleted while anything references it. Migration 0008
+// states this and deliberately gives the table no `status`, `applied_at` or
+// `superseded` column.
+//
+// Four states matter, and only the first two are the same question:
+//
+//	HISTORICAL   every plan ever written. Readable through History and the
+//	             plan endpoints forever, and what Activity reconstructs a past
+//	             attempt from. Never mutated, whatever happens later.
+//
+//	CURRENT      the one plan, if any, that represents HarborMaster's decision
+//	             about this container right now. Answered ONLY by
+//	             PlanRepository.Current -- never by MAX(id) at a call site.
+//
+//	SUPERSEDED   a newer plan replaced it. Derived from the existence of that
+//	             newer row, which is the `Superseded` flag above.
+//
+//	RETIRED      no newer plan exists, and the evidence this plan rests on has
+//	             settled into the state where the planner would decline to write
+//	             it at all: a registry comparison that ANSWERED and found
+//	             nothing newer. The planner skips such a container permanently,
+//	             so it never writes a superseding row -- which is exactly why
+//	             "newest row" and "current decision" are different questions.
+//
+// A retired plan is still historical truth and still readable. "Retired" means
+// this is no longer the decision, never that the decision was wrong or that an
+// action taken under it did not happen.
+//
+// Consequences a reader must not re-derive for themselves:
+//
+//   - Currency is decided by PlanRepository.Current, which applies both ends.
+//     Approval, acquisition, execution and automation all go through it.
+//   - A plan that is not current cannot be newly approved and cannot start an
+//     acquisition. Those gates read currency; they do not reimplement it.
+//   - History queries legitimately want the newest RECORDED plan and should
+//     keep using it -- duplicate suppression and the planner-version readout
+//     are asking a different question and are correct as they are.
 
 // ErrPlanTargetCrossed reports a plan whose proposed reference and proposed
 // digest were not resolved for each other.

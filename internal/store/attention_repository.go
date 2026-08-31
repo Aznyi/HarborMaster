@@ -263,6 +263,13 @@ func (r *ContainerRepository) gatherImageIntel(
 			// the planner applies. A row that has never been successfully
 			// compared sets nothing, so its zero value continues to assert
 			// nothing at all.
+			// A reference with no registry behind it. Permanent, and the one
+			// fact worth carrying from a record that never settled: it is why
+			// this container will never have a comparison rather than merely
+			// not having one yet.
+			if record.Status == domain.CheckUnsupported {
+				row.CheckNotComparable = true
+			}
 			if !record.ComparisonSettled() {
 				return
 			}

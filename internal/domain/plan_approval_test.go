@@ -62,7 +62,7 @@ func TestOnlyManualReviewIsApprovable(t *testing.T) {
 
 func TestAStandingApprovalAuthorisesItsOwnPlan(t *testing.T) {
 	plan := approvedPlan()
-	refusal := domain.PlanApprovalValid(standingApproval(plan), plan, plan.PlanID, false)
+	refusal := domain.PlanApprovalValid(standingApproval(plan), plan, plan.PlanID, true, false)
 	if refusal != domain.PlanApprovalRefusalNone {
 		t.Fatalf("refusal = %q, want none (%s)", refusal, refusal.Explain())
 	}
@@ -117,7 +117,7 @@ func TestAnApprovalStopsAuthorisingWhenTheBindingBreaks(t *testing.T) {
 
 			tc.mutate(&approval, &plan, &current, &mutated)
 
-			got := domain.PlanApprovalValid(approval, plan, current, mutated)
+			got := domain.PlanApprovalValid(approval, plan, current, true, mutated)
 			if got != tc.want {
 				t.Fatalf("refusal = %q, want %q", got, tc.want)
 			}
@@ -143,13 +143,13 @@ func TestApprovalIsNotTransferredToANewPlan(t *testing.T) {
 	second.ProposedDigest = "sha256:" + strings.Repeat("c", 64)
 	second.InputDigest = strings.Repeat("f", 64)
 
-	if refusal := domain.PlanApprovalValid(approval, second, second.PlanID, false); refusal == domain.PlanApprovalRefusalNone {
+	if refusal := domain.PlanApprovalValid(approval, second, second.PlanID, true, false); refusal == domain.PlanApprovalRefusalNone {
 		t.Fatal("an approval of one plan authorised a different one")
 	}
 
 	// And the first plan is now superseded, so the original approval has
 	// stopped authorising that too.
-	if refusal := domain.PlanApprovalValid(approval, first, second.PlanID, false); refusal != domain.PlanApprovalRefusalSuperseded {
+	if refusal := domain.PlanApprovalValid(approval, first, second.PlanID, true, false); refusal != domain.PlanApprovalRefusalSuperseded {
 		t.Fatalf("refusal = %q, want %q", refusal, domain.PlanApprovalRefusalSuperseded)
 	}
 }
@@ -164,13 +164,13 @@ func TestApprovalSurvivesRetriesUntilTheHostIsTouched(t *testing.T) {
 
 	// Any number of attempts that did not mutate: still valid.
 	for range 5 {
-		if refusal := domain.PlanApprovalValid(approval, plan, plan.PlanID, false); refusal != domain.PlanApprovalRefusalNone {
+		if refusal := domain.PlanApprovalValid(approval, plan, plan.PlanID, true, false); refusal != domain.PlanApprovalRefusalNone {
 			t.Fatalf("a retry consumed the approval: %q", refusal)
 		}
 	}
 
 	// The first one that mutated spends it.
-	if refusal := domain.PlanApprovalValid(approval, plan, plan.PlanID, true); refusal != domain.PlanApprovalRefusalAlreadyActed {
+	if refusal := domain.PlanApprovalValid(approval, plan, plan.PlanID, true, true); refusal != domain.PlanApprovalRefusalAlreadyActed {
 		t.Fatalf("refusal = %q, want %q", refusal, domain.PlanApprovalRefusalAlreadyActed)
 	}
 }

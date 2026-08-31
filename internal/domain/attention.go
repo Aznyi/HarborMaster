@@ -135,6 +135,17 @@ const (
 	// AttentionUpToDate.
 	AttentionNotChecked AttentionState = "notChecked"
 
+	// AttentionNotComparable means this image has no registry to compare
+	// against, so no update will EVER be found for it.
+	//
+	// Distinct from notChecked and cannotAdvise, both of which describe a gap
+	// that the next pass may close. This one never closes: an unsupported
+	// reference is never queued for a lookup, so an operator waiting for
+	// "cannot advise" to resolve into an answer would wait forever. Saying so
+	// is the only honest option, and it is also the only actionable one --
+	// the fix is to run the container on an image from a registry.
+	AttentionNotComparable AttentionState = "notComparable"
+
 	// AttentionUpToDate means HarborMaster looked and found nothing to do.
 	AttentionUpToDate AttentionState = "upToDate"
 )
@@ -174,6 +185,11 @@ var AttentionOrder = []AttentionState{
 	AttentionCannotAdvise,
 	AttentionUpdateAvailable,
 	AttentionNotTracked,
+	// Beside notTracked, and for the same reason: both are permanent answers
+	// that no future pass will change. Below cannotAdvise, which is the
+	// TRANSIENT version of the same shape and is the more urgent of the two
+	// because it may still resolve into an update.
+	AttentionNotComparable,
 	AttentionNotChecked,
 	AttentionUpToDate,
 }
@@ -302,6 +318,15 @@ type ContainerEvidence struct {
 	// CheckedUpdate is what the settled comparison found. Meaningless unless
 	// CheckSettled, and never read otherwise.
 	CheckedUpdate UpdateType
+	// CheckNotComparable reports a reference that has no registry behind it --
+	// image intelligence status `unsupported`. Permanent by construction: such
+	// a reference is never queued, so it can never be compared and no later
+	// pass will change the answer.
+	//
+	// Carried separately from CheckStatus because an unsupported record is
+	// never SETTLED (ComparisonSettled refuses it), so the freshness pair below
+	// is deliberately absent for one -- there is no successful check to date.
+	CheckNotComparable bool
 	// CheckStatus is the state of the MOST RECENT attempt, which is a different
 	// question from whether one ever succeeded. Carried so a container whose
 	// last lookup failed can be presented as what it is -- a real earlier
@@ -594,6 +619,21 @@ func assessState(evidence ContainerEvidence) AttentionState {
 		// usefully described as blocked: reporting the block would put a row on
 		// the attention list for an update nobody wanted.
 		return AttentionUpToDate
+	}
+
+	// An image with no registry behind it.
+	//
+	// Checked here -- below the settled verdict and above everything the plan
+	// says -- because it is a statement about whether a comparison is POSSIBLE
+	// at all, which outranks any verdict a pre-check plan happens to carry. A
+	// container on a locally built image otherwise reported "cannot advise"
+	// forever, inviting an operator to wait for an answer that cannot come.
+	//
+	// Only the permanent status reaches here. `unauthorized`, `failed`,
+	// `rateLimited` and `pending` are transient and keep their existing,
+	// correctly non-committal verdicts.
+	if evidence.CheckNotComparable {
+		return AttentionNotComparable
 	}
 
 	// Everything from here down is about the proposed image, so a container
