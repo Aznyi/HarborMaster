@@ -129,27 +129,52 @@ git ls-tree -r --name-only HEAD | grep release-notes # the notes are actually in
 | Pull request | none — build only |
 | Push to `main` | `edge`, `sha-<full-sha>` |
 | Release published, **stable** | `X.Y.Z`, `X.Y`, `X`, `latest`, `sha-<full-sha>` |
-| Release published, **prerelease** | `X.Y.Z-<pre>`, `beta`, `sha-<full-sha>` |
+| Release published, **release candidate** | `X.Y.Z-rc.N`, `rc`, `sha-<full-sha>` |
+| Release published, **beta** | `X.Y.Z-beta.N`, `beta`, `sha-<full-sha>` |
 | Manual dispatch | `dispatch-<sha>`, only if explicitly requested |
 
 A prerelease writes **no** `latest`, **no** `X.Y`, and **no** `X`. Publishing
-`v0.9.0-beta.1` produces exactly `0.9.0-beta.1`, `beta`, and
-`sha-<full-sha>` — never `latest`, `0.9`, or `0`.
+`v0.9.0-rc.1` produces exactly `0.9.0-rc.1`, `rc`, and `sha-<full-sha>` — never
+`latest`, `beta`, `0.9`, or `0`.
 
 `latest` moves on STABLE releases and nowhere else, so neither a push to `main`
-nor a beta can replace the tag production is pulling.
+nor a prerelease can replace the tag production is pulling.
+
+#### `rc` and `beta` are two channels, not one
+
+A channel name is a claim about how finished a build is, so a release joins
+exactly one. `github.event.release.prerelease` cannot make that choice on its
+own: it is a checkbox, and a boolean says a build is unfinished without saying
+how unfinished. Each alias therefore additionally requires its own marker in the
+tag — `-rc.` for `rc`, `-beta.` for `beta` — so the channel and the version
+agree by construction rather than by the publisher remembering.
+
+A prerelease whose tag matches neither marker takes **no** rolling alias. It is
+published under its exact version and its immutable `sha-<full-sha>` and
+repurposes nobody's channel. `TestEveryPrereleaseChannelAliasIsPinnedToItsOwnVersionMarker`
+in `internal/arch` fails the build if an alias is ever gated on the checkbox
+alone.
 
 #### The release must be marked as a prerelease
 
 **This is the operator action the routing depends on.** The rules in
 `container.yml` branch on `github.event.release.prerelease`, which is the
-checkbox on the GitHub release form. A beta published with that box unticked is
-treated as a stable release: it would take `latest`, `X.Y`, and `X`, and every
-deployment following the documented Compose file would be upgraded onto a
-prerelease without asking.
+checkbox on the GitHub release form. A prerelease published with that box
+unticked is treated as a stable release: it would take `latest`, and every
+deployment following the documented Compose file would be upgraded onto an
+unfinished build without asking.
 
 Nothing downstream can correct that afterwards — the tags are already written —
 so the check belongs in the publication steps, not in review.
+
+**This has already happened once.** `v0.9.0-beta.2` was published with the box
+unticked. `latest` moved onto a beta, where it still points, and the `beta`
+channel stayed on `beta.1` because its own condition had gone false. Both
+mistakes came from the same unticked box. Until a stable release exists to claim
+it, `latest` should be deleted from the GHCR package rather than left resolving
+to a prerelease — the documentation states that `latest` does not point at an
+unfinished build, and that must be true of the registry and not only of the
+workflow.
 
 #### Why the version tags collapse
 
@@ -197,7 +222,7 @@ immutable `sha-<full-sha>`.
 
 ```sh
 # The tag under verification. For a stable release this may be `latest`.
-TAG=0.9.0-beta.1
+TAG=0.9.0-rc.1
 
 # Provenance and signature — proves this image was built by this repository's
 # workflow from this commit, and not by anyone else.

@@ -141,7 +141,7 @@ make web-dev  # terminal 2: Vite on 127.0.0.1:5173
 | Podman, containerd, CRI-O | Not supported | No compatibility work has been done. Podman's Docker-compatible socket may work; nothing verifies it. |
 | Kubernetes | **Not supported, and not planned** | HarborMaster manages containers on one host through one socket. It has no concept of a scheduler that would undo everything it did. |
 | Docker Swarm | Not supported | A service's containers are managed by the swarm; recreating one out from under it is a fight HarborMaster would lose. |
-| Remote or TCP Docker sockets | Not supported for beta | `HARBORMASTER_DOCKER_HOST` accepts one, but nothing tests TLS client authentication against a remote daemon. |
+| Remote or TCP Docker sockets | Not supported for 0.9.0 | `HARBORMASTER_DOCKER_HOST` accepts one, but nothing tests TLS client authentication against a remote daemon. |
 
 HarborMaster negotiates the API version with the daemon at startup and logs what
 it settled on. It uses a small, long-stable subset of the API: list and inspect
@@ -160,7 +160,7 @@ container create, start, stop, rename, and remove.
 The published image is a multi-architecture manifest, so `docker pull` selects
 the right one.
 
-### What is not supported, and will not be for this beta
+### What is not supported, and will not be for 0.9.0
 
 The scope exists so the guarantees mean something.
 
@@ -230,14 +230,15 @@ installed.
 
 ```sh
 docker volume create harbormaster-data
-docker pull ghcr.io/aznyi/harbormaster:0.9.0-beta.1
+docker pull ghcr.io/aznyi/harbormaster:0.9.0-rc.1
 ```
 
-**Pin the exact version.** `latest` is reserved for stable releases and does not
-point at a beta, so it will not resolve to this one. If you would rather track
-the newest beta as it lands, use `:beta` — a rolling tag that moves with every
-prerelease, which is convenient and means an upgrade can arrive without you
-choosing it. See [Container image](#container-image) for the full tag list.
+**Pin the exact version.** `latest` is reserved for stable releases, of which
+there has not yet been one, so it will not resolve to this release. If you would
+rather track the newest release candidate as it lands, use `:rc` — a rolling tag
+that moves with every release candidate, which is convenient and means an
+upgrade can arrive without you choosing it. See
+[Container image](#container-image) for the full tag list.
 
 ### 3. Start it
 
@@ -261,7 +262,7 @@ docker run -d \
   -l io.harbormaster.self=true \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v harbormaster-data:/var/lib/harbormaster \
-  ghcr.io/aznyi/harbormaster:0.9.0-beta.1
+  ghcr.io/aznyi/harbormaster:0.9.0-rc.1
 ```
 
 > **Why the number and not a variable.** `--group-add "$DOCKER_GID"` reads well
@@ -359,7 +360,7 @@ report, not a reason to restart the process.
 The named volume is what carries the database across the replacement:
 
 ```sh
-docker pull ghcr.io/aznyi/harbormaster:0.9.0-beta.1   # or the version you are moving to
+docker pull ghcr.io/aznyi/harbormaster:0.9.0-rc.1   # or the version you are moving to
 docker stop harbormaster
 docker rm harbormaster
 # Re-run the `docker run` command from step 3 unchanged.
@@ -370,14 +371,14 @@ event history survive. Roll back by re-running with the previous digest.
 
 ### Pinning a digest
 
-`latest` and `beta` are moving tags. Neither is immutable: the same name points
-at different images over time, and pulling it twice can give you two different
-builds. A version tag such as `0.9.0-beta.1` is stable in practice but is still
-a tag. For anything you need to reproduce exactly, pin the digest:
+`latest`, `rc` and `beta` are moving tags. None is immutable: the same name
+points at different images over time, and pulling it twice can give you two
+different builds. A version tag such as `0.9.0-rc.1` is stable in practice but
+is still a tag. For anything you need to reproduce exactly, pin the digest:
 
 ```sh
 # Record the digest you are running
-docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aznyi/harbormaster:0.9.0-beta.1
+docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/aznyi/harbormaster:0.9.0-rc.1
 
 # Deploy that exact image
 docker run -d --name harbormaster \
@@ -390,7 +391,7 @@ digest appears in the container workflow's job summary, and the image carries a
 signed provenance attestation you can verify:
 
 ```sh
-gh attestation verify oci://ghcr.io/aznyi/harbormaster:0.9.0-beta.1 -R Aznyi/HarborMaster
+gh attestation verify oci://ghcr.io/aznyi/harbormaster:0.9.0-rc.1 -R Aznyi/HarborMaster
 ```
 
 ## Accounts and access
@@ -617,24 +618,31 @@ Published to `ghcr.io/aznyi/harbormaster` for `linux/amd64` and `linux/arm64`.
 | Pull request | none — built and smoke-tested only |
 | Push to `main` | `edge`, `sha-<full commit sha>` |
 | Stable release `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest`, `sha-<full commit sha>` |
-| Prerelease `v0.9.0-beta.1` | `0.9.0-beta.1`, `beta`, `sha-<full commit sha>` |
+| Release candidate `v0.9.0-rc.1` | `0.9.0-rc.1`, `rc`, `sha-<full commit sha>` |
+| Beta `v0.9.0-beta.3` | `0.9.0-beta.3`, `beta`, `sha-<full commit sha>` |
 | Manual dispatch | none, unless `push_image` is set, and then only `dispatch-<sha>` |
 
 Which tag to use:
 
 | Tag | Moves | Use it when |
 | --- | --- | --- |
-| `0.9.0-beta.1` | no | You want this exact beta. **The recommended way to run the beta.** |
-| `beta` | every prerelease | You want the newest beta and accept that it changes under you. |
-| `latest` | every **stable** release | You want the newest stable release. It does not point at a beta. |
+| `0.9.0-rc.1` | no | You want this exact release candidate. **The recommended way to run it.** |
+| `rc` | every release candidate | You want the newest release candidate and accept that it changes under you. |
+| `beta` | every beta | You want the newest beta. Frozen at `0.9.0-beta.2`; the series has moved on to release candidates. |
+| `latest` | every **stable** release | You want the newest stable release. There has not yet been one. |
 | `edge` | every push to `main` | You are testing unreleased work. |
 | `sha-<sha>` | no | You need an immutable reference to one commit. |
 
+**Each channel names one maturity, and a release joins exactly one.** A release
+candidate takes `rc` and a beta takes `beta`; neither takes the other's, so
+subscribing to a channel is a statement about how finished a build you are
+willing to run, not merely about how recent it is.
+
 **`latest` is reserved for stable releases.** A prerelease never claims it, and
 never claims `0.9` or `0` either — so an operator tracking `latest` is not moved
-onto a beta by a release they did not choose. `latest` moves on releases and
-nowhere else, so merging to `main` can never replace the tag a production host
-is pulling.
+onto a prerelease by a release they did not choose. `latest` moves on releases
+and nowhere else, so merging to `main` can never replace the tag a production
+host is pulling.
 
 The runtime layer is `gcr.io/distroless/static-debian13:nonroot`: no shell, no
 package manager, no interpreter, and no curl or wget. The binary is static

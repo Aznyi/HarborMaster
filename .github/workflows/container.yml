@@ -7,6 +7,7 @@ name: Container image
 #   pull_request      build only, nothing is pushed
 #   push to main      edge, sha-<full commit sha>
 #   release published <major>.<minor>.<patch>, <major>.<minor>, <major>, latest
+#   prerelease pub.   <version>, one channel alias (rc or beta), sha-<full sha>
 #   workflow_dispatch build only, unless `push_image` is set, and then only a
 #                     disposable dispatch-<sha> tag
 #
@@ -150,9 +151,20 @@ jobs:
           #           who followed the documentation into a prerelease without
           #           asking. `github.event.release.prerelease` is the flag the
           #           person cutting the release already sets.
-          #   beta    The rolling prerelease channel, for operators who opt in
-          #           to the newest beta on purpose.
-          #   X.Y.Z   The exact version, always. This is what the beta
+          #   rc      The rolling RELEASE CANDIDATE channel.
+          #   beta    The rolling BETA channel.
+          #
+          #           These are two channels, not one, and a release joins
+          #           exactly one of them. `prerelease == true` alone is not
+          #           enough to pick: it says a build is unfinished, not HOW
+          #           unfinished, and a single alias driven by that flag hands
+          #           whoever subscribed to `beta` a build published under a
+          #           different maturity claim. So each alias additionally
+          #           requires its own marker in the tag. A prerelease matching
+          #           neither -- `-alpha.1`, say -- gets its exact version and
+          #           `sha-…` and no rolling alias at all, which is the fail-
+          #           closed direction: no channel is silently repurposed.
+          #   X.Y.Z   The exact version, always. This is what the prerelease
           #           documentation tells people to pin.
           #   sha-…   Immutable, emitted for pushes AND releases, so a published
           #           release is addressable by commit and not only by a tag
@@ -169,7 +181,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
-            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease == true }}
+            type=raw,value=rc,enable=${{ github.event_name == 'release' && github.event.release.prerelease == true && contains(github.ref, '-rc.') }}
+            type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease == true && contains(github.ref, '-beta.') }}
             type=raw,value=dispatch-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.title=HarborMaster

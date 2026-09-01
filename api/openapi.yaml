@@ -2,25 +2,42 @@ openapi: 3.1.0
 
 info:
   title: HarborMaster API
-  version: 0.2.5
+  # This tracks the HarborMaster release, not a separate API lifecycle. The
+  # CONTRACT version is the `/api/v1` path prefix; a breaking change moves that.
+  version: 0.9.0-rc.1
   summary: Safety-first container lifecycle manager.
   description: |
     HarborMaster's REST API.
 
-    **This API is read-only with respect to Docker.** It inventories containers,
-    images, networks, and volumes, and reports build metadata and health. It
-    cannot pull images, create, update, restart, or remove containers, and it
-    exposes no command-execution endpoint. Those capabilities are not
-    implemented yet, and will be added to this document at the same time they
-    are added to the server.
+    **Exactly three endpoints can change the Docker host, and they are named
+    here.** Everything else in this API either reads, or writes HarborMaster's
+    own records.
 
-    **One exception, added in Phase 8.** `POST /api/v1/acquisitions` downloads
-    an approved, digest-pinned image into the daemon's local image store. That
-    is the entire write capability, and it is worth stating what it still
-    cannot do: it changes no container. A container keeps running the image it
-    was created from, and there is no endpoint anywhere in this API that stops,
-    starts, recreates, or reconfigures one, nor one that removes or prunes an
-    image. Acquisition is off by default and must be enabled deliberately.
+    - `POST /api/v1/acquisitions` downloads an approved, digest-pinned image
+      into the daemon's local image store. It changes no container.
+    - `POST /api/v1/executions` recreates one container onto an image a prior
+      acquisition already downloaded and verified.
+    - `POST /api/v1/rollbacks` restores the container a prior execution
+      replaced.
+
+    **Each is off by default and enabled separately.** A deployment that has
+    switched none of them on cannot change the host through this API at all.
+
+    **None of the three takes its target from the caller.** An acquisition names
+    a plan, an execution names an acquisition, and a rollback names an
+    execution -- every container id, name, and image is derived from a record
+    HarborMaster wrote itself and re-verified against the live host immediately
+    before acting. There is no field anywhere in these requests for a
+    caller-supplied container id, and none of them can act on the container
+    HarborMaster is itself running in.
+
+    It is worth stating what this API still cannot do. **No endpoint removes or
+    prunes an image**, and none starts, stops, or reconfigures a container
+    outside the recreate-and-roll-back pair above. There is no
+    command-execution endpoint. Retained-image cleanup exists as a background
+    capability, is off by default, and derives every candidate from
+    HarborMaster's own settled execution records -- there is no request anywhere
+    in this API that can name an image for it to remove.
 
     Every other endpoint that accepts a write method mutates HarborMaster's own
     records only -- `POST /api/v1/inventory/refresh` re-reads the host and
@@ -5096,9 +5113,9 @@ paths:
             application/json:
               schema:
                 { $ref: "#/components/schemas/ContainerBehaviorSummary" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
   /api/v1/containers/{id}/update-behavior:
     parameters:
@@ -5140,10 +5157,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
     post:
       tags: [Containers]
@@ -5180,11 +5197,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
     delete:
       tags: [Containers]
@@ -5204,10 +5221,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ContainerUpdateBehavior" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
   /api/v1/automation/simple-updates:
     get:
@@ -5244,9 +5261,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SimpleUpdatesState" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
     post:
       tags: [Automation]
@@ -5279,7 +5296,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409":
           description: |
@@ -5288,8 +5305,8 @@ paths:
             history, and the repository refuses to edit an archived row.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "503": { $ref: "#/components/responses/Disabled" }
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
     delete:
       tags: [Automation]
@@ -5315,9 +5332,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UpdatePolicyResult" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "503": { $ref: "#/components/responses/Disabled" }
+        "503": { $ref: "#/components/responses/AutomationUnavailable" }
 
   /api/v1/automation/paused:
     get:
@@ -11904,7 +11921,8 @@ components:
       properties:
         items:
           type: array
-          description: One entry per saved behaviour, ordered by container name.
+          description: >-
+            One entry per saved behaviour, ordered by container name.
             Includes stale entries, marked `present: false`.
           items: { $ref: "#/components/schemas/ContainerBehaviorItem" }
         counts:
