@@ -6,7 +6,7 @@
 # directory, not the next line of the same file, and not the same value if it
 # ever appears again anywhere else. A new secret is still a build failure.
 #
-# There are exactly three, and all three are in HISTORY rather than in the
+# There are exactly four, and all four are in HISTORY rather than in the
 # working tree. The current tree is clean on its own: each fixture below has
 # been rewritten at HEAD so it no longer resembles a credential. These entries
 # exist only because `gitleaks git` scans every commit, and the commits that
@@ -69,3 +69,29 @@
 # traversal, SQL injection, script injection and an overlong id, and still
 # requires every one to answer exactly as an absent id does.
 81fc2c25970ff03994876c36f0cd4f259fd0183a:internal/api/dependency_roundtrip_test.go:generic-api-key:641
+
+# ---------------------------------------------------------------------------
+# internal/service/notification_sink_test.go:346
+#
+# A synthetic ROLLBACK IDENTIFIER in a C4B notification test: the literal
+# `rb_0123456789abcdef01`, asserted against a delivery record's dedup key.
+#
+# WHAT THE VALUE IS. A rollback id is a public identifier HarborMaster
+# generates server-side from the system entropy source. It appears in URLs and
+# in parked container names, and it authenticates NOTHING: every endpoint that
+# accepts one requires an authenticated session and an authorisation decision
+# first, and the id only selects which of HarborMaster's own records to act on.
+# This particular one has never named a real rollback -- it is twenty
+# characters of ascending hex, chosen to be obviously fabricated.
+#
+# WHY THE RULE FIRED. A twenty-character hex run immediately beside the
+# identifier `DedupKey`. That is a good heuristic and it was doing its job: it
+# cannot tell a record id from an API key by looking.
+#
+# FIXED AT HEAD. The literal is gone. The fixture is now composed as
+# `"rb_" + strings.Repeat("a", 20)`, which is still a well-formed rollback id
+# -- the prefix and length are what the validator checks -- and no longer
+# resembles a credential. The test proves exactly what it did before: that a
+# retried delivery reuses ONE record and that the record still names the
+# rollback it reports.
+c7828623efdee70441edb7d2b2d13424b9b27408:internal/service/notification_sink_test.go:generic-api-key:346

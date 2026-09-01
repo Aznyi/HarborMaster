@@ -39,6 +39,15 @@ import (
 // the suppression window, the delivery record, the retry, and the complete
 // domain.Notification each channel would serialise.
 
+// c4bRollbackID is a synthetic rollback identifier.
+//
+// Composed rather than written out, because a twenty-character hex run beside
+// an identifier is exactly the shape the generic-api-key rule looks for, and a
+// test fixture that trips a good secret rule should be rewritten rather than
+// added to the exception list. It is still a well-formed rollback id: the
+// prefix and the length are what the validator checks.
+var c4bRollbackID = "rb_" + strings.Repeat("a", 20)
+
 // deliverySink records every webhook body it is posted.
 type deliverySink struct {
 	mu       sync.Mutex
@@ -210,7 +219,7 @@ func TestTheLifecyclePayloadsThatReachTheWire(t *testing.T) {
 			"the recreation did not succeed (unhealthy).", true, false)
 		// D. failed update, successful automatic rollback.
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", "rb_0123456789abcdef01", "exec_2123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_2123456789abcdef")
 		// E. rollback failure.
 		NotifyRollbackFailed(rig.engine, "web", "rb_1123456789abcdef01",
 			"the rollback did not succeed (startOriginal).", true)
@@ -331,7 +340,7 @@ func TestARetryReusesOneDeliveryRecordRatherThanMintingAnother(t *testing.T) {
 
 	rig.deliver(t, 1, func() {
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", "rb_0123456789abcdef01", "exec_0123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef")
 	})
 
 	recorded := rig.store.recorded()
@@ -343,7 +352,7 @@ func TestARetryReusesOneDeliveryRecordRatherThanMintingAnother(t *testing.T) {
 	}
 	// And the row still names the lifecycle record it reports, so the history
 	// can be joined back to the rollback.
-	if !strings.Contains(recorded[0].DedupKey, "rb_0123456789abcdef01") {
+	if !strings.Contains(recorded[0].DedupKey, c4bRollbackID) {
 		t.Errorf("the delivery record's dedup key is %q and does not name the "+
 			"rollback", recorded[0].DedupKey)
 	}
@@ -361,14 +370,20 @@ func TestARetryReusesOneDeliveryRecordRatherThanMintingAnother(t *testing.T) {
 // change the payload of every event on every channel, which is a published
 // contract change and its own piece of work. It is pinned instead, because it
 // is the reason NotifyUpdateRecovered states the attempted and restored images
-// in its BODY. If somebody fixes the gap, this test fails and points at the
-// duplication so it can be tidied deliberately.
+// in its BODY.
+//
+// TO BE UNAMBIGUOUS ABOUT WHAT THIS TEST IS FOR: it protects the CURRENT
+// published wire contract until the known debt is intentionally migrated. It
+// does NOT assert that fields must never be delivered -- delivering them is the
+// intended end state. When somebody makes that change this test fails, which is
+// the point: it fails at the duplicated images in the body, so the duplication
+// is removed deliberately rather than left behind.
 func TestTheDeliveredDocumentIsRebuiltFromTheStoredRow(t *testing.T) {
 	rig := newSinkRig(t, domain.EventUpdateRecovered)
 
 	rig.deliver(t, 1, func() {
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", "rb_0123456789abcdef01", "exec_0123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef")
 	})
 
 	delivered := rig.sender.captured()[0].Notification
