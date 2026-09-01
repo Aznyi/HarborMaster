@@ -2843,14 +2843,21 @@ to root. HarborMaster is built accordingly.
 
 Six statements, all of them true today:
 
-1. **HarborMaster changes a host only when a person asks, and only in three
-   narrow ways** — pulling an approved digest-pinned image, recreating one
-   container, and rolling one recreation back. All three are **off by default**,
-   and when off the capability is absent rather than merely unused. Nothing here
-   happens on a timer, on a schedule, or across a fleet, and there is no
-   restart, no exec, and no image or volume deletion at all. Subscribing to the
-   Docker event stream changes none of that: reading events is an observation,
-   and an event only ever causes HarborMaster to *re-read* the host.
+1. **HarborMaster changes a host in exactly four narrow ways** — pulling an
+   approved digest-pinned image, recreating one container, rolling one
+   recreation back, and removing an image its own settled update superseded.
+   All four are **off by default**, and when off the capability is absent
+   rather than merely unused. There is no restart, no exec, no volume deletion,
+   no prune, and no way to name an arbitrary image for removal.
+
+   Three of the four happen only when a person asks. The exception is
+   automation, which is also off by default: when an operator turns it on, a
+   timer may pull, recreate, and — where the governing policy permits it — roll
+   back. It creates no capability of its own; it submits the same requests an
+   operator would, to the same services, which re-run the same preflights.
+   Subscribing to the Docker event stream changes none of that: reading events
+   is an observation, and an event only ever causes HarborMaster to *re-read*
+   the host.
 2. **Docker socket access remains highly privileged regardless.** The socket
    HarborMaster holds could do anything, whether or not HarborMaster uses it
    that way. Mounting it `:ro` restricts the socket *file*, not the Docker

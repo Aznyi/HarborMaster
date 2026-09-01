@@ -882,9 +882,17 @@ back only from a registry, and only if that registry still serves the same
 content.
 
 **HarborMaster can remove one local image, by id, that a settled successful
-update of its own moved a workload off. It cannot remove an image it has no
-record of introducing, cannot prune, cannot sweep dangling images, and cannot
-force.**
+update of its own moved a workload OFF. It cannot prune, cannot sweep dangling
+images, cannot take an image id from a caller, and cannot force.**
+
+Note the rule precisely, because it is easy to state too strongly: the test is
+SUPERSEDED, not INTRODUCED. C4A established that provenance is unprovable --
+`acquired_image_id` records that a digest was acquired, not that HarborMaster
+put that image on the host first -- so no check anywhere asks "did we introduce
+this". An image an OPERATOR pulled by hand IS eligible once a settled
+HarborMaster update has moved a workload off it and every retention rule below
+has been satisfied. An image no HarborMaster execution record names is never a
+candidate, which is a different and weaker claim than "we only remove our own".
 
 Off by default. When `HARBORMASTER_IMAGE_CLEANUP_ENABLED` is false the pruner is
 nil, the service never enters its loop, and the capability is ABSENT rather than
@@ -1423,14 +1431,14 @@ Listing these so their absence reads as a decision rather than an oversight.
 | --- | --- |
 | A digest for a tag nobody resolved | Phase 10.1. A newer tag is proposed only when its OWN manifest digest was resolved in the same registry lookup. `domain.ProposedTarget` cannot be constructed from a reference and a digest resolved for a different reference, and `ChangePlan.ValidTarget` refuses an unpinnable pair before it reaches a row |
 | Any Docker mutation beyond a digest-pinned pull, a single-container recreate, and a single-execution rollback | Phase 8 added one image mutation, Phase 9 added five container lifecycle methods, Phase 10 added four rollback methods. All three surfaces are pinned by test, held by separate services, and off by default. Everything else remains absent |
-| **Automatic** rollback | **Explicitly not built.** A failed recreation quarantines the replacement, preserves both containers, and records manual steps. An automatic undo is another unattended mutation performed at exactly the moment HarborMaster has demonstrated its model of the host is wrong. Phase 10 added a rollback a PERSON asks for, one execution at a time; see §3g |
-| Scheduled or fleet rollback | Same reasoning. No timer creates rollback work, and `ROLLBACK_MAX_CONCURRENT` defaults to one |
+| Automatic rollback OUTSIDE automation | A rollback a person asks for is one execution at a time, and nothing undoes a MANUAL update by itself: the replacement is quarantined, both containers are preserved, and the record carries manual steps. Automation is the one path that may undo its own failure, and only when the governing policy sets `autoRollback`; it always pauses the container afterwards. See §3g-bis |
+| Fleet rollback | A rollback undoes ONE recorded recreation. `ROLLBACK_MAX_CONCURRENT` defaults to one, so even automation's recoveries happen one at a time |
 | Rollback to an arbitrary image, configuration, or snapshot | A rollback undoes ONE recorded recreation and derives every identity from that record. Restoring a container from a snapshot needs evidence a rollback does not have and is a later phase |
 | Removing anything during a rollback | The rollback capability has four methods and none of them removes. The failed replacement is the evidence of why the recreation was backed out |
 | Restore | Later phase; snapshots prepare for it |
-| Automatic, scheduled, or fleet updates | Every recreation is requested by an operator and acts on ONE container. No timer creates work, and `EXECUTION_MAX_CONCURRENT` is capped at four with a default of one |
+| FLEET updates | Every recreation acts on ONE container. With automation off -- the default -- no timer creates work at all; with it on, a pass is bounded by `AUTOMATION_MAX_PER_RUN` (10) and `AUTOMATION_MAX_CONCURRENT` (1), and `EXECUTION_MAX_CONCURRENT` is capped at four with a default of one |
 | Retrying a recreation or a rollback | HarborMaster stops at the first failure. A retried recreation is a new plan and a new acquisition; a retried rollback is a new request an operator makes deliberately |
-| Image or volume deletion | Still absent. `RemoveRequest` can remove a stopped CONTAINER and has no field for volumes or force |
+| Volume deletion, image PRUNING, and arbitrary image removal | Volume deletion is absent entirely: `RemoveRequest` removes a stopped CONTAINER and has no field for volumes or force. Image removal exists as of the retention work and is off by default -- one image, by id, never forced, never a prune or a dangling sweep, and derived from HarborMaster's own settled execution records rather than from any caller. See §3g-quater |
 | Arbitrary command execution | Never. Not a feature, a category of vulnerability |
 | Template or plugin execution | Same |
 | User-controlled file access | Same |

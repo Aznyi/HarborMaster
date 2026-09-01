@@ -293,7 +293,7 @@ function FeatureSections({ features }: { features?: Features }) {
           <Feature
             label="Remove superseded images"
             on={features.imageCleanup}
-            note="Deletes images that a settled, successful update moved a workload off, once nothing references them and the retention period has passed. Never forced, and never an image HarborMaster did not put there — but a removal cannot be undone."
+            note="Deletes images that a settled, successful update moved a workload off, once nothing references them and the retention period has passed. Never forced, and never an image no update of its own ever touched — but an image you pulled yourself becomes eligible once HarborMaster has updated the container off it, and a removal cannot be undone."
             dangerous
           />
         </dl>
