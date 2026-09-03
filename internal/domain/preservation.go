@@ -375,8 +375,8 @@ func BuildPreservationSummary(detail ContainerDetail, digest SecretDigester) Pre
 	add("security.privileged", strconv.FormatBool(security.Privileged))
 	add("security.readonlyRootfs", strconv.FormatBool(security.ReadonlyRootfs))
 	add("security.noNewPrivileges", strconv.FormatBool(security.NoNewPrivileges))
-	add("security.capAdd", joinSorted(security.CapAdd))
-	add("security.capDrop", joinSorted(security.CapDrop))
+	add("security.capAdd", joinSortedCapabilities(security.CapAdd))
+	add("security.capDrop", joinSortedCapabilities(security.CapDrop))
 	add("security.securityOpt", joinSorted(security.SecurityOpt))
 	add("security.apparmorProfile", security.AppArmorProfile)
 	add("security.seccompProfile", security.SeccompProfile)
@@ -479,6 +479,43 @@ func joinList(values []string) string {
 		return ""
 	}
 	return strings.Join(values, recordSeparator)
+}
+
+// joinSortedCapabilities renders a capability list for comparison.
+//
+// # Why this is not joinSorted
+//
+// A capability has two equivalent spellings in a Docker inspect response --
+// `CHOWN` and `CAP_CHOWN` -- and which one comes back depends on how the
+// container was created rather than on anything an operator chose. An original
+// created by one tool reports the bare names; the replacement HarborMaster
+// creates from that same configuration comes back canonicalised with the
+// prefix. Comparing the raw strings read an IDENTICAL capability set as a
+// configuration change, failed the recreation, and quarantined a healthy
+// replacement with nothing left serving.
+//
+// NormaliseCapability is the function the policy rules already compare through,
+// so both readers of a capability list agree on what one is called.
+//
+// # This is a spelling rule, not a weakening
+//
+// It maps the two spellings of ONE capability together and maps nothing else
+// together. A capability the replacement lost, or gained, still diverges --
+// which is what the security section exists to catch, and what the tests beside
+// this file hold.
+//
+// Normalised BEFORE sorting: `CAP_AUDIT_WRITE` and `AUDIT_WRITE` sort to
+// different positions, so sorting first would leave the rendering dependent on
+// the very spelling this removes.
+func joinSortedCapabilities(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	normalised := make([]string, 0, len(values))
+	for _, value := range values {
+		normalised = append(normalised, NormaliseCapability(value))
+	}
+	return joinSorted(normalised)
 }
 
 func joinSorted(values []string) string {
