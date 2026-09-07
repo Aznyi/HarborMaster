@@ -3,7 +3,7 @@ module github.com/Aznyi/HarborMaster
 // The LANGUAGE version the code is written against. Left at 1.25 deliberately:
 // nothing here needs newer semantics, and raising it would drop support for
 // building on the 1.25 line for no gain.
-go 1.25.0
+go 1.26.0
 
 // The minimum TOOLCHAIN a build may use, which is a security floor rather than
 // a language choice.
@@ -29,7 +29,7 @@ require (
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
 	github.com/opencontainers/image-spec v1.1.1
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.57.0
 )
