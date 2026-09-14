@@ -3,7 +3,7 @@ module github.com/Aznyi/HarborMaster
 // The LANGUAGE version the code is written against. Left at 1.25 deliberately:
 // nothing here needs newer semantics, and raising it would drop support for
 // building on the 1.25 line for no gain.
-go 1.25.0
+go 1.26.0
 
 // The minimum TOOLCHAIN a build may use, which is a security floor rather than
 // a language choice.
@@ -29,8 +29,8 @@ require (
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
 	github.com/opencontainers/image-spec v1.1.1
-	golang.org/x/crypto v0.55.0
-	golang.org/x/term v0.45.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/term v0.46.0
 	modernc.org/sqlite v1.57.0
 )
 
@@ -55,7 +55,7 @@ require (
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
