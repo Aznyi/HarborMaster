@@ -111,6 +111,13 @@ func (s *ExecutionService) verifyImage(
 	detail domain.ContainerDetail,
 	target domain.ExecutionTarget,
 ) bool {
+	return imageMatchesTarget(detail, target)
+}
+
+// imageMatchesTarget reports whether a container is on the approved image, by
+// any of the three routes the daemon offers to prove it. Shared by the
+// verification and by the adoption decision.
+func imageMatchesTarget(detail domain.ContainerDetail, target domain.ExecutionTarget) bool {
 	// The image the container was created from, as the daemon resolved it. The
 	// container was created from a digest-pinned reference, so this is expected
 	// to carry the digest directly.
@@ -221,13 +228,18 @@ func isGeneratedAlias(alias, containerID, shortID string) bool {
 // Bounded, cancellable, and polled at a configured interval that cannot be set
 // low enough to become a busy loop against the Docker socket.
 func (s *ExecutionService) verifyHealth(ctx, parent context.Context, work *pipeline) domain.ExecutionFailure {
-	deadline := s.now().UTC().Add(s.cfg.StartupTimeout)
-
 	// Whether the container declares a health check is read from the CAPTURE
 	// rather than from the replacement: it is configuration, it was captured
 	// from the original, and reading it from the thing being tested would let a
 	// replacement that lost its health check be judged by the weaker standard.
-	declared := healthCheckDeclared(work.captured.Detail())
+	captured := work.captured.Detail()
+	declared := healthCheckDeclared(captured)
+
+	// The wait follows the healthcheck's own budget when that is longer than
+	// the configured timeout -- a container still inside its start period is
+	// behaving as configured, not failing -- and never exceeds the cap.
+	deadline := s.now().UTC().Add(domain.HealthDeadline(captured.HealthCheck,
+		s.cfg.StartupTimeout, s.cfg.MaxHealthWait))
 	work.verification.HealthChecked = declared
 
 	ticker := time.NewTicker(s.cfg.HealthPollInterval)

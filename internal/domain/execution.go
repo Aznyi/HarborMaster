@@ -21,9 +21,11 @@ import (
 //
 // # What an execution is NOT
 //
-// It is not an update system. Nothing here runs on a schedule, nothing acts on
-// more than one container, and nothing rolls back. There is no automatic
-// retry: a recreation that fails stops and waits for a person.
+// It is not an update system. Nothing here runs on a schedule and nothing acts
+// on more than one container. There is no automatic retry: a recreation that
+// fails stops. What it does after stopping is ask the ROLLBACK service to put
+// the original back -- see ExecutionRestore -- and record what came of that;
+// it never moves a container back itself.
 //
 // # The single-use rule
 //
@@ -37,8 +39,10 @@ import (
 //
 // Every failure after the mutation point leaves BOTH containers on the host --
 // the parked original and the quarantined replacement -- and records a manual
-// recovery plan. HarborMaster does not undo its own work, because an automatic
-// undo is another unattended mutation and this phase has exactly one.
+// recovery plan. The recreation itself never undoes its own work: the restore
+// that follows is a separate, separately checkpointed rollback, requested from
+// the rollback service and refused by it whenever the host is not in an
+// arrangement it can undo without guessing.
 
 // ExecutionState is where one recreation has got to.
 //
@@ -190,8 +194,11 @@ const (
 	// CheckpointReplacementVerified means health or stability, image digest,
 	// configuration preservation, and network attachment have ALL passed.
 	CheckpointReplacementVerified ExecutionCheckpoint = "replacementVerified"
-	// CheckpointReplacementQuarantined means a failed replacement was stopped
-	// and renamed aside for diagnosis.
+	// CheckpointReplacementQuarantined means a failed replacement was stopped,
+	// renamed aside for diagnosis, AND had its restart policy set to "no". All
+	// three: a record carrying a quarantine name without this checkpoint
+	// describes a replacement that was moved off the production name but could
+	// still start by itself after a daemon restart.
 	CheckpointReplacementQuarantined ExecutionCheckpoint = "replacementQuarantined"
 	// CheckpointOriginalRemoved means the parked original is gone. Reached only
 	// after the success was recorded durably.
@@ -283,6 +290,14 @@ const (
 	// start.
 	ExecutionFailureStart ExecutionFailure = "start"
 
+	// ExecutionFailureRestartPolicy means the parked original's restart policy
+	// could not be set to "no" after the park. No replacement is created: a
+	// parked container that can start by itself after a daemon restart, beside
+	// a replacement holding its name and its ports, is the race the suspension
+	// exists to prevent. The original is parked and intact, and the rollback
+	// restores it without a replacement to move.
+	ExecutionFailureRestartPolicy ExecutionFailure = "restartPolicy"
+
 	// ExecutionFailureHealthTimeout means the replacement never reached a
 	// healthy state within its budget.
 	ExecutionFailureHealthTimeout ExecutionFailure = "healthTimeout"
@@ -339,6 +354,7 @@ var ExecutionFailures = []ExecutionFailure{
 	ExecutionFailurePreflight, ExecutionFailureCapture,
 	ExecutionFailureStop, ExecutionFailureRename,
 	ExecutionFailureCreate, ExecutionFailureStart,
+	ExecutionFailureRestartPolicy,
 	ExecutionFailureHealthTimeout, ExecutionFailureUnhealthy,
 	ExecutionFailureNotStable, ExecutionFailureImageMismatch,
 	ExecutionFailurePreservation, ExecutionFailureNetwork,
@@ -364,8 +380,9 @@ func ValidExecutionFailure(name string) bool {
 // has to settle.
 //
 // The dividing line is the mutation point. A preflight refusal changed nothing
-// and needs no cleanup; anything from the stop onward leaves containers that
-// only an operator can reconcile, because HarborMaster does not roll back.
+// and needs no cleanup; anything from the stop onward leaves containers on the
+// host, and even when the automatic restore puts the original back, the failed
+// replacement it kept is a person's to look at and remove.
 func (f ExecutionFailure) NeedsOperator() bool {
 	switch f {
 	case ExecutionFailureNone, ExecutionFailurePreflight,
@@ -391,6 +408,9 @@ func (f ExecutionFailure) Explain() string {
 		return "the replacement container could not be created; the original is stopped and preserved"
 	case ExecutionFailureStart:
 		return "the replacement container was created but would not start"
+	case ExecutionFailureRestartPolicy:
+		return "the parked original's restart policy could not be set to no, so no replacement was created; " +
+			"until it is restored the original could start by itself after a daemon restart"
 	case ExecutionFailureHealthTimeout:
 		return "the replacement container did not become healthy within its time budget"
 	case ExecutionFailureUnhealthy:
@@ -779,6 +799,18 @@ type Execution struct {
 	ParkedName      string `json:"parkedName,omitempty"`
 	QuarantineName  string `json:"quarantineName,omitempty"`
 	OriginalRemoved bool   `json:"originalRemoved"`
+
+	// OriginalRestartPolicy is the restart policy the original carried before
+	// the recreation parked it and set it to "no". Recorded at the mutation
+	// point so a rollback can restore it; zero on a record written before it
+	// was recorded, which describes a recreation that suspended nothing.
+	OriginalRestartPolicy RestartPolicy `json:"originalRestartPolicy,omitzero"`
+
+	// Restore is what became of putting the original back after a failure that
+	// changed the host. Zero when no restore applies: the update did not fail
+	// after the mutation point, or it was unattended and the automation
+	// follower owns its recovery.
+	Restore ExecutionRestore `json:"restore,omitzero"`
 
 	// Verification records what each proof concluded. Absent means the proof
 	// was never reached, which is deliberately distinct from having failed.

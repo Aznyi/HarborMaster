@@ -411,3 +411,23 @@ var (
 	_ Pinger  = (*Fake)(nil)
 	_ Runtime = (*Fake)(nil)
 )
+
+// WithInspection changes what a container reports from now on, so a test can
+// alter a container's state while a verification loop is polling it.
+//
+// Copy-on-write: InspectContainer hands out the stored pointer, and a caller
+// may still be reading the inspection it was given. The edit is applied to a
+// fresh copy that replaces the stored one, so an earlier reader keeps an
+// unchanged object and every later inspection sees the new state. A missing
+// id is a no-op.
+func (f *Fake) WithInspection(id string, edit func(*domain.ContainerDetail)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	current, ok := f.Inspections[id]
+	if !ok || current == nil {
+		return
+	}
+	updated := *current
+	edit(&updated.Detail)
+	f.Inspections[id] = &updated
+}

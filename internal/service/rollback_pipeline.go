@@ -67,6 +67,11 @@ type rollbackWork struct {
 	checkpoint domain.RollbackCheckpoint
 	// replacementParkedName is the derived name, once the rename has landed.
 	replacementParkedName string
+	// replacementUnsecured records that the parked replacement's restart policy
+	// could not be set to "no". The original is still restored; the success
+	// record then carries a plan naming the hazard rather than calling the
+	// replacement safe.
+	replacementUnsecured bool
 
 	verification domain.RollbackVerification
 }
@@ -152,10 +157,18 @@ func (s *RollbackService) execute(ctx context.Context, rollback domain.Rollback)
 	// values. Checked before the mutation point: a name that cannot be derived
 	// is a rollback that would strand the replacement holding the production
 	// name.
-	work.replacementParkedName = domain.RollbackParkedName(decision.ContainerName, id)
-	if work.replacementParkedName == "" {
+	//
+	// Derived and checked whether or not a replacement exists, so the
+	// derivation rule is exercised on every rollback; RECORDED on the work only
+	// when there is a replacement to park, so a rollback with none does not
+	// carry a parked name for a container that never existed.
+	parkedName := domain.RollbackParkedName(decision.ContainerName, id)
+	if parkedName == "" {
 		s.refuse(ctx, work, domain.RollbackRefusalNameUnavailable)
 		return
+	}
+	if decision.ReplacementID != "" {
+		work.replacementParkedName = parkedName
 	}
 
 	// A last cancellation check on the very edge of the mutation point. An
@@ -184,7 +197,11 @@ func (s *RollbackService) execute(ctx context.Context, rollback domain.Rollback)
 // Computed from the configured timeouts rather than fixed, so a deployment that
 // allows a ten-minute startup does not have its rollbacks cut off at five.
 func (s *RollbackService) mutationBudget() time.Duration {
-	return s.cfg.StopTimeout + s.cfg.StartupTimeout + s.cfg.StabilityPeriod + rollbackMutationMargin
+	healthWait := s.cfg.StartupTimeout
+	if s.cfg.MaxHealthWait > healthWait {
+		healthWait = s.cfg.MaxHealthWait
+	}
+	return s.cfg.StopTimeout + healthWait + s.cfg.StabilityPeriod + rollbackMutationMargin
 }
 
 // mutate runs the half of the pipeline that changes the host.
@@ -195,6 +212,13 @@ func (s *RollbackService) mutationBudget() time.Duration {
 // the failure itself.
 func (s *RollbackService) mutate(ctx, parent context.Context, work *rollbackWork) {
 	id := work.rollback.RollbackID
+
+	if work.decision.ReplacementID == "" {
+		// The recreation created nothing. There is no replacement to stop and
+		// none to park; the rollback is the last two steps, and only those.
+		s.mutateWithoutReplacement(ctx, parent, work)
+		return
+	}
 
 	moved, err := s.store.Advance(ctx, store.RollbackChange{
 		RollbackID: id,
@@ -268,6 +292,24 @@ func (s *RollbackService) mutate(ctx, parent context.Context, work *rollbackWork
 		return
 	}
 
+	// The parked replacement must not come back by itself after a daemon
+	// restart. Best effort, for the same reason the recreation's suspension is:
+	// a rollback that stopped here would leave nothing serving to guard against
+	// a hazard later.
+	// Unconditional: the replacement inherited whatever policy the original
+	// carried, and a record written before that policy was recorded still
+	// describes a replacement that may carry one. The adapter itself skips a
+	// container already at "no".
+	if err := s.rollbacker.SuspendRestart(ctx, docker.SuspendRestartRequest{
+		ContainerID: work.decision.ReplacementID,
+	}); err != nil {
+		work.replacementUnsecured = true
+		s.logger.ErrorContext(ctx, "could not suspend the parked replacement's restart policy; a daemon restart could start it",
+			slog.String("rollbackId", id),
+			slog.String("replacementId", domain.ShortenID(work.decision.ReplacementID)),
+			slog.String("error", err.Error()))
+	}
+
 	// ---- 3. restore the original's name ------------------------------------
 
 	if s.shuttingDown(parent, work) {
@@ -289,12 +331,126 @@ func (s *RollbackService) mutate(ctx, parent context.Context, work *rollbackWork
 		return
 	}
 
+	s.startAndProve(ctx, parent, work)
+}
+
+// mutateWithoutReplacement rolls back a recreation that never created a
+// replacement: the create or the park rename failed after the stop.
+//
+// # Why this path exists
+//
+// A create that fails after the park leaves one container on the host -- the
+// original, stopped, under its parked name -- and a workload that is DOWN.
+// Refusing to roll that back because "there is no replacement to stop" was the
+// one answer that could not be true of it. So this path does the only two
+// things there are to do: give the original its name back, when the live host
+// says it does not already hold it, and start it. Then it proves it exactly as
+// the full rollback would.
+//
+// # It does not stop, park, or remove anything
+//
+// The same four-method capability, and only two of the methods are reached.
+// The production name was established free -- or held by the original itself --
+// by nameHeldSafely immediately before the mutation point, so the rename
+// cannot collide with a container this record does not know about.
+func (s *RollbackService) mutateWithoutReplacement(ctx, parent context.Context, work *rollbackWork) {
+	id := work.rollback.RollbackID
+
+	detail := "no replacement was created; giving the original its name back"
+	if work.decision.OriginalHoldsName {
+		detail = "no replacement was created and the original still holds its own name"
+	}
+	moved, err := s.store.Advance(ctx, store.RollbackChange{
+		RollbackID: id,
+		From:       []domain.RollbackState{domain.RollbackValidating},
+		To:         domain.RollbackRestoringName,
+		Detail:     detail,
+	}, s.now().UTC())
+	if err != nil || !moved {
+		// Could not even record the intent. Nothing has been changed, so
+		// stopping here is free -- and it is the only safe option.
+		s.failBeforeMutation(parent, work, domain.RollbackFailurePersistence,
+			domain.RollbackFailurePersistence.Explain())
+		return
+	}
+
+	// ---- restore the original's name, if it does not already hold it -------
+	//
+	// Decided from the LIVE name the preflight read a moment ago, not from the
+	// recreation's checkpoint: a record that says the park rename failed can
+	// describe a rename that landed on the daemon after the client gave up.
+	// Renaming a container to the name it already holds is an error, and a
+	// failure here would be recorded as one.
+
+	if !work.decision.OriginalHoldsName {
+		if s.shuttingDown(parent, work) {
+			return
+		}
+		if err := s.rollbacker.RestoreOriginalName(ctx, docker.RollbackRestoreRequest{
+			OriginalID: work.decision.OriginalID,
+			Name:       work.decision.ContainerName,
+		}); err != nil {
+			s.failAfterMutation(parent, work, s.classify(err, domain.RollbackFailureRename),
+				domain.RollbackFailureRename.Explain())
+			return
+		}
+		if !s.checkpoint(ctx, parent, work, store.RollbackCheckpointWrite{
+			RollbackID:  id,
+			Checkpoint:  domain.RollbackCheckpointOriginalRestored,
+			Detail:      "the original container carries its own name again",
+			MarkMutated: true,
+		}) {
+			return
+		}
+	}
+
+	s.startAndProve(ctx, parent, work)
+}
+
+// startAndProve is the tail every rollback shares: start the original, prove
+// it, record the conclusion.
+//
+// Reached from restoringName in both paths. The original holds the production
+// name by now -- restored by the step before, or never lost.
+func (s *RollbackService) startAndProve(ctx, parent context.Context, work *rollbackWork) {
+	id := work.rollback.RollbackID
+
+	// ---- 3b. put the original's restart policy back ------------------------
+	//
+	// The recreation set the parked original to "no". Starting it without
+	// restoring what it carried before would turn `restart: always` into
+	// `restart: no` for good: the workload would run until its next crash and
+	// then stay down. So the policy goes back BEFORE the start, and a failure
+	// here is a failed rollback -- the original holds its name and is not
+	// running, and the plan says exactly which policy to write.
+	//
+	// A record with no policy describes a recreation that suspended nothing
+	// (it predates the recording), and is left alone.
+
+	if policy := work.decision.OriginalRestartPolicy; policy.RestartsUnattended() {
+		if s.shuttingDown(parent, work) {
+			return
+		}
+		if err := s.rollbacker.RestoreRestart(ctx, docker.RestoreRestartRequest{
+			ContainerID: work.decision.OriginalID,
+			Policy:      policy,
+		}); err != nil {
+			s.logger.ErrorContext(ctx, "could not restore the original's restart policy; not starting it",
+				slog.String("rollbackId", id),
+				slog.String("restartPolicy", policy.Encode()),
+				slog.String("error", err.Error()))
+			s.failAfterMutation(parent, work, s.classify(err, domain.RollbackFailureRestartPolicy),
+				domain.RollbackFailureRestartPolicy.Explain())
+			return
+		}
+	}
+
 	// ---- 4. start the original ---------------------------------------------
 
 	if s.shuttingDown(parent, work) {
 		return
 	}
-	moved, err = s.store.Advance(ctx, store.RollbackChange{
+	moved, err := s.store.Advance(ctx, store.RollbackChange{
 		RollbackID: id,
 		From:       []domain.RollbackState{domain.RollbackRestoringName},
 		To:         domain.RollbackStartingOriginal,
@@ -317,6 +473,10 @@ func (s *RollbackService) mutate(ctx, parent context.Context, work *rollbackWork
 		RollbackID: id,
 		Checkpoint: domain.RollbackCheckpointOriginalStarted,
 		Detail:     "the original container is running and not yet proved",
+		// The first checkpoint of a rollback whose original already held its
+		// own name. Idempotent everywhere else: the store keeps the earliest
+		// stamp.
+		MarkMutated: true,
 	}) {
 		return
 	}
@@ -367,7 +527,7 @@ func (s *RollbackService) mutate(ctx, parent context.Context, work *rollbackWork
 func (s *RollbackService) succeed(ctx, parent context.Context, work *rollbackWork) {
 	id := work.rollback.RollbackID
 
-	recorded, err := s.store.Advance(ctx, store.RollbackChange{
+	change := store.RollbackChange{
 		RollbackID:   id,
 		From:         []domain.RollbackState{domain.RollbackVerifyingOriginal},
 		To:           domain.RollbackSucceeded,
@@ -375,7 +535,18 @@ func (s *RollbackService) succeed(ctx, parent context.Context, work *rollbackWor
 		Detail:       "the rollback is complete",
 		Message:      "the original container is running under its own name and passed every verification",
 		Verification: &work.verification,
-	}, s.now().UTC())
+	}
+	if work.replacementUnsecured {
+		// A success, because the original is serving -- and a record that must
+		// not call the parked replacement safe. The plan names the hazard and
+		// the command; the message says it in the sentence an operator reads.
+		change.Detail = "the rollback is complete; the parked replacement's restart policy could not be neutralised"
+		change.Message = "the original container is running under its own name and passed every " +
+			"verification; the parked replacement still carries its restart policy and could " +
+			"start by itself after a daemon restart"
+		change.Recovery = domain.BuildRollbackUnsecuredReplacementPlan(s.recoveryContext(work))
+	}
+	recorded, err := s.store.Advance(ctx, change, s.now().UTC())
 	if err != nil || !recorded {
 		s.failAfterMutation(parent, work, domain.RollbackFailurePersistence,
 			domain.RollbackFailurePersistence.Explain())
@@ -620,6 +791,8 @@ func (s *RollbackService) recoveryContext(work *rollbackWork) domain.RollbackRec
 		ParkedName:            work.rollback.ParkedName,
 		ReplacementID:         work.rollback.ReplacementID,
 		ReplacementParkedName: work.replacementParkedName,
+		OriginalHoldsName:     work.decision.OriginalHoldsName,
+		OriginalRestartPolicy: recordedRestartPolicy(work.decision.OriginalRestartPolicy),
 		Checkpoint:            work.checkpoint,
 		Failure:               domain.RollbackFailureNone,
 		MutationAttempted:     work.checkpoint.HostChanged(),
@@ -638,4 +811,13 @@ func newRollbackVerification() domain.RollbackVerification {
 		Preservation: domain.VerificationUnknown,
 		Network:      domain.VerificationUnknown,
 	}
+}
+
+// recordedRestartPolicy renders a restart policy for a recovery plan, or
+// nothing when the recreation suspended nothing.
+func recordedRestartPolicy(policy domain.RestartPolicy) string {
+	if !policy.RestartsUnattended() {
+		return ""
+	}
+	return policy.Encode()
 }

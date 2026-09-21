@@ -265,7 +265,56 @@ func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, 
 	return count > 0, nil
 }
 
+// rebuildDirective marks a migration that rebuilds a table other tables
+// reference.
+//
+// # Why a migration has to say so
+//
+// With foreign keys on, SQLite's DROP TABLE performs an implicit DELETE FROM
+// before removing the table, and ON DELETE CASCADE actions fire on it. A
+// rebuild -- copy the table, drop the original, rename the copy -- therefore
+// deletes every row of every table that references it. `PRAGMA foreign_keys`
+// is a no-op inside a transaction, so the file cannot switch it off for
+// itself; the runner has to, on a dedicated connection, before the transaction
+// opens. That is what this directive asks for. The runner then checks for
+// orphaned references before committing, which is the check the constraint
+// would otherwise have made, and turns foreign keys back on before the
+// connection returns to the pool.
+const rebuildDirective = "-- harbormaster:foreign_keys=off"
+
+// rebuildsATable reports whether a migration rebuilds a table: it carries the
+// directive on its first line, or it drops a table.
+//
+// # Why the statement is detected and not only the directive
+//
+// The directive was introduced with 0036. Ten earlier migrations rebuild a
+// table the same way -- copy, drop, rename -- and four of them (0028, 0029,
+// 0030, 0031) drop a table that a child table references ON DELETE CASCADE.
+// Run with foreign keys on, that DROP deletes every child row. Those files
+// cannot be edited: their checksums are recorded on every upgraded database
+// and a changed file is refused at startup. What CAN change is how the runner
+// treats them, so a migration that drops a table is run the protected way
+// whether or not it says so, and an installation still to upgrade through
+// them keeps its event history. Detected on the statements, not the comments.
+func rebuildsATable(m migration) bool {
+	first, _, _ := strings.Cut(m.sql, "\n")
+	if strings.TrimSpace(first) == rebuildDirective {
+		return true
+	}
+	for _, line := range strings.Split(m.sql, "\n") {
+		statement, _, _ := strings.Cut(line, "--")
+		if strings.Contains(strings.ToUpper(statement), "DROP TABLE") {
+			return true
+		}
+	}
+	return false
+}
+
 func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
+	if rebuildsATable(m) {
+		return applyRebuildMigration(ctx, db, m)
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -275,6 +324,58 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations (name, checksum) VALUES (?, ?)`,
+		m.name, m.checksum); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// applyRebuildMigration runs one migration with foreign keys off, on a
+// connection it holds for the whole of the work, and refuses to commit a
+// database with an orphaned reference.
+func applyRebuildMigration(ctx context.Context, db *sql.DB, m migration) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire a connection for %s: %w", m.name, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Outside any transaction, or it would be ignored.
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for %s: %w", m.name, err)
+	}
+	defer func() {
+		// Back on before the connection returns to the pool, whatever
+		// happened. A connection left with enforcement off is a connection
+		// that would accept an orphan later, silently.
+		if _, restoreErr := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); restoreErr != nil && err == nil {
+			err = fmt.Errorf("re-enable foreign keys after %s: %w", m.name, restoreErr)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+		return err
+	}
+
+	// The check the constraint would have made. A rebuild that lost the
+	// parent rows of any reference, or renamed a table a child still points
+	// at by another name, is rolled back rather than committed.
+	orphaned, err := orphanedReferences(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("check foreign keys after %s: %w", m.name, err)
+	}
+	if orphaned {
+		return fmt.Errorf("migration %s left an orphaned foreign key reference; rolled back", m.name)
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations (name, checksum) VALUES (?, ?)`,
 		m.name, m.checksum); err != nil {
@@ -367,4 +468,21 @@ func loadMigrations() ([]migration, error) {
 		return migrations[i].name < migrations[j].name
 	})
 	return migrations, nil
+}
+
+// orphanedReferences reports whether any foreign key reference in the
+// database points at a row that does not exist. It reads one row at most: the
+// answer is yes or no, and which references are broken is for the operator's
+// integrity check, not the migration runner.
+func orphanedReferences(ctx context.Context, tx *sql.Tx) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	orphaned := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return orphaned, nil
 }

@@ -185,6 +185,23 @@ Follow [Upgrading HarborMaster](upgrading.md). The named volume carries the
 database across the replacement; nothing in this release requires a manual
 migration step.
 
+### Execution event history on installations upgraded through beta.2
+
+Four schema migrations in v0.9.0-beta.2 (0028 through 0031) rebuilt the
+`executions` and `acquisitions` tables. SQLite runs a table drop as a delete
+first, and with foreign keys on that delete cascaded into the per-update
+event rows: an installation that upgraded from beta.1 to beta.2 lost the
+step-by-step event history of its updates and image downloads that existed at
+that time. The update and download records themselves -- outcome, checkpoint,
+container identities, recovery plan -- were kept; only their event timelines
+were affected, and nothing in HarborMaster reconstructs a record from its
+events, so no later decision was made on missing data.
+
+The migration runner in this release runs every table rebuild with foreign
+keys off on a dedicated connection and checks for orphaned references before
+it commits, including the four migrations above for an installation that has
+not yet run them. Event history already lost on beta.2 cannot be recovered.
+
 ## Known RC limitations
 
 - **`Notification.Fields` is not delivered.** The structured field set exists on

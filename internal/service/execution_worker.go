@@ -50,10 +50,24 @@ func (s *ExecutionService) Run(ctx context.Context) {
 		slog.Duration("stopTimeout", s.cfg.StopTimeout),
 		slog.Bool("requireSnapshot", s.cfg.RequireSnapshot))
 
+	// Said once at startup, because an operator reads it before the first
+	// failed update rather than after: with restore on and rollback off, a
+	// manual update that fails after the mutation point stays down.
+	if s.cfg.RestoreOnFailure && (s.restorer == nil || !s.restorer.Enabled()) {
+		s.logger.Warn("restore on failure is on but manual rollback is not enabled; a manual update that fails after "+
+			"the original is stopped will NOT be restored automatically",
+			slog.Bool("restoreOnFailure", true),
+			slog.Bool("rollbackEnabled", false))
+	}
+
 	// Anything left mid-flight by a crash is settled BEFORE the queue is
 	// touched. An execution in `creating` is a claim about a process that no
 	// longer exists, and it may have left two containers on the host.
 	s.recover(ctx)
+	// Then the settled rows that may have left a replacement unrecorded, so a
+	// container the daemon finished creating while HarborMaster was down is
+	// named before anything else acts on the record.
+	s.Reconcile(ctx)
 
 	sweep := newOptionalTicker(s.cfg.SweepInterval)
 	defer sweep.Stop()
@@ -79,6 +93,8 @@ func (s *ExecutionService) Run(ctx context.Context) {
 
 		case <-sweep.C():
 			s.expire(ctx)
+			s.Reconcile(ctx)
+			s.AdvanceRestores(ctx)
 			s.dispatch(ctx, &workers)
 
 		case <-prune.C():
@@ -149,16 +165,28 @@ func (s *ExecutionService) recoverOne(ctx context.Context, execution domain.Exec
 	attempted := execution.State.Mutating()
 	changedHost := execution.Checkpoint.HostChanged() || attempted
 
+	// The one thing this pass reads from the host. A process that died between
+	// the create and its checkpoint left a replacement holding the production
+	// name that the record does not name; if one carries this execution's
+	// ownership labels it is recorded now, so the settled record -- and the
+	// rollback that follows it -- names both containers. Reads and a record;
+	// still not one mutation.
+	if adopted, ok := s.adoptUnrecordedReplacement(ctx, execution); ok {
+		execution.ReplacementID = adopted
+		execution.Checkpoint = domain.CheckpointReplacementCreated
+	}
+
 	plan := domain.BuildRecoveryPlan(domain.RecoveryContext{
-		ExecutionID:       execution.ExecutionID,
-		ContainerName:     execution.ContainerName,
-		OriginalID:        execution.ContainerID,
-		ParkedName:        execution.ParkedName,
-		ReplacementID:     execution.ReplacementID,
-		QuarantineName:    execution.QuarantineName,
-		Checkpoint:        execution.Checkpoint,
-		Failure:           domain.ExecutionFailureInterrupted,
-		MutationAttempted: attempted,
+		ExecutionID:           execution.ExecutionID,
+		ContainerName:         execution.ContainerName,
+		OriginalID:            execution.ContainerID,
+		ParkedName:            execution.ParkedName,
+		ReplacementID:         execution.ReplacementID,
+		QuarantineName:        execution.QuarantineName,
+		Checkpoint:            execution.Checkpoint,
+		Failure:               domain.ExecutionFailureInterrupted,
+		MutationAttempted:     attempted,
+		OriginalRestartPolicy: execution.OriginalRestartPolicy.Encode(),
 	})
 
 	message := domain.ExecutionFailureInterrupted.Explain()
@@ -188,6 +216,9 @@ func (s *ExecutionService) recoverOne(ctx context.Context, execution domain.Exec
 			slog.String("checkpoint", string(execution.Checkpoint)),
 			slog.String("parkedName", execution.ParkedName),
 			slog.String("replacementId", domain.ShortenID(execution.ReplacementID)))
+		// A manual update the restart interrupted is restored exactly as one
+		// that failed on its own would be: from the settled record.
+		s.restoreAfterFailure(ctx, execution.ExecutionID)
 	}
 	return changedHost
 }

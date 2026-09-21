@@ -448,6 +448,10 @@ const (
 	// normal and an application that takes two minutes to warm up is not
 	// unhealthy.
 	DefaultExecutionStartupTimeout = 5 * time.Minute
+	// DefaultExecutionMaxHealthWait caps the healthcheck-derived wait. Generous
+	// enough for a database with a long start period; small enough that a
+	// malformed healthcheck cannot hold a recreation open for a day.
+	DefaultExecutionMaxHealthWait = 30 * time.Minute
 	// DefaultExecutionStabilityPeriod is how long a container with NO health
 	// check must stay running to count as stable.
 	//
@@ -496,6 +500,9 @@ const (
 	// DefaultRollbackStartupTimeout bounds the wait for the restored original
 	// to become healthy.
 	DefaultRollbackStartupTimeout = 5 * time.Minute
+	// DefaultRollbackMaxHealthWait caps the healthcheck-derived wait for the
+	// restored original, for the same reason as the execution's.
+	DefaultRollbackMaxHealthWait = 30 * time.Minute
 	// DefaultRollbackStabilityPeriod is how long an original with NO health
 	// check must stay running to count as stable.
 	DefaultRollbackStabilityPeriod = 20 * time.Second
@@ -638,8 +645,10 @@ const (
 	DefaultExecutionRetentionAge = 365 * 24 * time.Hour
 
 	// Execution bounds.
-	MinExecutionStartupTimeout     = 10 * time.Second
-	MaxExecutionStartupTimeout     = 30 * time.Minute
+	MinExecutionStartupTimeout = 10 * time.Second
+	MaxExecutionStartupTimeout = 30 * time.Minute
+	// MaxExecutionHealthWait is the most EXECUTION_MAX_HEALTH_WAIT may be set to.
+	MaxExecutionHealthWait         = 24 * time.Hour
 	MinExecutionStabilityPeriod    = 1 * time.Second
 	MaxExecutionStabilityPeriod    = 10 * time.Minute
 	MinExecutionHealthPollInterval = 500 * time.Millisecond
@@ -1500,6 +1509,13 @@ type Rollback struct {
 	// containers preserved and a recovery plan recorded.
 	StartupTimeout time.Duration
 
+	// MaxHealthWait caps how long a health verdict is waited for when the
+	// container's own HEALTHCHECK budget (start period plus retries times
+	// interval and timeout) exceeds StartupTimeout. The larger of the two is
+	// used, never more than this: an operator's timeout is a floor, and a
+	// malformed healthcheck cannot hold an update open indefinitely.
+	MaxHealthWait time.Duration
+
 	// StabilityPeriod is how long an original with NO health check must stay
 	// running to count as stable. Weaker evidence than a health check and
 	// treated as such.
@@ -1662,6 +1678,13 @@ type Execution struct {
 	// original preserved and a recovery plan recorded.
 	StartupTimeout time.Duration
 
+	// MaxHealthWait caps how long a health verdict is waited for when the
+	// container's own HEALTHCHECK budget (start period plus retries times
+	// interval and timeout) exceeds StartupTimeout. The larger of the two is
+	// used, never more than this: an operator's timeout is a floor, and a
+	// malformed healthcheck cannot hold an update open indefinitely.
+	MaxHealthWait time.Duration
+
 	// StabilityPeriod is how long a container with NO health check must stay
 	// running to count as stable.
 	//
@@ -1669,6 +1692,17 @@ type Execution struct {
 	// that the container did not crash on startup, which is the most that can
 	// be established about a container that does not report on itself.
 	StabilityPeriod time.Duration
+
+	// RestoreOnFailure asks the rollback service to put the original back when
+	// a MANUAL recreation fails after the mutation point.
+	//
+	// On by default. A person asking for an update is not a reason to leave
+	// their service down when the preserved original can be restored safely;
+	// the rollback service runs its own preflight and may still refuse. It
+	// needs the rollback capability: with rollback disabled, a failed manual
+	// update is recorded as not restorable and a person is needed. Unattended
+	// updates are unaffected -- their recovery belongs to the policy.
+	RestoreOnFailure bool
 
 	// HealthPollInterval is how often the replacement is re-inspected while
 	// waiting. Bounded below so a wait cannot become a busy loop against the
@@ -2185,6 +2219,8 @@ func load(lookup lookupFunc) (Config, error) {
 	collect(err)
 	cfg.Execution.RequireSnapshot, err = boolVar(lookup, "EXECUTION_REQUIRE_SNAPSHOT", true)
 	collect(err)
+	cfg.Execution.RestoreOnFailure, err = boolVar(lookup, "EXECUTION_RESTORE_ON_FAILURE", true)
+	collect(err)
 
 	for _, target := range []struct {
 		name     string
@@ -2192,6 +2228,7 @@ func load(lookup lookupFunc) (Config, error) {
 		into     *time.Duration
 	}{
 		{"EXECUTION_STARTUP_TIMEOUT", DefaultExecutionStartupTimeout, &cfg.Execution.StartupTimeout},
+		{"EXECUTION_MAX_HEALTH_WAIT", DefaultExecutionMaxHealthWait, &cfg.Execution.MaxHealthWait},
 		{"EXECUTION_STABILITY_PERIOD", DefaultExecutionStabilityPeriod, &cfg.Execution.StabilityPeriod},
 		{"EXECUTION_HEALTH_POLL_INTERVAL", DefaultExecutionHealthPollInterval, &cfg.Execution.HealthPollInterval},
 		{"EXECUTION_STOP_TIMEOUT", DefaultExecutionStopTimeout, &cfg.Execution.StopTimeout},
@@ -2232,6 +2269,7 @@ func load(lookup lookupFunc) (Config, error) {
 		into     *time.Duration
 	}{
 		{"ROLLBACK_STARTUP_TIMEOUT", DefaultRollbackStartupTimeout, &cfg.Rollback.StartupTimeout},
+		{"ROLLBACK_MAX_HEALTH_WAIT", DefaultRollbackMaxHealthWait, &cfg.Rollback.MaxHealthWait},
 		{"ROLLBACK_STABILITY_PERIOD", DefaultRollbackStabilityPeriod, &cfg.Rollback.StabilityPeriod},
 		{"ROLLBACK_HEALTH_POLL_INTERVAL", DefaultRollbackHealthPollInterval, &cfg.Rollback.HealthPollInterval},
 		{"ROLLBACK_STOP_TIMEOUT", DefaultRollbackStopTimeout, &cfg.Rollback.StopTimeout},
@@ -2881,6 +2919,14 @@ func (e Execution) validate() []error {
 			errs = append(errs, fmt.Errorf("%s%s must be between %s and %s",
 				envPrefix, b.name, b.min, b.max))
 		}
+	}
+
+	// The healthcheck-derived wait is bounded on both sides: never below the
+	// operator's own timeout, never above a ceiling no healthcheck should need.
+	if e.MaxHealthWait < e.StartupTimeout || e.MaxHealthWait > MaxExecutionHealthWait {
+		errs = append(errs, fmt.Errorf(
+			"%sEXECUTION_MAX_HEALTH_WAIT (%s) must be between %sEXECUTION_STARTUP_TIMEOUT (%s) and %s",
+			envPrefix, e.MaxHealthWait, envPrefix, e.StartupTimeout, MaxExecutionHealthWait))
 	}
 
 	// Bounded below so a wait cannot become a busy loop against the Docker

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Aznyi/HarborMaster/internal/docker"
+	"github.com/Aznyi/HarborMaster/internal/domain"
 )
 
 // Architecture tests for the rollback capability.
@@ -24,12 +25,20 @@ import (
 //  4. The two rename operations can only move a container in one direction
 //     each, so neither is a general-purpose rename.
 
-// TestTheRollbackSurfaceIsExactlyFourMethods pins the whole capability.
+// TestTheRollbackSurfaceIsExactlySixMethods pins the whole capability.
+//
+// Four moves and two restart-policy writes. SuspendRestart sets the parked
+// replacement to "no" so a daemon restart cannot bring it back; RestoreRestart
+// writes the original's recorded policy back after its name is restored and
+// before it starts, so a rollback restores the workload's intended runtime
+// semantics rather than merely its process. Both are typed to those single
+// writes and refuse a target by its current name marker; see
+// internal/docker/restart_policy.go.
 //
 // If this test needs editing, the change under review is HarborMaster gaining a
 // new power over a privileged socket. That is the point: the diff cannot be
 // quiet.
-func TestTheRollbackSurfaceIsExactlyFourMethods(t *testing.T) {
+func TestTheRollbackSurfaceIsExactlySixMethods(t *testing.T) {
 	rollbackerType := reflect.TypeOf((*docker.ContainerRollbacker)(nil)).Elem()
 
 	want := map[string]bool{
@@ -37,12 +46,14 @@ func TestTheRollbackSurfaceIsExactlyFourMethods(t *testing.T) {
 		"ParkReplacement":     true,
 		"RestoreOriginalName": true,
 		"StartOriginal":       true,
+		"SuspendRestart":      true,
+		"RestoreRestart":      true,
 	}
 
 	if got := rollbackerType.NumMethod(); got != len(want) {
 		t.Fatalf("docker.ContainerRollbacker has %d methods, want exactly %d\n"+
 			"\tthis interface is the WHOLE of HarborMaster's ability to undo a recreation; "+
-			"a fifth method is a fifth capability and needs its own review, its own threat "+
+			"a seventh method is a seventh capability and needs its own review, its own threat "+
 			"model entry, and its own tests", got, len(want))
 	}
 
@@ -173,6 +184,33 @@ func TestEveryRollbackRequestTargetsAFullContainerID(t *testing.T) {
 				},
 				func() error {
 					return docker.RollbackRestoreRequest{OriginalID: short, Name: "web"}.Validate()
+				},
+			},
+		},
+		"SuspendRestart": {
+			valid: func() error {
+				return docker.SuspendRestartRequest{ContainerID: full}.Validate()
+			},
+			invalid: []func() error{
+				func() error { return docker.SuspendRestartRequest{}.Validate() },
+				func() error { return docker.SuspendRestartRequest{ContainerID: short}.Validate() },
+				func() error { return docker.SuspendRestartRequest{ContainerID: "web"}.Validate() },
+			},
+		},
+		"RestoreRestart": {
+			valid: func() error {
+				return docker.RestoreRestartRequest{
+					ContainerID: full, Policy: domain.RestartPolicy{Name: "always"},
+				}.Validate()
+			},
+			invalid: []func() error{
+				func() error {
+					return docker.RestoreRestartRequest{Policy: domain.RestartPolicy{Name: "always"}}.Validate()
+				},
+				func() error {
+					return docker.RestoreRestartRequest{
+						ContainerID: short, Policy: domain.RestartPolicy{Name: "always"},
+					}.Validate()
 				},
 			},
 		},

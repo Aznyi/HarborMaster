@@ -194,6 +194,12 @@ func NewRollbackService(opts RollbackOptions) *RollbackService {
 	if cfg.StartupTimeout <= 0 {
 		cfg.StartupTimeout = config.DefaultRollbackStartupTimeout
 	}
+	if cfg.MaxHealthWait <= 0 {
+		cfg.MaxHealthWait = config.DefaultRollbackMaxHealthWait
+	}
+	if cfg.MaxHealthWait < cfg.StartupTimeout {
+		cfg.MaxHealthWait = cfg.StartupTimeout
+	}
 	if cfg.StabilityPeriod <= 0 {
 		cfg.StabilityPeriod = config.DefaultRollbackStabilityPeriod
 	}
@@ -301,6 +307,13 @@ func (s *RollbackService) Request(
 		return domain.Rollback{}, err
 	}
 	if refusal != domain.RollbackRefusalNone {
+		// Both refusals mean "another rollback is running". When the rollback
+		// running is the one this key names, that is the answer.
+		if refusal == domain.RollbackRefusalConflict || refusal == domain.RollbackRefusalLimit {
+			if existing, found := s.byKeyAfterConflict(ctx, request.RequestKey); found {
+				return existing, nil
+			}
+		}
 		return domain.Rollback{}, RollbackRefusedError{Refusal: refusal}
 	}
 
@@ -327,6 +340,9 @@ func (s *RollbackService) Request(
 		// close, and both are refusals rather than faults.
 		switch {
 		case errors.Is(err, store.ErrRollbackActive):
+			if existing, found := s.byKeyAfterConflict(ctx, request.RequestKey); found {
+				return existing, nil
+			}
 			return domain.Rollback{}, RollbackRefusedError{Refusal: domain.RollbackRefusalConflict}
 		case errors.Is(err, store.ErrRollbackAlreadySucceeded):
 			return domain.Rollback{}, RollbackRefusedError{
@@ -350,7 +366,7 @@ func (s *RollbackService) Request(
 	// ends already speak -- "could not be updated", then "was restored
 	// automatically" -- and a third message between them says nothing and
 	// arrives looking like a third problem.
-	if !created.Automatic() {
+	if !created.Unattended() {
 		NotifyRollbackStarted(s.notifier, created.ContainerName, created.RollbackID)
 	}
 
@@ -522,6 +538,17 @@ func refusedEligibility(refusal domain.RollbackRefusal) domain.RollbackEligibili
 	}
 }
 
+// ByRequestKey returns the rollback a request key produced, if any.
+//
+// The execution service reads it to learn what became of a restore it asked
+// for. A read, and one keyed by a value HarborMaster generated itself.
+func (s *RollbackService) ByRequestKey(ctx context.Context, key string) (domain.Rollback, bool, error) {
+	if s.store == nil || key == "" {
+		return domain.Rollback{}, false, nil
+	}
+	return s.store.ByRequestKey(ctx, key)
+}
+
 // signal wakes the worker without blocking.
 func (s *RollbackService) signal() {
 	select {
@@ -604,4 +631,26 @@ func (e *rollbackEvidence) InventoryAge(
 		return 0, false, nil
 	}
 	return now.UTC().Sub(record.StartedAt.UTC()), true, nil
+}
+
+// byKeyAfterConflict answers a conflict refusal for a KEYED request by looking
+// the key up again.
+//
+// Two requests carrying the same key can both pass the lookup at the top of
+// Request before either has written -- the pipeline's own restore of a failed
+// manual update and the sweep that re-asks for it did exactly that against a
+// real daemon, and the second was refused as conflicting with the first,
+// which then recorded the restore as refused while the rollback it conflicted
+// with went on to succeed. The key says the two asks are the same ask, so the
+// second gets the rollback the first made. Only the same key is answered this
+// way: a genuine conflict with somebody else's rollback stays a refusal.
+func (s *RollbackService) byKeyAfterConflict(ctx context.Context, key string) (domain.Rollback, bool) {
+	if key == "" {
+		return domain.Rollback{}, false
+	}
+	existing, found, err := s.store.ByRequestKey(ctx, key)
+	if err != nil || !found {
+		return domain.Rollback{}, false
+	}
+	return existing, true
 }

@@ -242,8 +242,9 @@ function RollbackList({
         title="No rollbacks match these filters"
         description={
           "A rollback is requested from a recreation that left its original " +
-          "container in place. Nothing here happens on a schedule — " +
-          "HarborMaster never undoes a recreation on its own."
+          "container in place — by a person, by an update policy, or by " +
+          "HarborMaster restoring a manual update that failed. Nothing here " +
+          "happens on a schedule."
         }
       />
     );

@@ -375,16 +375,17 @@ func (s *RollbackService) reportOutcome(ctx context.Context, requested domain.Ro
 	// -- what was attempted, what is running, which execution, which rollback --
 	// so this stays a projection of one row and adds no query to the path.
 	automatic := final.Automatic()
+	manualRestore := final.ManualRestore()
 	switch {
-	case final.State == domain.RollbackSucceeded && automatic:
+	case final.State == domain.RollbackSucceeded && (automatic || manualRestore):
 		NotifyUpdateRecovered(s.notifier, final.ContainerName,
 			final.ReplacementImage, final.OriginalImage,
-			final.RollbackID, final.ExecutionID)
+			final.RollbackID, final.ExecutionID, manualRestore)
 	case final.State == domain.RollbackSucceeded:
 		NotifyRollbackSucceeded(s.notifier, final.ContainerName, final.RollbackID)
 	case final.State == domain.RollbackFailed:
 		NotifyRollbackFailed(s.notifier, final.ContainerName, final.RollbackID,
-			rollbackOutcomeReason(final), automatic)
+			rollbackOutcomeReason(final), automatic, manualRestore)
 	}
 }
 

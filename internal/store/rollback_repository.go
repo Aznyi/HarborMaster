@@ -92,10 +92,17 @@ func (r *RollbackRepository) Create(
 		!domain.ValidExecutionID(rollback.ExecutionID) {
 		return domain.Rollback{}, ErrRollbackIdentity
 	}
-	// Both container identities are required. A record that named only one
-	// could not be recovered after a restart: the pass would know something was
-	// moved and not which container.
-	if rollback.OriginalID == "" || rollback.ReplacementID == "" ||
+	// The original's identity is required. A record that did not name it could
+	// not be recovered after a restart: the pass would know something was moved
+	// and not which container.
+	//
+	// The replacement is NOT required. A recreation that failed at the create or
+	// at the park rename has an original to restore and no replacement to stop,
+	// and that rollback is the one an operator needs most -- the workload is
+	// down. The service decides from the execution's checkpoint whether an
+	// empty replacement id is consistent with the record; this only refuses a
+	// record that could not be acted on at all.
+	if rollback.OriginalID == "" ||
 		rollback.ContainerName == "" || rollback.ParkedName == "" {
 		return domain.Rollback{}, ErrRollbackIdentity
 	}

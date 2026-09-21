@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
 	"github.com/Aznyi/HarborMaster/internal/service"
@@ -76,10 +77,19 @@ func TestScenarioAAnEligibleWorkloadUpdatesItselfEndToEnd(t *testing.T) {
 
 	// 5-11. Everything from here is the schedulers' own work. The test only
 	// waits and looks.
+	//
+	// Settled, AND the housekeeping after the success record has concluded:
+	// the parked original is removed only after the success is durable, so
+	// "succeeded" alone is a window in which the original is still present.
 	rig.await("the recreation to settle", func() bool {
 		executions, _, err := rig.db.Executions.List(context.Background(),
 			store.ExecutionFilter{Page: store.Page{Limit: 10}})
-		return err == nil && len(executions) == 1 && executions[0].State.Terminal()
+		if err != nil || len(executions) != 1 || !executions[0].State.Terminal() {
+			return false
+		}
+		settled := executions[0]
+		return settled.State != domain.ExecutionSucceeded ||
+			settled.OriginalRemoved || settled.Recovery != nil
 	})
 
 	execution := rig.terminalExecution()
@@ -457,7 +467,14 @@ func notificationFor(rig *unattendedRig, event domain.NotificationEvent) domain.
 func assertOneOf(t *testing.T, rig *unattendedRig, event domain.NotificationEvent) {
 	t.Helper()
 
+	// A notification is raised by the deferred outcome report AFTER the record
+	// it describes has settled, so a test that observed the record may be a
+	// moment ahead of the message. Wait briefly before calling it absent.
 	matches := notificationsFor(rig, event)
+	for deadline := time.Now().Add(3 * time.Second); len(matches) == 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+		matches = notificationsFor(rig, event)
+	}
 	if len(matches) == 0 {
 		t.Errorf("no %q notification was raised\n\nraised: %v",
 			event, eventsOf(rig.notifier.all()))
@@ -506,4 +523,204 @@ func findQuarantined(rig *unattendedRig) string {
 		}
 	}
 	return ""
+}
+
+// ------------------ Scenario B2: the create fails after the park, and the ---
+// ---------------------------------------- original is put back automatically --
+
+// TestScenarioB2ACreateFailureIsRecoveredAutomatically is the reported defect
+// end to end: the original is stopped and parked, the daemon refuses the
+// create, and the workload must not stay down. There is no replacement to
+// quarantine, so the recovery is a rename and a start -- and it must happen
+// without a person.
+func TestScenarioB2ACreateFailureIsRecoveredAutomatically(t *testing.T) {
+	rig := newUnattendedRig(t, func(o *rigOptions) {
+		o.policies = []domain.UpdatePolicy{c4cAutomaticPolicy()}
+	})
+	defer rig.stop()
+
+	rig.host.mu.Lock()
+	rig.host.failCreateOf = c4cName
+	rig.host.mu.Unlock()
+
+	seedDiscovery(t, rig, domain.UpdateMinor)
+	rig.start()
+
+	if run, decisions := rig.decide(); run.Submitted != 1 {
+		t.Fatalf("submitted = %d, want 1\n\n%+v", run.Submitted, decisions)
+	}
+
+	rig.await("the rollback to settle", func() bool {
+		rollbacks, _, err := rig.db.Rollbacks.List(context.Background(),
+			store.RollbackFilter{Page: store.Page{Limit: 10}})
+		return err == nil && len(rollbacks) == 1 && rollbacks[0].State.Terminal()
+	})
+
+	execution := rig.terminalExecution()
+	if execution.State != domain.ExecutionFailed || execution.Failure != domain.ExecutionFailureCreate {
+		t.Fatalf("the recreation ended %q/%q, want failed/create\n\nhost: %v",
+			execution.State, execution.Failure, rig.host.operations())
+	}
+	if execution.Checkpoint != domain.CheckpointOriginalParked {
+		t.Fatalf("checkpoint %q, want originalParked", execution.Checkpoint)
+	}
+	if execution.ReplacementID != "" {
+		t.Fatalf("the record names a replacement %q that was never created", execution.ReplacementID)
+	}
+
+	rollbacks, _, err := rig.db.Rollbacks.List(context.Background(),
+		store.RollbackFilter{Page: store.Page{Limit: 10}})
+	if err != nil {
+		t.Fatalf("list rollbacks: %v", err)
+	}
+	if rollbacks[0].State != domain.RollbackSucceeded {
+		t.Fatalf("the rollback ended %q/%q/%q, want succeeded\n\nhost: %v",
+			rollbacks[0].State, rollbacks[0].Failure, rollbacks[0].Refusal, rig.host.operations())
+	}
+	if !rollbacks[0].Automatic() {
+		t.Error("the rollback is not marked automatic")
+	}
+
+	// The service is back: the ORIGINAL container, under its own name, running.
+	restored, present := rig.host.byName(c4cName)
+	if !present {
+		t.Fatalf("nothing answers to %q after the recovery\n\nhost: %v",
+			c4cName, rig.host.operations())
+	}
+	if restored.id != c4cContainerID {
+		t.Errorf("the container answering to %q is %q, want the original %q",
+			c4cName, restored.id, c4cContainerID)
+	}
+	if !restored.running {
+		t.Error("THE RESTORED CONTAINER IS NOT RUNNING")
+	}
+
+	// Nothing was created, once refused, and nothing was removed.
+	if got := rig.host.countOps("create-refused:"); got != 1 {
+		t.Errorf("create refusals = %d, want 1", got)
+	}
+	if got := rig.host.countOps("create:"); got != 0 {
+		t.Errorf("creates = %d, want 0", got)
+	}
+	if got := rig.host.countOps("remove:"); got != 0 {
+		t.Errorf("removes = %d, want 0: a recovery must not destroy anything", got)
+	}
+
+	// The operator is told it failed and that it was put back, in that order,
+	// and the container is paused so nothing retries the same failure.
+	assertOneOf(t, rig, domain.EventExecutionFailed)
+	assertOneOf(t, rig, domain.EventUpdateRecovered)
+	assertNoneOf(t, rig, domain.EventExecutionSucceeded)
+	if pause, err := rig.db.Automation.PauseFor(context.Background(), c4cName); err != nil {
+		t.Errorf("no pause was recorded after an automatic rollback: %v", err)
+	} else if pause.Reason != domain.PauseRolledBack {
+		t.Errorf("pause reason = %q, want %q", pause.Reason, domain.PauseRolledBack)
+	}
+}
+
+// ------------------ Scenario D: the create lands on the daemon after the -----
+// ------------------------ client gave up, and the orphan is adopted and undone --
+
+// TestScenarioDACreateThatLandedIsAdoptedAndRolledBack: the adapter reports the
+// create as failed, the daemon completed it, and a container carrying this
+// execution's ownership labels holds the production name. It is adopted,
+// quarantined, and the automatic rollback restores the original.
+func TestScenarioDACreateThatLandedIsAdoptedAndRolledBack(t *testing.T) {
+	rig := newUnattendedRig(t, func(o *rigOptions) {
+		o.policies = []domain.UpdatePolicy{c4cAutomaticPolicy()}
+	})
+	defer rig.stop()
+
+	rig.host.mu.Lock()
+	rig.host.createLandsButFails = c4cName
+	rig.host.mu.Unlock()
+
+	seedDiscovery(t, rig, domain.UpdateMinor)
+	rig.start()
+	if run, _ := rig.decide(); run.Submitted != 1 {
+		t.Fatalf("submitted = %d, want 1", run.Submitted)
+	}
+	rig.await("the rollback to settle", func() bool {
+		rollbacks, _, err := rig.db.Rollbacks.List(context.Background(),
+			store.RollbackFilter{Page: store.Page{Limit: 10}})
+		return err == nil && len(rollbacks) == 1 && rollbacks[0].State.Terminal()
+	})
+
+	execution := rig.terminalExecution()
+	if execution.Failure != domain.ExecutionFailureCreate {
+		t.Fatalf("failure %q, want create", execution.Failure)
+	}
+	if execution.ReplacementID == "" {
+		t.Fatalf("the replacement the daemon produced was never adopted\n\nhost: %v", rig.host.operations())
+	}
+	if got := rig.host.countOps("create-landed:"); got != 1 {
+		t.Fatalf("create-landed ops = %d, want 1", got)
+	}
+
+	rollbacks, _, _ := rig.db.Rollbacks.List(context.Background(),
+		store.RollbackFilter{Page: store.Page{Limit: 10}})
+	if rollbacks[0].State != domain.RollbackSucceeded {
+		t.Fatalf("the rollback ended %q/%q/%q\n\nhost: %v",
+			rollbacks[0].State, rollbacks[0].Failure, rollbacks[0].Refusal, rig.host.operations())
+	}
+
+	restored, present := rig.host.byName(c4cName)
+	if !present || restored.id != c4cContainerID || !restored.running {
+		t.Fatalf("the original is not serving under %q after the recovery\n\nhost: %v",
+			c4cName, rig.host.operations())
+	}
+	adopted, _ := rig.host.snapshotOf(execution.ReplacementID)
+	if adopted.running || !strings.Contains(adopted.name, domain.RollbackParkedNameSuffix) {
+		t.Errorf("the adopted replacement is %q running=%v; want it parked and stopped", adopted.name, adopted.running)
+	}
+}
+
+// ------------------ Scenario B3: the replacement will not start, and the ----
+// -------------------------------------------- original is put back automatically --
+
+// TestScenarioB3AStartFailureIsRecoveredAutomatically: the daemon refuses to
+// start the replacement. It is quarantined, the rollback restores the
+// original, and the workload is serving again without a person.
+func TestScenarioB3AStartFailureIsRecoveredAutomatically(t *testing.T) {
+	rig := newUnattendedRig(t, func(o *rigOptions) {
+		o.policies = []domain.UpdatePolicy{c4cAutomaticPolicy()}
+	})
+	defer rig.stop()
+
+	rig.host.mu.Lock()
+	rig.host.failStartOf = c4cName
+	rig.host.mu.Unlock()
+
+	seedDiscovery(t, rig, domain.UpdateMinor)
+	rig.start()
+	if run, _ := rig.decide(); run.Submitted != 1 {
+		t.Fatalf("submitted = %d, want 1", run.Submitted)
+	}
+	rig.await("the rollback to settle", func() bool {
+		rollbacks, _, err := rig.db.Rollbacks.List(context.Background(),
+			store.RollbackFilter{Page: store.Page{Limit: 10}})
+		return err == nil && len(rollbacks) == 1 && rollbacks[0].State.Terminal()
+	})
+
+	execution := rig.terminalExecution()
+	if execution.Failure != domain.ExecutionFailureStart {
+		t.Fatalf("failure %q, want start\n\nhost: %v", execution.Failure, rig.host.operations())
+	}
+	rollbacks, _, _ := rig.db.Rollbacks.List(context.Background(),
+		store.RollbackFilter{Page: store.Page{Limit: 10}})
+	if rollbacks[0].State != domain.RollbackSucceeded {
+		t.Fatalf("the rollback ended %q/%q/%q\n\nhost: %v",
+			rollbacks[0].State, rollbacks[0].Failure, rollbacks[0].Refusal, rig.host.operations())
+	}
+
+	restored, present := rig.host.byName(c4cName)
+	if !present || restored.id != c4cContainerID || !restored.running {
+		t.Fatalf("the original is not serving under %q after the recovery\n\nhost: %v",
+			c4cName, rig.host.operations())
+	}
+	if got := rig.host.countOps("remove:"); got != 0 {
+		t.Errorf("removes = %d, want 0: a recovery must not destroy anything", got)
+	}
+	assertOneOf(t, rig, domain.EventExecutionFailed)
+	assertOneOf(t, rig, domain.EventUpdateRecovered)
 }

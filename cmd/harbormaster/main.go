@@ -764,47 +764,6 @@ func run() error {
 		Logger: logger,
 	})
 
-	executions := service.NewExecutionService(service.ExecutionOptions{
-		Lineage: db.Lineage,
-		Store:   db.Executions,
-		Evidence: service.NewExecutionEvidence(
-			db.Acquisitions, db.Plans, db.Containers,
-			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
-		Runtime:  dockerClient,
-		Capturer: capturer,
-		Mutator:  mutator,
-		// The last safe point. Assurance runs here as a MEASUREMENT: if the
-		// snapshot describing this container is not the one the plan was
-		// assessed against, the plan is stale and the recreation is refused.
-		// The new baseline is kept for the next planner pass; it does not
-		// authorise the plan already in flight.
-		Assurance: assurance,
-		// Whether a person reviewed a plan that asks for one. Consulted ONLY
-		// for a manualReview recommendation, and only to replace one refusal
-		// with one permission: every other preflight below it still runs.
-		Approvals: planApprovals,
-		// The LAST line of the self-update defence, and the one that matters
-		// most: this is the layer that actually stops a container.
-		Self: self,
-		// Invariant A. The live experiment established that STOPPING a
-		// namespace provider is the moment its dependents break -- silently,
-		// with no network and nothing logged -- so this is the layer that has to
-		// establish they can be reattached before anything stops.
-		Dependencies: dependencies,
-		// The same installation key the snapshots use. Configuration
-		// preservation compares sensitive values as keyed digests, and digests
-		// produced under a different key are not comparable -- so sharing the
-		// key is what makes the comparison mean anything.
-		Hasher: hasher,
-		// The OUTCOME of a recreation -- the most consequential thing
-		// HarborMaster does -- reaches the security audit log attributed to the
-		// account that asked for it.
-		Audit:  auditRecorder,
-		Notify: notifications.Notifier,
-		Config: cfg.Execution,
-		Logger: logger,
-	})
-
 	// Manual rollback.
 	//
 	// HARBORMASTER'S THIRD AND MOST NARROWLY SCOPED DOCKER CAPABILITY. It can
@@ -840,6 +799,57 @@ func run() error {
 		Notify: notifications.Notifier,
 		Config: cfg.Rollback,
 		Logger: logger,
+	})
+
+	// The rollback service is built FIRST because the execution service is
+	// handed it: when a manual recreation fails after the mutation point, the
+	// execution service asks the rollback service to put the original back,
+	// through the same request an operator's rollback button submits. A caller,
+	// not a capability -- the rollback service still runs its own preflight
+	// against the live host and may refuse. With rollback disabled the restorer
+	// reports itself disabled and a failed manual update is recorded as not
+	// restorable.
+
+	executions := service.NewExecutionService(service.ExecutionOptions{
+		Lineage: db.Lineage,
+		Store:   db.Executions,
+		Evidence: service.NewExecutionEvidence(
+			db.Acquisitions, db.Plans, db.Containers,
+			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel, db.Rollbacks),
+		Runtime:  dockerClient,
+		Capturer: capturer,
+		Mutator:  mutator,
+		// The last safe point. Assurance runs here as a MEASUREMENT: if the
+		// snapshot describing this container is not the one the plan was
+		// assessed against, the plan is stale and the recreation is refused.
+		// The new baseline is kept for the next planner pass; it does not
+		// authorise the plan already in flight.
+		Assurance: assurance,
+		// Whether a person reviewed a plan that asks for one. Consulted ONLY
+		// for a manualReview recommendation, and only to replace one refusal
+		// with one permission: every other preflight below it still runs.
+		Approvals: planApprovals,
+		// The LAST line of the self-update defence, and the one that matters
+		// most: this is the layer that actually stops a container.
+		Self: self,
+		// Invariant A. The live experiment established that STOPPING a
+		// namespace provider is the moment its dependents break -- silently,
+		// with no network and nothing logged -- so this is the layer that has to
+		// establish they can be reattached before anything stops.
+		Dependencies: dependencies,
+		// The same installation key the snapshots use. Configuration
+		// preservation compares sensitive values as keyed digests, and digests
+		// produced under a different key are not comparable -- so sharing the
+		// key is what makes the comparison mean anything.
+		Hasher: hasher,
+		// The OUTCOME of a recreation -- the most consequential thing
+		// HarborMaster does -- reaches the security audit log attributed to the
+		// account that asked for it.
+		Audit:    auditRecorder,
+		Notify:   notifications.Notifier,
+		Restorer: rollbacks,
+		Config:   cfg.Execution,
+		Logger:   logger,
 	})
 
 	// Image cleanup.

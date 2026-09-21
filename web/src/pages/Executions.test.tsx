@@ -201,7 +201,7 @@ it("lists recreations and puts what needs attention first", async () => {
   expect(within(cards).getByText("2")).toBeInTheDocument();
 });
 
-it("says plainly that rollback is not automatic", async () => {
+it("says plainly that a failed recreation is restored when that is safe", async () => {
   mockApi([
     ["/executions", { items: [], pagination: pagination(0), summary: summary() }],
   ]);
@@ -209,9 +209,10 @@ it("says plainly that rollback is not automatic", async () => {
   renderList();
 
   const note = await screen.findByRole("note");
-  expect(note).toHaveTextContent(/not rolled back automatically/i);
-  // The correction: it must NOT claim rollback is categorically never automatic.
-  expect(note).toHaveTextContent(/update policy/i);
+  expect(note).toHaveTextContent(/restores the original automatically/i);
+  // Hedged, and honest about the precondition.
+  expect(note).toHaveTextContent(/when that can be done safely/i);
+  expect(note).toHaveTextContent(/manual rollback is enabled/i);
   expect(note).toHaveTextContent(/stops it and replaces it/i);
 });
 

@@ -110,6 +110,8 @@ func TestARealRollbackRestoresTheOriginalAndKeepsTheReplacement(t *testing.T) {
 		Captured: captured,
 		Image:    digestTargetFor(t, recreationImage),
 		Name:     name,
+		// Every replacement names the execution that owns it; here a fixed one.
+		ExecutionID: "exec_0123456789abcdef0123",
 	})
 	if err != nil {
 		t.Fatalf("create the replacement: %v", err)

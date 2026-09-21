@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,21 @@ type FakeMutator struct {
 	StopErr    error
 	RenameErr  error
 	RemoveErr  error
+	// SuspendRestartErr and RestoreRestartErr fail every call to the restart
+	// policy operations, which is how a test proves a failed suspension does
+	// not abandon a recreation.
+	SuspendRestartErr error
+	RestoreRestartErr error
+	// SuspendRestartErrFor fails a suspension whose target's CURRENT name
+	// contains this marker, and no other. A test can therefore fail the
+	// suspension of the quarantined replacement while the parked original's
+	// succeeds, or the reverse.
+	SuspendRestartErrFor string
+	// CreateLandsButErrs makes CreateContainer create the container and THEN
+	// return this error, modelling a create the daemon completed after the
+	// client gave up on it: the container holds the production name and the
+	// caller never learned its id.
+	CreateLandsButErrs error
 
 	// FailCreateAfter, when positive, allows that many creates before failing.
 	FailCreateAfter int
@@ -215,11 +231,16 @@ func (f *FakeMutator) CreateContainer(ctx context.Context, request CreateRequest
 		Name:  request.Name,
 		Image: request.Image.PinnedReference(),
 	}
+	// The replacement reports the CAPTURED configuration, exactly as the real
+	// adapter creates from the capture rather than from the live original: by
+	// the time the create runs, the original has been stopped, parked, and had
+	// its restart policy suspended, and none of that belongs on the
+	// replacement. A test that wants a preservation failure overwrites this
+	// afterwards.
+	if request.Captured.detail != nil {
+		created.Detail = *request.Captured.detail
+	}
 	if source != nil {
-		// The replacement reports the source's configuration by default, which
-		// is what a faithful recreation looks like. A test that wants a
-		// preservation failure overwrites this afterwards.
-		created.Detail = source.Detail
 		created.Health = append([]domain.HealthState(nil), source.Health...)
 	}
 	created.Detail.Overview.ID = id
@@ -228,6 +249,24 @@ func (f *FakeMutator) CreateContainer(ctx context.Context, request CreateRequest
 	created.Detail.Overview.Image = domain.ParseImageRef(request.Image.PinnedReference())
 
 	f.Containers[id] = created
+
+	// The ownership labels the adapter writes, over any the capture carried.
+	kept := make([]domain.Label, 0, len(created.Detail.Labels)+2)
+	for _, label := range created.Detail.Labels {
+		if label.Key == domain.LabelExecutionOwner || label.Key == domain.LabelReplacementOf {
+			continue
+		}
+		kept = append(kept, label)
+	}
+	created.Detail.Labels = append(kept,
+		domain.Label{Key: domain.LabelExecutionOwner, Value: request.ExecutionID, Source: domain.LabelSourceHarborMaster},
+		domain.Label{Key: domain.LabelReplacementOf, Value: request.Captured.ContainerID, Source: domain.LabelSourceHarborMaster},
+	)
+
+	if f.CreateLandsButErrs != nil {
+		// The container exists. The caller hears a failure.
+		return "", f.CreateLandsButErrs
+	}
 	return id, nil
 }
 
@@ -478,3 +517,72 @@ var (
 	_ ConfigCapturer   = (*FakeMutator)(nil)
 	_ ContainerMutator = (*FakeMutator)(nil)
 )
+
+// ---- restart policy ------------------------------------------------------
+
+// SuspendRestart models setting a parked container's policy to "no".
+//
+// Enforces the adapter's ownership rule: only a container whose name carries a
+// HarborMaster marker may be touched, and the refusal leaves the policy alone.
+func (f *FakeMutator) SuspendRestart(ctx context.Context, request SuspendRestartRequest) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := f.pause(ctx); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.Calls = append(f.Calls, FakeCall{Op: "suspendRestart", ContainerID: request.ContainerID})
+	if f.SuspendRestartErr != nil {
+		return f.SuspendRestartErr
+	}
+
+	existing, found := f.Containers[request.ContainerID]
+	if !found || existing.Removed {
+		return ErrContainerVanished
+	}
+	if f.SuspendRestartErrFor != "" && strings.Contains(existing.Name, f.SuspendRestartErrFor) {
+		return ErrMutationFailed
+	}
+	if !restartSuspendable(existing.Name) {
+		return fmt.Errorf("%w: only a parked or quarantined container may have its restart suspended",
+			ErrMutationRefused)
+	}
+	existing.Detail.Overview.RestartPolicy = domain.RestartPolicy{Name: "no"}
+	return nil
+}
+
+// RestoreRestart models writing a configured policy back onto a container
+// under its production name.
+func (f *FakeMutator) RestoreRestart(ctx context.Context, request RestoreRestartRequest) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := f.pause(ctx); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.Calls = append(f.Calls, FakeCall{
+		Op: "restoreRestart", ContainerID: request.ContainerID, Name: request.Policy.Encode(),
+	})
+	if f.RestoreRestartErr != nil {
+		return f.RestoreRestartErr
+	}
+
+	existing, found := f.Containers[request.ContainerID]
+	if !found || existing.Removed {
+		return ErrContainerVanished
+	}
+	if !restartRestorable(existing.Name) {
+		return fmt.Errorf("%w: a restart policy may only be restored onto a production name",
+			ErrMutationRefused)
+	}
+	existing.Detail.Overview.RestartPolicy = request.Policy
+	return nil
+}

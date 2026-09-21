@@ -216,13 +216,13 @@ func TestTheLifecyclePayloadsThatReachTheWire(t *testing.T) {
 			"It is a major version change.")
 		// C. unrecovered failure, operator-requested.
 		NotifyExecutionFailed(rig.engine, "web", "exec_1123456789abcdef",
-			"the recreation did not succeed (unhealthy).", true, false)
+			"the recreation did not succeed (unhealthy).", true, false, false)
 		// D. failed update, successful automatic rollback.
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_2123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_2123456789abcdef", false)
 		// E. rollback failure.
 		NotifyRollbackFailed(rig.engine, "web", "rb_1123456789abcdef01",
-			"the rollback did not succeed (startOriginal).", true)
+			"the rollback did not succeed (startOriginal).", true, false)
 	})
 
 	byEvent := map[string]map[string]any{}
@@ -301,13 +301,13 @@ func TestNothingSensitiveReachesTheWire(t *testing.T) {
 	bodies := rig.deliver(t, 7, func() {
 		NotifyExecutionSucceeded(rig.engine, "web", "nginx:1.27.1", "exec_A123456789abcdef")
 		NotifyExecutionFailed(rig.engine, "web", "exec_B123456789abcdef",
-			"the recreation did not succeed (unhealthy).", true, true)
+			"the recreation did not succeed (unhealthy).", true, true, false)
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", "rb_A123456789abcdef0", "exec_B123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", "rb_A123456789abcdef0", "exec_B123456789abcdef", false)
 		NotifyRollbackStarted(rig.engine, "web", "rb_B123456789abcdef0")
 		NotifyRollbackSucceeded(rig.engine, "web", "rb_B123456789abcdef0")
 		NotifyRollbackFailed(rig.engine, "web", "rb_C123456789abcdef0",
-			"the rollback did not succeed (startOriginal).", false)
+			"the rollback did not succeed (startOriginal).", false, false)
 		NotifyApprovalRequired(rig.engine, "web", "plan_A123456789abcdef",
 			"It is a major version change.")
 	})
@@ -340,7 +340,7 @@ func TestARetryReusesOneDeliveryRecordRatherThanMintingAnother(t *testing.T) {
 
 	rig.deliver(t, 1, func() {
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef", false)
 	})
 
 	recorded := rig.store.recorded()
@@ -383,7 +383,7 @@ func TestTheDeliveredDocumentIsRebuiltFromTheStoredRow(t *testing.T) {
 
 	rig.deliver(t, 1, func() {
 		NotifyUpdateRecovered(rig.engine, "web",
-			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef")
+			"nginx:1.27.1", "nginx:1.27.0", c4bRollbackID, "exec_0123456789abcdef", false)
 	})
 
 	delivered := rig.sender.captured()[0].Notification

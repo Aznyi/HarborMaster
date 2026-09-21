@@ -82,13 +82,15 @@ type rollbackHost struct {
 	containers map[string]*rbContainer
 
 	// Injected failures, each failing the NEXT call to that operation.
-	pingErr    error
-	listErr    error
-	inspectErr error
-	stopErr    error
-	parkErr    error
-	restoreErr error
-	startErr   error
+	pingErr           error
+	listErr           error
+	inspectErr        error
+	stopErr           error
+	parkErr           error
+	restoreErr        error
+	startErr          error
+	suspendErr        error
+	restoreRestartErr error
 
 	// ops records every rollback mutation, in order. Most assertions in this
 	// file are statements about this slice.
@@ -400,6 +402,14 @@ type fakeRollbackStore struct {
 	advanceErrTo domain.RollbackState
 	// checkpointErrAt fails the checkpoint carrying this value.
 	checkpointErrAt domain.RollbackCheckpoint
+	// keyLookupMisses makes the next N ByRequestKey lookups report nothing,
+	// whatever is stored: the window in which a second request carrying the
+	// same key has not yet seen the first one's write.
+	keyLookupMisses int
+	// containerConflictsInvisible makes ActiveForContainer report nothing, so a
+	// second rollback is turned back by the concurrency limit instead of the
+	// per-container conflict -- the other refusal a racing keyed request meets.
+	containerConflictsInvisible bool
 
 	// checkpoints records every checkpoint written, in order.
 	checkpoints []domain.RollbackCheckpoint
@@ -625,6 +635,9 @@ func (f *fakeRollbackStore) ActiveForContainer(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.containerConflictsInvisible {
+		return false, nil
+	}
 	for id, record := range f.records {
 		if id == excluding {
 			continue
@@ -656,6 +669,10 @@ func (f *fakeRollbackStore) ByRequestKey(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.keyLookupMisses > 0 {
+		f.keyLookupMisses--
+		return domain.Rollback{}, false, nil
+	}
 	if key == "" {
 		return domain.Rollback{}, false, nil
 	}
@@ -1059,4 +1076,73 @@ func (h *rbHarness) runOnce(t *testing.T, rollback domain.Rollback) domain.Rollb
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+// ---- restart policy ------------------------------------------------------
+
+// restartPolicyOf reports a container's current restart policy.
+func (h *rollbackHost) restartPolicyOf(id string) domain.RestartPolicy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.containers[id]
+	if !ok {
+		return domain.RestartPolicy{}
+	}
+	return c.detail.Overview.RestartPolicy
+}
+
+func (h *rollbackHost) SuspendRestart(ctx context.Context, request docker.SuspendRestartRequest) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := h.pause(ctx); err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.ops = append(h.ops, "suspend:"+request.ContainerID)
+	if h.suspendErr != nil {
+		return h.suspendErr
+	}
+	c, ok := h.containers[request.ContainerID]
+	if !ok {
+		return docker.ErrContainerVanished
+	}
+	// The same ownership rule the adapter applies: only a name HarborMaster
+	// derived may have its restart suspended.
+	if !domain.IsHarborMasterDerivedName(c.detail.Overview.Name) &&
+		!strings.Contains(c.detail.Overview.Name, domain.RollbackParkedNameSuffix) {
+		return docker.ErrMutationRefused
+	}
+	c.detail.Overview.RestartPolicy = domain.RestartPolicy{Name: "no"}
+	return nil
+}
+
+func (h *rollbackHost) RestoreRestart(ctx context.Context, request docker.RestoreRestartRequest) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := h.pause(ctx); err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.ops = append(h.ops, "restore-restart:"+request.ContainerID+":"+request.Policy.Encode())
+	if h.restoreRestartErr != nil {
+		return h.restoreRestartErr
+	}
+	c, ok := h.containers[request.ContainerID]
+	if !ok {
+		return docker.ErrContainerVanished
+	}
+	if domain.IsHarborMasterDerivedName(c.detail.Overview.Name) ||
+		strings.Contains(c.detail.Overview.Name, domain.RollbackParkedNameSuffix) {
+		return docker.ErrMutationRefused
+	}
+	c.detail.Overview.RestartPolicy = request.Policy
+	return nil
 }

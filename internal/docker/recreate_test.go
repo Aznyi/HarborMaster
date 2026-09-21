@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -305,7 +307,10 @@ func TestCreateRequestRequiresAPinnedImageAndACompleteCapture(t *testing.T) {
 		Digest: "sha256:" + strings.Repeat("b", 64),
 	}
 
-	valid := CreateRequest{Captured: captured, Image: target, Name: "web"}
+	valid := CreateRequest{
+		Captured: captured, Image: target, Name: "web",
+		ExecutionID: "exec_00112233445566778899",
+	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("a well-formed create request was rejected: %v", err)
 	}
@@ -664,5 +669,225 @@ func TestCapturedConfigMarshalsToParseableJSON(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), testSecret) {
 		t.Error("the marshalled capture carries the secret")
+	}
+}
+
+// TestAnAutoRemoveContainerCannotBeCaptured: `docker run --rm` sets
+// HostConfig.AutoRemove, and the daemon removes such a container the moment it
+// exits -- including after the stop the recreation issues. The park rename then
+// finds nothing, and the original is gone with only an in-memory capture to
+// reconstruct it from. Refused at capture, before anything is stopped.
+func TestAnAutoRemoveContainerCannotBeCaptured(t *testing.T) {
+	autoRemove := container.InspectResponse{
+		ID:         testContainerID,
+		Name:       "/web",
+		HostConfig: &container.HostConfig{AutoRemove: true},
+		Config:     &container.Config{},
+	}
+	err := captureRefusal(autoRemove)
+	if !errors.Is(err, ErrCaptureFailed) {
+		t.Fatalf("an AutoRemove container was accepted for capture: %v", err)
+	}
+
+	ordinary := autoRemove
+	ordinary.HostConfig = &container.HostConfig{}
+	if err := captureRefusal(ordinary); err != nil {
+		t.Fatalf("an ordinary container was refused: %v", err)
+	}
+}
+
+// TestMutationCallsAreNotBoundedByTheInspectionTimeout: the adapter's request
+// timeout is sized for an inspect. A create or a start on a loaded host can
+// legitimately take longer, and a client-side deadline there is a failure
+// AFTER the mutation point while the daemon usually completes the request
+// anyway -- the one arrangement no recovery path can repair.
+func TestMutationCallsAreNotBoundedByTheInspectionTimeout(t *testing.T) {
+	short := &Client{timeout: time.Second}
+	if got := short.mutationTimeout(); got != MinMutationCallTimeout {
+		t.Errorf("mutation timeout %v with a %v request timeout, want the floor %v",
+			got, short.timeout, MinMutationCallTimeout)
+	}
+	long := &Client{timeout: 10 * time.Minute}
+	if got := long.mutationTimeout(); got != long.timeout {
+		t.Errorf("mutation timeout %v, want the configured %v", got, long.timeout)
+	}
+}
+
+// TestACreateWritesOwnershipLabelsOverAnyClaimant: the two labels that identify
+// a replacement as this execution's are HarborMaster's own. A source container
+// carrying either -- copied from an earlier recreation, or planted -- does not
+// get to decide what the replacement claims about itself.
+func TestACreateWritesOwnershipLabelsOverAnyClaimant(t *testing.T) {
+	const executionID = "exec_00112233445566778899"
+	source := map[string]string{
+		"app":                      "web",
+		domain.LabelExecutionOwner: "exec_ffffffffffffffffffff",
+		domain.LabelReplacementOf:  strings.Repeat("f", 64),
+		domain.LineageLabel:        "docker.io/library/nginx:1.27",
+	}
+
+	labels := ownershipLabels(source, executionID, testContainerID)
+
+	if labels[domain.LabelExecutionOwner] != executionID {
+		t.Errorf("execution label = %q, want %q", labels[domain.LabelExecutionOwner], executionID)
+	}
+	if labels[domain.LabelReplacementOf] != testContainerID {
+		t.Errorf("original label = %q, want the captured container", labels[domain.LabelReplacementOf])
+	}
+	if labels["app"] != "web" || labels[domain.LineageLabel] != "docker.io/library/nginx:1.27" {
+		t.Error("an unrelated label was lost")
+	}
+	// The source map is untouched: a retry must create from the capture as it
+	// was, not from one the previous attempt edited.
+	if source[domain.LabelExecutionOwner] != "exec_ffffffffffffffffffff" {
+		t.Error("the captured labels were mutated in place")
+	}
+}
+
+// TestCreateRequestRequiresTheExecutionThatOwnsIt: a replacement created
+// without ownership is one that can never be adopted after a crash, which is
+// the gap the labels close. The adapter refuses the request rather than
+// creating an orphan.
+func TestCreateRequestRequiresTheExecutionThatOwnsIt(t *testing.T) {
+	captured := &CapturedConfig{
+		ContainerID: testContainerID, ContainerName: "web",
+		config: &container.Config{}, host: &container.HostConfig{},
+	}
+	target := domain.ExecutionTarget{
+		Registry: "docker.io", Repository: "library/nginx",
+		Digest: "sha256:" + strings.Repeat("a", 64),
+	}
+	valid := CreateRequest{Captured: captured, Image: target, Name: "web", ExecutionID: "exec_00112233445566778899"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("a request naming its execution was refused: %v", err)
+	}
+	for name, request := range map[string]CreateRequest{
+		"no execution":        {Captured: captured, Image: target, Name: "web"},
+		"malformed execution": {Captured: captured, Image: target, Name: "web", ExecutionID: "exec_zz"},
+	} {
+		if err := request.Validate(); !errors.Is(err, ErrMutationRefused) {
+			t.Errorf("%s: got %v, want a refusal", name, err)
+		}
+	}
+}
+
+// TestEveryNetworkAndItsStaticAddressingSurviveTheCopy: a container on more
+// than one user-defined network, one of them with a static IPAM address,
+// must be created onto all of them with the same static address. Only the
+// sandbox-assigned values are dropped.
+func TestEveryNetworkAndItsStaticAddressingSurviveTheCopy(t *testing.T) {
+	static := netip.MustParseAddr("10.20.0.42")
+	static6 := netip.MustParseAddr("fd00::42")
+	linkLocal := netip.MustParseAddr("169.254.1.1")
+
+	response := container.InspectResponse{
+		ID: testContainerID,
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"frontend": {
+					Aliases:    []string{"web", "www"},
+					GwPriority: 10,
+					IPAddress:  netip.MustParseAddr("172.20.0.5"),
+					Gateway:    netip.MustParseAddr("172.20.0.1"),
+				},
+				"backend": {
+					Aliases: []string{"web-internal"},
+					IPAMConfig: &network.EndpointIPAMConfig{
+						IPv4Address:  static,
+						IPv6Address:  static6,
+						LinkLocalIPs: []netip.Addr{linkLocal},
+					},
+					IPAddress: static,
+				},
+			},
+		},
+	}
+
+	copied := copyNetworksForCreate(response)
+	if len(copied.EndpointsConfig) != 2 {
+		t.Fatalf("%d endpoints were copied, want 2", len(copied.EndpointsConfig))
+	}
+
+	frontend := copied.EndpointsConfig["frontend"]
+	if frontend == nil || len(frontend.Aliases) != 2 || frontend.GwPriority != 10 {
+		t.Errorf("the frontend attachment lost configuration: %+v", frontend)
+	}
+	if frontend != nil && (frontend.IPAddress.IsValid() || frontend.Gateway.IsValid()) {
+		t.Error("a sandbox-assigned address on the frontend was carried forward")
+	}
+
+	backend := copied.EndpointsConfig["backend"]
+	if backend == nil || backend.IPAMConfig == nil {
+		t.Fatalf("the backend's static addressing was dropped: %+v", backend)
+	}
+	if backend.IPAMConfig.IPv4Address != static || backend.IPAMConfig.IPv6Address != static6 {
+		t.Errorf("static addresses %v/%v, want %v/%v",
+			backend.IPAMConfig.IPv4Address, backend.IPAMConfig.IPv6Address, static, static6)
+	}
+	if len(backend.IPAMConfig.LinkLocalIPs) != 1 || backend.IPAMConfig.LinkLocalIPs[0] != linkLocal {
+		t.Errorf("link-local addresses %v, want [%v]", backend.IPAMConfig.LinkLocalIPs, linkLocal)
+	}
+	// The copy is a copy: editing it must not reach the inspection.
+	backend.IPAMConfig.IPv4Address = netip.MustParseAddr("10.20.0.99")
+	if response.NetworkSettings.Networks["backend"].IPAMConfig.IPv4Address != static {
+		t.Error("the copied IPAM configuration aliases the inspection's")
+	}
+}
+
+// TestPortsAndTheRestartPolicySurviveTheCopy: exposed ports, published port
+// bindings, and the restart policy are all reproduced on the create request
+// exactly, and as copies.
+func TestPortsAndTheRestartPolicySurviveTheCopy(t *testing.T) {
+	http := network.MustParsePort("80/tcp")
+	metrics := network.MustParsePort("9090/tcp")
+	dns := network.MustParsePort("53/udp")
+
+	response := container.InspectResponse{
+		ID: testContainerID,
+		Config: &container.Config{
+			ExposedPorts: network.PortSet{http: {}, metrics: {}, dns: {}},
+		},
+		HostConfig: &container.HostConfig{
+			PortBindings: network.PortMap{
+				http: {{HostIP: netip.MustParseAddr("0.0.0.0"), HostPort: "8080"}},
+				dns:  {{HostPort: "5353"}, {HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "5354"}},
+			},
+			PublishAllPorts: true,
+			RestartPolicy:   container.RestartPolicy{Name: container.RestartPolicyOnFailure, MaximumRetryCount: 4},
+		},
+	}
+
+	config := copyConfigForCreate(response)
+	if len(config.ExposedPorts) != 3 {
+		t.Errorf("%d exposed ports, want 3", len(config.ExposedPorts))
+	}
+	for _, port := range []network.Port{http, metrics, dns} {
+		if _, ok := config.ExposedPorts[port]; !ok {
+			t.Errorf("exposed port %s was dropped", port)
+		}
+	}
+
+	host := copyHostConfigForCreate(response)
+	if len(host.PortBindings[http]) != 1 || host.PortBindings[http][0].HostPort != "8080" {
+		t.Errorf("the http binding was not preserved: %+v", host.PortBindings[http])
+	}
+	if len(host.PortBindings[dns]) != 2 {
+		t.Errorf("the dns bindings were not preserved: %+v", host.PortBindings[dns])
+	}
+	if !host.PublishAllPorts {
+		t.Error("publish-all was dropped")
+	}
+	if host.RestartPolicy.Name != container.RestartPolicyOnFailure || host.RestartPolicy.MaximumRetryCount != 4 {
+		t.Errorf("restart policy %+v, want on-failure:4", host.RestartPolicy)
+	}
+
+	// Copies, not aliases.
+	host.PortBindings[http][0].HostPort = "9999"
+	if response.HostConfig.PortBindings[http][0].HostPort != "8080" {
+		t.Error("the copied port bindings alias the inspection's")
+	}
+	delete(config.ExposedPorts, http)
+	if _, still := response.Config.ExposedPorts[http]; !still {
+		t.Error("the copied exposed ports alias the inspection's")
 	}
 }

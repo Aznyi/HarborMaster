@@ -124,6 +124,8 @@ const selectExecutionColumns = `
 	       e.target_os, e.target_arch, e.target_variant,
 	       e.state, e.checkpoint, e.failure, e.refusal, e.message,
 	       e.replacement_id, e.parked_name, e.quarantine_name, e.original_removed,
+	       e.original_restart_policy,
+	       e.restore_state, e.restore_rollback_id, e.restore_detail,
 	       e.verify_health, e.verify_image, e.verify_preservation, e.verify_network,
 	       e.health_state, e.health_checked, e.stability_seconds,
 	       e.preservation_report, e.recovery_plan,
@@ -295,6 +297,15 @@ type ExecutionChange struct {
 	ParkedName      string
 	QuarantineName  string
 	OriginalRemoved bool
+	// OriginalRestartPolicy is the original's restart policy in its recorded
+	// form (domain.RestartPolicy.Encode), written at the transition into
+	// creating so a rollback can restore what the park suspended.
+	OriginalRestartPolicy string
+
+	// Restore, when set, REPLACES the recorded restore outcome: state, rollback
+	// id, and detail together. Nil leaves it alone, so a transition that says
+	// nothing about the restore cannot blank one already recorded.
+	Restore *domain.ExecutionRestore
 
 	// Verification, when the transition carries a verdict.
 	Verification *domain.ExecutionVerification
@@ -364,6 +375,15 @@ func (r *ExecutionRepository) Advance(
 	}
 	if change.OriginalRemoved {
 		assignments = append(assignments, "original_removed = 1")
+	}
+	if change.OriginalRestartPolicy != "" {
+		assignments = append(assignments, "original_restart_policy = ?")
+		args = append(args, change.OriginalRestartPolicy)
+	}
+	if change.Restore != nil {
+		assignments = append(assignments, "restore_state = ?", "restore_rollback_id = ?", "restore_detail = ?")
+		args = append(args, string(change.Restore.State), change.Restore.RollbackID,
+			domain.SanitiseDisplayText(change.Restore.Detail, domain.MaxExecutionMessageBytes))
 	}
 
 	if change.Verification != nil {
@@ -1150,13 +1170,17 @@ func scanExecutions(rows *sql.Rows) ([]domain.Execution, error) {
 			failure    string
 			refusal    string
 
-			originalRemoved int
-			healthResult    string
-			imageResult     string
-			preserveResult  string
-			networkResult   string
-			healthState     string
-			healthChecked   int
+			originalRemoved       int
+			originalRestartPolicy string
+			restoreState          string
+			restoreRollbackID     string
+			restoreDetail         string
+			healthResult          string
+			imageResult           string
+			preserveResult        string
+			networkResult         string
+			healthState           string
+			healthChecked         int
 
 			preservationReport string
 			recoveryPlan       string
@@ -1181,6 +1205,8 @@ func scanExecutions(rows *sql.Rows) ([]domain.Execution, error) {
 			&state, &checkpoint, &failure, &refusal, &execution.Message,
 			&execution.ReplacementID, &execution.ParkedName,
 			&execution.QuarantineName, &originalRemoved,
+			&originalRestartPolicy,
+			&restoreState, &restoreRollbackID, &restoreDetail,
 			&healthResult, &imageResult, &preserveResult, &networkResult,
 			&healthState, &healthChecked, &execution.Verification.StabilitySeconds,
 			&preservationReport, &recoveryPlan,
@@ -1196,6 +1222,14 @@ func scanExecutions(rows *sql.Rows) ([]domain.Execution, error) {
 		execution.Failure = domain.ExecutionFailure(failure)
 		execution.Refusal = domain.ExecutionRefusal(refusal)
 		execution.OriginalRemoved = originalRemoved == 1
+		if policy, ok := domain.ParseRestartPolicy(originalRestartPolicy); ok {
+			execution.OriginalRestartPolicy = policy
+		}
+		execution.Restore = domain.ExecutionRestore{
+			State:      domain.ExecutionRestoreState(restoreState),
+			RollbackID: restoreRollbackID,
+			Detail:     restoreDetail,
+		}
 
 		execution.Verification.Health = domain.VerificationResult(healthResult)
 		execution.Verification.Image = domain.VerificationResult(imageResult)
@@ -1234,4 +1268,75 @@ func scanExecutions(rows *sql.Rows) ([]domain.Execution, error) {
 		out = append(out, execution)
 	}
 	return out, rows.Err()
+}
+
+// AdoptionCandidates returns failed recreations that parked the original,
+// recorded no replacement, and completed after `since`.
+//
+// # What a candidate is
+//
+// A create that fails on the client may have completed on the daemon, leaving
+// a container holding the production name that no record names. These are the
+// rows the reconciliation pass re-examines against the live host: the
+// checkpoint says the original was parked and nothing further was recorded,
+// which is the only arrangement in which an unrecorded replacement can exist.
+//
+// A row leaves the set the moment a replacement id is recorded, which is what
+// makes the pass converge. The cutoff bounds how long a row with nothing to
+// adopt is re-read: a create that landed does so within seconds, and a row
+// still empty a day later has nothing coming.
+func (r *ExecutionRepository) AdoptionCandidates(
+	ctx context.Context,
+	since time.Time,
+	limit int,
+) ([]domain.Execution, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	rows, err := r.db.QueryContext(ctx, selectExecutionColumns+`
+		WHERE e.state = ?
+		  AND e.checkpoint = ?
+		  AND e.replacement_id = ''
+		  AND e.completed_at IS NOT NULL
+		  AND e.completed_at > ?
+		ORDER BY e.id DESC
+		LIMIT ?`,
+		string(domain.ExecutionFailed), string(domain.CheckpointOriginalParked),
+		formatTime(since.UTC()), limit)
+	if err != nil {
+		return nil, fmt.Errorf("query adoption candidates: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanExecutions(rows)
+}
+
+// RestoresPending returns failed recreations whose automatic restore was
+// requested and has not yet been settled, completed after `since`.
+//
+// The sweep that advances restores reads exactly this. A row leaves the set
+// when the restore is recorded as restored, failed, refused, or unavailable,
+// which is what makes the sweep converge; the cutoff bounds how long a row
+// whose rollback never appears is re-read.
+func (r *ExecutionRepository) RestoresPending(
+	ctx context.Context,
+	since time.Time,
+	limit int,
+) ([]domain.Execution, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	rows, err := r.db.QueryContext(ctx, selectExecutionColumns+`
+		WHERE e.restore_state = ?
+		  AND e.completed_at IS NOT NULL
+		  AND e.completed_at > ?
+		ORDER BY e.id DESC
+		LIMIT ?`,
+		string(domain.RestoreRequested), formatTime(since.UTC()), limit)
+	if err != nil {
+		return nil, fmt.Errorf("query pending restores: %w", AsError(err))
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanExecutions(rows)
 }

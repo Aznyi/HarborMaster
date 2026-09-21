@@ -303,11 +303,32 @@ func (s *ExecutionService) preflight(
 
 	// States a recreation cannot safely start from. Restarting and removing are
 	// transitional -- the container is already moving and stopping it would race
-	// the daemon. Dead means the daemon itself could not clean it up.
+	// the daemon. Dead means the daemon itself could not clean it up. Paused
+	// cannot be stopped at all: the daemon refuses `stop` and `kill` until the
+	// container is unpaused, so admitting one produced a failed stop and an
+	// urgent "uncertain stop" plan for a container that was exactly as the
+	// operator left it.
 	switch container.Overview.State {
-	case domain.StateRunning, domain.StateExited, domain.StateCreated, domain.StatePaused:
+	case domain.StateRunning, domain.StateExited, domain.StateCreated:
 	default:
 		decision.Refusal = domain.ExecutionRefusalContainerState
+		return decision, nil
+	}
+
+	// ---- no rollback of this workload is in flight -------------------------
+	//
+	// The rollback preflight refuses while a recreation is active. This is the
+	// same guard from the other side: a rollback is stopping and renaming the
+	// containers under this name, and a recreation that started beside it
+	// would be a second destructive operation on one workload. Keyed by NAME,
+	// which is what rollbacks contend for. Fails closed: a lookup that could
+	// not be performed establishes nothing.
+	rollingBack, err := s.evidence.RollbackActiveForContainer(ctx, decision.ContainerName)
+	if err != nil {
+		return decision, err
+	}
+	if rollingBack {
+		decision.Refusal = domain.ExecutionRefusalConflict
 		return decision, nil
 	}
 

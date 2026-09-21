@@ -3469,8 +3469,11 @@ paths:
 
         On any failure after that first stop, the replacement is stopped and
         renamed to `<name>.hm-failed-<executionId>`, both containers are left in
-        place, and the record carries a manual `recovery` plan. **HarborMaster
-        does not roll back**, and there is no endpoint that would.
+        place, and the record carries a manual `recovery` plan. HarborMaster then
+        asks its own rollback service to restore the original (unless
+        `EXECUTION_RESTORE_ON_FAILURE` is off or rollback is not enabled); the
+        outcome is recorded on the execution as `restore`, and `restore.state`
+        says whether the service is back.
       requestBody:
         required: true
         content:
@@ -10461,6 +10464,7 @@ components:
         - rename
         - create
         - start
+        - restartPolicy
         - healthTimeout
         - unhealthy
         - notStable
@@ -10830,6 +10834,35 @@ components:
             record means the replacement is serving correctly but the original
             could not be removed -- housekeeping, described by the recovery
             plan, not a failed recreation.
+        originalRestartPolicy:
+          type: object
+          description: |
+            The restart policy the original carried before the recreation parked
+            it and set it to "no", so a parked container cannot restart by itself
+            after a daemon restart. A rollback writes it back before starting the
+            original. Absent on records written before it was recorded.
+          properties:
+            name: { type: string }
+            maximumRetryCount: { type: integer }
+        restore:
+          type: object
+          description: |
+            What became of restoring the original after a MANUAL update failed
+            after the mutation point. Absent when no restore applies: the update
+            did not change the host, or it was unattended and the update policy
+            owns its recovery. `restored` means the original is serving again;
+            every other settled state means the service is still down and a
+            person is needed.
+          properties:
+            state:
+              type: string
+              enum: [requested, restored, failed, refused, unavailable]
+            rollbackId:
+              type: string
+              description: The rollback performing, or that performed, the restore.
+            detail:
+              type: string
+              description: HarborMaster's own sentence about a refusal, a failure, or an absent capability.
         verification: { $ref: "#/components/schemas/ExecutionVerification" }
         recovery: { $ref: "#/components/schemas/RecoveryPlan" }
         requestedAt: { type: string, format: date-time }
@@ -10974,6 +11007,7 @@ components:
         - stop
         - rename
         - start
+        - restartPolicy
         - healthTimeout
         - unhealthy
         - notStable
@@ -11122,7 +11156,10 @@ components:
             it back.
         replacementId:
           type: string
-          description: The container the recreation created, by full container id.
+          description: |
+            The container the recreation created, by full container id. Empty
+            when the recreation failed before creating one: the rollback then
+            has nothing to stop and restores the original alone.
         replacementParkedName:
           type: string
           description: |

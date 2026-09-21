@@ -6,11 +6,11 @@ import "strconv"
 //
 // # Why this exists
 //
-// HarborMaster does not roll back. A recreation that fails after the mutation
-// point leaves two containers on the host -- the parked original and the
-// quarantined replacement -- and stops. That is deliberate: an automatic undo
-// is another unattended mutation, performed at exactly the moment HarborMaster
-// has just demonstrated that its model of the host is wrong.
+// The recreation pipeline does not roll back. A recreation that fails after the
+// mutation point leaves two containers on the host -- the parked original and
+// the quarantined replacement -- and stops. The restore that may follow is the
+// ROLLBACK service's work, requested afterwards and refused whenever the host
+// is not in an arrangement it can undo without guessing.
 //
 // But "we stopped and left it to you" is only acceptable if HarborMaster is
 // precise about what it left. A recovery plan is that precision: the exact
@@ -96,6 +96,14 @@ type RecoveryContext struct {
 	Checkpoint ExecutionCheckpoint
 	Failure    ExecutionFailure
 
+	// OriginalRestartPolicy is the policy the original carried before it was
+	// parked, in its recorded form. Combined with the failure and the
+	// checkpoint it says whether a parked or quarantined container could still
+	// start by itself: an original whose suspension FAILED, or a replacement
+	// that was renamed to its quarantine name without reaching the quarantined
+	// checkpoint. A plan for either must say so and name the command.
+	OriginalRestartPolicy string
+
 	// MutationAttempted reports that a mutation was ISSUED, whether or not any
 	// checkpoint confirmed it.
 	//
@@ -173,12 +181,22 @@ func BuildRecoveryPlan(context RecoveryContext) *RecoveryPlan {
 		}
 
 	case CheckpointOriginalParked:
+		// "No replacement was RECORDED", not "created". A create that failed
+		// on the client may have completed on the daemon, and HarborMaster
+		// reconciles that case by its own ownership labels -- but a plan
+		// written before that reconciliation ran must not assert something
+		// it cannot know. So the operator looks first.
 		plan.Urgency = RecoveryUrgent
 		plan.ServiceInterrupted = true
 		plan.Situation = "The original container was stopped and renamed aside, and no replacement " +
-			"was created. Nothing answers to " + name + " right now."
+			"was recorded. Nothing HarborMaster knows of answers to " + name + " right now."
 		plan.Steps = []RecoveryStep{
-			{Description: "Give the original its name back.",
+			{Description: "Check whether anything holds the production name. A create that failed " +
+				"on HarborMaster's side may still have completed on the daemon; if a container " +
+				"is listed here, HarborMaster will adopt it on its next reconciliation pass when " +
+				"it carries this recreation's ownership labels.",
+				Command: "docker ps -a --filter name=^" + shellName(name) + "$"},
+			{Description: "If nothing holds the name, give the original its name back.",
 				Command: "docker rename " + shellName(context.ParkedName) + " " + shellName(name)},
 			{Description: "Start it. It is unchanged and still on its original image.",
 				Command: "docker start " + shellName(name)},
@@ -238,6 +256,15 @@ func BuildRecoveryPlan(context RecoveryContext) *RecoveryPlan {
 		plan.Urgency = RecoveryAttention
 		plan.Situation = "HarborMaster is not certain what state this host was left in. Inspect the " +
 			"containers below before acting."
+	}
+
+	// The restart hazard, when the record says one exists. Before the
+	// identities so an operator reading top to bottom sees it before the
+	// commands that start things.
+	if hazard := restartHazardSteps(context); len(hazard) > 0 {
+		plan.Steps = append(plan.Steps, hazard...)
+		plan.Situation += " A container HarborMaster set aside still carries a restart policy that " +
+			"could start it by itself after a daemon restart; see the steps below."
 	}
 
 	// The identities, appended last so they are present on every plan including
@@ -332,4 +359,85 @@ func shellName(name string) string {
 	// so it is unmistakably one argument, and bounded so it cannot dominate the
 	// plan.
 	return strconv.Quote(SanitiseDisplayText(name, MaxContainerNameBytes))
+}
+
+// restartHazardSteps names any container HarborMaster set aside that could
+// still start by itself after a daemon restart.
+//
+// Two durable signs, and only these two:
+//
+//   - the recreation failed with ExecutionFailureRestartPolicy, which is what
+//     it records when the parked ORIGINAL's suspension did not land;
+//   - the record carries a quarantine name but never reached the quarantined
+//     checkpoint, which is what it records when the REPLACEMENT was moved off
+//     the production name but its suspension did not land.
+//
+// Neither is inferred from a live read: a plan is text an operator reads
+// later, and it must describe what the record can prove. A policy of "no"
+// starts nothing and produces no step.
+func restartHazardSteps(context RecoveryContext) []RecoveryStep {
+	policy, ok := ParseRestartPolicy(context.OriginalRestartPolicy)
+	if !ok || !policy.RestartsUnattended() {
+		return nil
+	}
+
+	var steps []RecoveryStep
+	if context.Failure == ExecutionFailureRestartPolicy && context.ParkedName != "" {
+		steps = append(steps, RecoveryStep{
+			Description: "The parked original still carries restart policy " + policy.Encode() +
+				" and could start by itself after a daemon restart. Unless you are restoring " +
+				"it now, keep it stopped.",
+			Command: "docker update --restart=no " + shellName(context.ParkedName),
+		})
+	}
+	if context.QuarantineName != "" && context.Checkpoint != CheckpointReplacementQuarantined {
+		steps = append(steps, RecoveryStep{
+			Description: "The quarantined replacement still carries restart policy " + policy.Encode() +
+				" and could start by itself after a daemon restart, taking the original's ports. " +
+				"Keep it stopped.",
+			Command: "docker update --restart=no " + shellName(context.QuarantineName),
+		})
+	}
+	return steps
+}
+
+// RestoredRecoveryPlan describes the host after a failed update was put back
+// by an automatic restore.
+//
+// Informational. The original is serving under its own name and passed
+// verification; what remains is the failed replacement, kept stopped and
+// parked as the evidence of why the update did not work. Nothing here is
+// urgent and nothing is recommended by default: removing the evidence is a
+// decision, not tidying.
+func RestoredRecoveryPlan(containerName, rollbackID, replacementID, replacementParkedName string) *RecoveryPlan {
+	name := containerName
+	if name == "" {
+		name = "the container"
+	}
+	plan := &RecoveryPlan{
+		Urgency:            RecoveryInformational,
+		ServiceInterrupted: false,
+		Situation: "The update failed and HarborMaster restored the original automatically. " +
+			name + " is running its previous image again and passed verification (rollback " +
+			rollbackID + ").",
+	}
+	if replacementID != "" {
+		where := replacementParkedName
+		if where == "" {
+			where = ShortenID(replacementID)
+		}
+		plan.Steps = append(plan.Steps, RecoveryStep{
+			Description: "The failed replacement is kept, stopped, under " + shellName(where) +
+				" so you can find out why the new image did not work.",
+			Command: "docker logs " + shellName(where),
+		})
+	}
+	plan.Steps = append(plan.Steps, RecoveryStep{
+		Description: "The image somebody approved is not the one running. Assess the update " +
+			"again before applying it: the failed attempt is the evidence.",
+	})
+	for i := range plan.Steps {
+		plan.Steps[i].Order = i + 1
+	}
+	return plan
 }

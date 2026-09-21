@@ -223,3 +223,33 @@ func refusalFixture(
 		ExpiresAt:   now.Add(time.Hour),
 	}
 }
+
+// Every restore state is writable.
+//
+// The fourth enumerated column on the table, walked for the same reason as
+// the other three: a restore outcome the schema refuses is a restored service
+// the record cannot report.
+func TestEveryRestoreStateIsAcceptedByTheSchema(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for index, state := range domain.ExecutionRestoreStates {
+		execution := refusalFixture(2000+index, domain.ExecutionRefusalNone, now)
+		if _, err := db.Executions.Create(ctx, execution, now); err != nil {
+			t.Fatalf("the fixture could not be stored: %v", err)
+		}
+		if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+			ExecutionID: execution.ExecutionID,
+			To:          domain.ExecutionFailed,
+			Failure:     domain.ExecutionFailureCreate,
+			Restore: &domain.ExecutionRestore{
+				State: state, RollbackID: "rbk_0123456789abcdef0123", Detail: "why",
+			},
+		}, now); err != nil {
+			t.Errorf("the schema refuses restore state %q: %v", state, err)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -67,6 +68,12 @@ type fakeExecutionEvidence struct {
 	policyErr      error
 	refreshErr     error
 	intelErr       error
+
+	// rollbackFor and rollbackState model one rollback record for a container
+	// NAME; rollbackErr fails the lookup outright.
+	rollbackFor   string
+	rollbackState domain.RollbackState
+	rollbackErr   error
 
 	// planCalls counts revalidations, which is what proves the preflight runs
 	// again immediately before the first mutation.
@@ -440,6 +447,14 @@ func (f *fakeExecutionStore) Advance(
 	if change.QuarantineName != "" {
 		record.QuarantineName = change.QuarantineName
 	}
+	if change.OriginalRestartPolicy != "" {
+		if policy, ok := domain.ParseRestartPolicy(change.OriginalRestartPolicy); ok {
+			record.OriginalRestartPolicy = policy
+		}
+	}
+	if change.Restore != nil {
+		record.Restore = *change.Restore
+	}
 	if change.OriginalRemoved {
 		record.OriginalRemoved = true
 	}
@@ -643,6 +658,14 @@ type execHarness struct {
 	evidence *fakeExecutionEvidence
 	runtime  *docker.Fake
 	mutator  *docker.FakeMutator
+	// logSink, when set, receives the service's log lines so a test can assert
+	// on what an operator would read.
+	logSink *bytes.Buffer
+	// restorer stands in for the rollback service. Nil is a deployment without
+	// the rollback capability.
+	restorer *fakeRestorer
+	// restoreOnFailure overrides the setting; nil takes the default (on).
+	restoreOnFailure *bool
 	// lineage is what the container FOLLOWS. Advanced only by a recreation that
 	// passed verification, which is what the refusal tests assert stays true.
 	lineage *fakeLineageStore
@@ -746,6 +769,14 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 	if harness.requireSnapshot != nil {
 		requireSnapshot = *harness.requireSnapshot
 	}
+	restoreOnFailure := true
+	if harness.restoreOnFailure != nil {
+		restoreOnFailure = *harness.restoreOnFailure
+	}
+	var restorer service.Restorer
+	if harness.restorer != nil {
+		restorer = harness.restorer
+	}
 
 	harness.service = service.NewExecutionService(service.ExecutionOptions{
 		Store:    harness.store,
@@ -761,9 +792,11 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 		Hasher:       service.NewHasher(key),
 		Assurance:    harness.assurance,
 		Approvals:    harness.approvals,
+		Restorer:     restorer,
 		Config: config.Execution{
 			Enabled:               true,
 			RequireSnapshot:       requireSnapshot,
+			RestoreOnFailure:      restoreOnFailure,
 			StartupTimeout:        2 * time.Second,
 			StabilityPeriod:       10 * time.Millisecond,
 			HealthPollInterval:    time.Millisecond,
@@ -775,7 +808,7 @@ func newExecHarness(t *testing.T, tune ...func(*execHarness)) *execHarness {
 			PolicyFreshness:       24 * time.Hour,
 			MaxEventsPerExecution: 200,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: harness.logger(),
 		Now:    harness.now,
 	})
 	return harness
@@ -908,7 +941,7 @@ func TestASuccessfulRecreationFollowsTheWholePipeline(t *testing.T) {
 
 	// The exact order of operations on the host. This is the safety model
 	// written as a list, so a reordering fails here rather than in production.
-	want := []string{"capture", "stop", "rename", "create", "start", "remove"}
+	want := []string{"capture", "stop", "rename", "suspendRestart", "create", "start", "remove"}
 	if got := harness.mutator.Ops(); !equalStrings(got, want) {
 		t.Errorf("operations = %v, want %v", got, want)
 	}
@@ -1910,4 +1943,63 @@ func countString(values []string, want string) int {
 		}
 	}
 	return count
+}
+
+func (f *fakeExecutionStore) AdoptionCandidates(_ context.Context, since time.Time, limit int) ([]domain.Execution, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []domain.Execution
+	for _, id := range f.order {
+		record := f.records[id]
+		if record.State != domain.ExecutionFailed ||
+			record.Checkpoint != domain.CheckpointOriginalParked ||
+			record.ReplacementID != "" ||
+			record.CompletedAt == nil || !record.CompletedAt.After(since) {
+			continue
+		}
+		out = append(out, *record)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// ---- rollback awareness (HM-07) ------------------------------------------
+
+func (f *fakeExecutionEvidence) RollbackActiveForContainer(_ context.Context, containerName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rollbackErr != nil {
+		return false, f.rollbackErr
+	}
+	return f.rollbackFor == containerName && f.rollbackState.Active(), nil
+}
+
+// logger returns the service logger: the sink a test asked for, or nothing.
+func (h *execHarness) logger() *slog.Logger {
+	if h.logSink != nil {
+		return slog.New(slog.NewTextHandler(h.logSink, nil))
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func (f *fakeExecutionStore) RestoresPending(_ context.Context, since time.Time, limit int) ([]domain.Execution, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []domain.Execution
+	for _, id := range f.order {
+		record := f.records[id]
+		if record.Restore.State != domain.RestoreRequested ||
+			record.CompletedAt == nil || !record.CompletedAt.After(since) {
+			continue
+		}
+		out = append(out, *record)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }

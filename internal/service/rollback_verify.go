@@ -159,7 +159,10 @@ func (s *RollbackService) verifyNetworks(before, after domain.ContainerDetail) b
 // Bounded, cancellable, and polled at a configured interval that cannot be set
 // low enough to become a busy loop against the Docker socket.
 func (s *RollbackService) verifyHealth(ctx context.Context, work *rollbackWork) domain.RollbackFailure {
-	deadline := s.now().UTC().Add(s.cfg.StartupTimeout)
+	// The restored original gets its healthcheck's own budget when that is
+	// longer than the configured timeout, capped -- see domain.HealthDeadline.
+	deadline := s.now().UTC().Add(domain.HealthDeadline(work.decision.BaselineDetail.HealthCheck,
+		s.cfg.StartupTimeout, s.cfg.MaxHealthWait))
 
 	declared := healthCheckDeclared(work.decision.BaselineDetail)
 	work.verification.HealthChecked = declared

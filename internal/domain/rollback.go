@@ -300,6 +300,12 @@ const (
 	// run, so nothing is serving and a person is needed immediately.
 	RollbackFailureStart RollbackFailure = "start"
 
+	// RollbackFailureRestartPolicy means the original holds its name again but
+	// the restart policy the recreation suspended could not be written back, so
+	// it was not started: starting it as "no" would leave a workload that runs
+	// until its next crash and then stays down.
+	RollbackFailureRestartPolicy RollbackFailure = "restartPolicy"
+
 	// RollbackFailureHealthTimeout means the original never became healthy
 	// within its budget.
 	RollbackFailureHealthTimeout RollbackFailure = "healthTimeout"
@@ -349,6 +355,7 @@ const (
 var RollbackFailures = []RollbackFailure{
 	RollbackFailurePreflight,
 	RollbackFailureStop, RollbackFailureRename, RollbackFailureStart,
+	RollbackFailureRestartPolicy,
 	RollbackFailureHealthTimeout, RollbackFailureUnhealthy, RollbackFailureNotStable,
 	RollbackFailureImageMismatch, RollbackFailurePreservation, RollbackFailureNetwork,
 	RollbackFailureDockerUnavailable, RollbackFailureTimeout,
@@ -396,6 +403,8 @@ func (f RollbackFailure) Explain() string {
 		return "a container could not be renamed, so the names on this host may not be the ones you expect"
 	case RollbackFailureStart:
 		return "the original container would not start, so nothing is serving this name"
+	case RollbackFailureRestartPolicy:
+		return "the original holds its name again but its restart policy could not be put back, so it was not started; nothing is serving this name"
 	case RollbackFailureHealthTimeout:
 		return "the restored original did not become healthy within its time budget"
 	case RollbackFailureUnhealthy:
@@ -595,23 +604,45 @@ type RollbackEligibility struct {
 // RollbackSufficientCheckpoint reports whether a recreation got far enough for
 // its arrangement to be undoable.
 //
-// The window is exact. Below originalParked the original still carries its own
-// name and no replacement holds it, so there is no arrangement to undo -- and
-// starting a stopped container is not a rollback. At originalRemoved the
-// original is gone.
+// The window is exact. From originalStopped onward the recreation has taken the
+// original out of service: it is stopped under its own name, or stopped and
+// parked, or replaced. Every one of those is an arrangement a rollback can put
+// back, because the original is preserved in all of them. At originalRemoved
+// the original is gone.
+//
+// originalStopped and originalParked are in the window even though no
+// replacement exists there. A create that fails after the park leaves the
+// workload DOWN with one container on the host, and "there is nothing to roll
+// back" was the one answer that could not be true of it. See
+// RollbackRestoresWithoutReplacement.
 //
 // The uncertain case is NOT in the window: a checkpoint of none on an execution
 // that attempted a mutation means HarborMaster does not know what it did, and a
 // rollback would be acting on a guess.
 func RollbackSufficientCheckpoint(checkpoint ExecutionCheckpoint) bool {
 	switch checkpoint {
-	case CheckpointOriginalParked, CheckpointReplacementCreated,
-		CheckpointReplacementStarted, CheckpointReplacementVerified,
-		CheckpointReplacementQuarantined:
+	case CheckpointOriginalStopped, CheckpointOriginalParked,
+		CheckpointReplacementCreated, CheckpointReplacementStarted,
+		CheckpointReplacementVerified, CheckpointReplacementQuarantined:
 		return true
 	default:
 		return false
 	}
+}
+
+// RollbackRestoresWithoutReplacement reports whether a recreation at this
+// checkpoint can be rolled back with NO replacement recorded.
+//
+// True only for the two checkpoints a recreation reaches before it creates
+// anything: the original is stopped and either still holds its own name or has
+// been parked. A rollback there is a restore of the name (when needed) and a
+// start, and nothing else.
+//
+// Any later checkpoint with an empty replacement id is an inconsistent record
+// -- the recreation says it created a container and does not say which -- and
+// is refused rather than acted on in either direction.
+func RollbackRestoresWithoutReplacement(checkpoint ExecutionCheckpoint) bool {
+	return checkpoint == CheckpointOriginalStopped || checkpoint == CheckpointOriginalParked
 }
 
 // -------------------------------------------------------------- the record --
@@ -696,6 +727,17 @@ type Rollback struct {
 // operator their failed manual update is being handled when nothing is
 // handling it.
 func (r Rollback) Automatic() bool { return AutomaticRequest(r.RequestKey) }
+
+// ManualRestore reports whether the execution service requested this rollback
+// to put a failed manual update's original back. Read from the persisted
+// request key, exactly as Automatic is, and for the same reason.
+func (r Rollback) ManualRestore() bool { return ManualRestoreRequest(r.RequestKey) }
+
+// Unattended reports whether nobody pressed the button: the rollback was
+// requested by automation or by the execution service on a failed update's
+// behalf. It decides wording -- an operator who did not ask for a rollback
+// needs the UPDATE described, not the rollback -- and nothing else.
+func (r Rollback) Unattended() bool { return r.Automatic() || r.ManualRestore() }
 
 // Duration reports how long the rollback took, when it has finished.
 func (r Rollback) Duration() time.Duration {

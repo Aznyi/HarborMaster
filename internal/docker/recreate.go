@@ -301,6 +301,11 @@ type ContainerMutator interface {
 	RenameContainer(ctx context.Context, request RenameRequest) error
 	// RemoveContainer removes one STOPPED container by id, keeping its volumes.
 	RemoveContainer(ctx context.Context, request RemoveRequest) error
+	// SuspendRestart sets a container HarborMaster has parked or quarantined
+	// to restart policy "no", so a daemon restart cannot bring it back to race
+	// the serving container. Refused for any container whose current name
+	// does not carry a HarborMaster marker. See restart_policy.go.
+	SuspendRestart(ctx context.Context, request SuspendRestartRequest) error
 }
 
 // -------------------------------------------------------------- requests --
@@ -330,6 +335,13 @@ type CreateRequest struct {
 	//
 	// Empty writes no label, which is what an untracked workload gets.
 	TrackingReference string
+	// ExecutionID is the recreation creating this replacement. Written onto
+	// the container as domain.LabelExecutionOwner, beside the captured
+	// container's id as domain.LabelReplacementOf, so a replacement the daemon
+	// finished after the client gave up can be identified as this execution's
+	// and adopted. Required: a replacement without ownership is an orphan
+	// nothing can ever safely move.
+	ExecutionID string
 }
 
 // Validate reports whether the request is safe to send to the daemon.
@@ -354,7 +366,27 @@ func (r CreateRequest) Validate() error {
 	if len(r.TrackingReference) > domain.MaxLineageReferenceBytes {
 		return fmt.Errorf("%w: the tracking reference is not acceptable", ErrMutationRefused)
 	}
+	if !domain.ValidExecutionID(r.ExecutionID) {
+		return fmt.Errorf("%w: the replacement must name the execution that owns it", ErrMutationRefused)
+	}
 	return nil
+}
+
+// ownershipLabels returns the label set a replacement is created with.
+//
+// A COPY of the captured labels with HarborMaster's two ownership labels
+// written over whatever the source carried under those keys. The source is a
+// container an operator controls, and a container that arrived carrying a
+// forged claim about which execution created it must not get to keep it. The
+// copy is what lets a CreateRequest be retried from an unedited capture.
+func ownershipLabels(source map[string]string, executionID, originalID string) map[string]string {
+	labels := make(map[string]string, len(source)+2)
+	for key, value := range source {
+		labels[key] = value
+	}
+	labels[domain.LabelExecutionOwner] = executionID
+	labels[domain.LabelReplacementOf] = originalID
+	return labels
 }
 
 // StartRequest asks for one container to be started.
@@ -513,6 +545,9 @@ func (c *Client) CaptureConfig(ctx context.Context, containerID string) (*Captur
 		// rather than completed with defaults.
 		return nil, fmt.Errorf("%w: the daemon did not report a complete configuration", ErrCaptureFailed)
 	}
+	if err := captureRefusal(response); err != nil {
+		return nil, err
+	}
 
 	name := domain.NormaliseContainerName(response.Name)
 	if !domain.ValidContainerName(name) {
@@ -535,6 +570,29 @@ func (c *Client) CaptureConfig(ctx context.Context, containerID string) (*Captur
 	captured.networks = copyNetworksForCreate(response)
 
 	return captured, nil
+}
+
+// captureRefusal reports a container that must not be recreated by this
+// pipeline at all, decided from the inspection alone and BEFORE anything is
+// stopped.
+//
+// # AutoRemove
+//
+// `docker run --rm` sets HostConfig.AutoRemove, and the daemon removes such a
+// container the moment it exits -- including after the stop the recreation
+// issues. The park rename that follows then finds nothing: the original is gone,
+// not parked, and the only copy of its configuration is the capture in this
+// process's memory. That is the one arrangement the "park, never remove" design
+// cannot recover from, so it is refused here, where refusing costs nothing.
+//
+// The pipeline records this as a capture failure, which is the pre-mutation
+// classification: nothing on the host was touched.
+func captureRefusal(response container.InspectResponse) error {
+	if response.HostConfig != nil && response.HostConfig.AutoRemove {
+		return fmt.Errorf("%w: the container removes itself when it stops, so it cannot be parked",
+			ErrCaptureFailed)
+	}
+	return nil
 }
 
 // copyConfigForCreate copies the portable configuration, stripped of
@@ -864,6 +922,41 @@ func copyResources(source container.Resources) container.Resources {
 
 // ------------------------------------------------------- the five methods --
 
+// MinMutationCallTimeout is the least time a create, start, or rename is given.
+//
+// # Why mutations are not bounded by the request timeout
+//
+// The adapter's request timeout (DOCKER_TIMEOUT, ten seconds by default) is
+// sized for an inspect or a listing. A create or a start on a loaded host can
+// legitimately take longer: a GPU runtime hook, a container publishing many
+// ports, a large image on slow storage, a desktop daemon under load. Stopping
+// was already given its own bound after a live failure of exactly this kind;
+// the other mutations were not.
+//
+// A client-side deadline on one of those calls is the worst failure this
+// adapter can produce. It arrives AFTER the mutation point, and the daemon
+// usually completes the request anyway -- so a create that "timed out" leaves
+// a container holding the production name that no record names, which is the
+// one arrangement no recovery path can repair. Giving the call the time it
+// needs is cheaper than every alternative.
+//
+// Every wait is still bounded. The pipeline's own mutation budget and its
+// shutdown grace cap the whole sequence whatever this value is; this only
+// stops a single call from being cut off before the daemon has answered.
+const MinMutationCallTimeout = 2 * time.Minute
+
+// mutationTimeout bounds one create, start, or rename call.
+//
+// The configured request timeout when it is already generous, and the floor
+// above otherwise. The floor raises, never lowers: a deployment that asked for
+// a longer timeout keeps it.
+func (c *Client) mutationTimeout() time.Duration {
+	if c.timeout > MinMutationCallTimeout {
+		return c.timeout
+	}
+	return MinMutationCallTimeout
+}
+
 // CreateContainer creates a replacement from a captured configuration.
 //
 // # The image is the only thing that changes
@@ -884,7 +977,7 @@ func (c *Client) CreateContainer(ctx context.Context, request CreateRequest) (st
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	captured := request.Captured
@@ -895,17 +988,17 @@ func (c *Client) CreateContainer(ctx context.Context, request CreateRequest) (st
 	config := *captured.config
 	config.Image = request.Image.PinnedReference()
 
-	// The lineage label goes onto a COPY of the label map. The struct copy
-	// above is shallow, so writing into config.Labels directly would write into
-	// the capture the caller still holds -- and a retry would then be creating
-	// from a configuration the previous attempt edited.
+	// Every label HarborMaster writes goes onto a COPY of the label map. The
+	// struct copy above is shallow, so writing into config.Labels directly
+	// would write into the capture the caller still holds -- and a retry would
+	// then be creating from a configuration the previous attempt edited.
+	//
+	// The ownership labels are unconditional: they are what lets a replacement
+	// the daemon finished after the client gave up be identified as this
+	// execution's. The lineage label is written only for a tracked workload.
+	config.Labels = ownershipLabels(config.Labels, request.ExecutionID, captured.ContainerID)
 	if request.TrackingReference != "" {
-		labels := make(map[string]string, len(config.Labels)+1)
-		for key, value := range config.Labels {
-			labels[key] = value
-		}
-		labels[domain.LineageLabel] = request.TrackingReference
-		config.Labels = labels
+		config.Labels[domain.LineageLabel] = request.TrackingReference
 	}
 
 	options := client.ContainerCreateOptions{
@@ -937,7 +1030,7 @@ func (c *Client) StartContainer(ctx context.Context, request StartRequest) error
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	// ContainerStartOptions carries checkpoint fields, which are left zero.
@@ -989,7 +1082,7 @@ func (c *Client) RenameContainer(ctx context.Context, request RenameRequest) err
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	if _, err := c.mutateAPI.ContainerRename(ctx, request.ContainerID, client.ContainerRenameOptions{

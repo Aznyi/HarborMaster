@@ -44,13 +44,16 @@ import (
 // failure, which is what makes an unsuccessful recreation recoverable by hand
 // rather than an outage with no way back.
 //
-// # There is no rollback, deliberately
+// # The pipeline does not roll back; it asks
 //
 // A failure after step 4 stops, quarantines the replacement, leaves both
-// containers on the host, and records a manual recovery plan. HarborMaster does
-// not undo its own work: an automatic undo is another unattended mutation,
-// performed at exactly the moment HarborMaster has demonstrated that its model
-// of the host is wrong.
+// containers on the host, and records a manual recovery plan. The pipeline
+// never undoes its own work: at the moment it has demonstrated its model of
+// the host is wrong, another mutation on the strength of that model would be
+// the wrong thing. What it does instead is ASK the rollback service -- through
+// the same request an operator's button submits, so the same preflight runs
+// against the live host -- and record what came of the ask on the update. See
+// execution_restore.go and ExecutionOptions.Restorer.
 //
 // # The checkpoint, not the state, is what survives a crash
 //
@@ -91,6 +94,12 @@ type ExecutionStore interface {
 	ByRequestKey(ctx context.Context, key string) (domain.Execution, bool, error)
 	Claimable(ctx context.Context, limit int) ([]domain.Execution, error)
 	Interrupted(ctx context.Context, limit int) ([]domain.Execution, error)
+	// AdoptionCandidates lists failed recreations that parked the original and
+	// recorded no replacement, completed after since. See ExecutionService.Reconcile.
+	AdoptionCandidates(ctx context.Context, since time.Time, limit int) ([]domain.Execution, error)
+	// RestoresPending lists failed recreations whose automatic restore is
+	// requested and unsettled, completed after since. See AdvanceRestores.
+	RestoresPending(ctx context.Context, since time.Time, limit int) ([]domain.Execution, error)
 	ExpireStale(ctx context.Context, now time.Time, batch int) (int64, error)
 	Prune(ctx context.Context, cutoff time.Time, batch int) (int64, error)
 }
@@ -119,6 +128,11 @@ type ExecutionEvidence interface {
 	LastRefresh(ctx context.Context) (*domain.RefreshRecord, error)
 	// Intel returns what the registry most recently reported for a reference.
 	Intel(ctx context.Context, reference string) (domain.ImageIntel, error)
+	// RollbackActiveForContainer reports whether a rollback of this workload,
+	// by NAME, is in flight. The rollback preflight refuses while a recreation
+	// is active; this is the same guard in the other direction, so two
+	// destructive operations cannot act on one workload at once.
+	RollbackActiveForContainer(ctx context.Context, containerName string) (bool, error)
 }
 
 // ExecutionDependencies is the namespace evidence the recreation path consults.
@@ -231,6 +245,14 @@ type ExecutionOptions struct {
 	// afterwards.
 	Lineage LineageStore
 
+	// Restorer is the rollback service, as the thing this service ASKS to put
+	// a failed manual update's original back. A caller, not a capability: it
+	// submits the same request an operator's rollback button does, and the
+	// rollback service runs its own preflight and may refuse. Nil is a
+	// deployment without the rollback capability, in which a failed manual
+	// update is recorded as not restorable.
+	Restorer Restorer
+
 	Config config.Execution
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -261,6 +283,9 @@ type ExecutionService struct {
 	// lineage records what the container FOLLOWS, carried across the
 	// replacement. Nil in a deployment without the update pipeline.
 	lineage LineageStore
+	// restorer puts a failed manual update's original back. Nil when the
+	// deployment holds no rollback capability.
+	restorer Restorer
 
 	cfg    config.Execution
 	logger *slog.Logger
@@ -301,6 +326,12 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 	if cfg.StartupTimeout <= 0 {
 		cfg.StartupTimeout = config.DefaultExecutionStartupTimeout
 	}
+	if cfg.MaxHealthWait <= 0 {
+		cfg.MaxHealthWait = config.DefaultExecutionMaxHealthWait
+	}
+	if cfg.MaxHealthWait < cfg.StartupTimeout {
+		cfg.MaxHealthWait = cfg.StartupTimeout
+	}
 	if cfg.StabilityPeriod <= 0 {
 		cfg.StabilityPeriod = config.DefaultExecutionStabilityPeriod
 	}
@@ -340,6 +371,7 @@ func NewExecutionService(opts ExecutionOptions) *ExecutionService {
 		dependencies: opts.Dependencies,
 		audit:        opts.Audit,
 		lineage:      opts.Lineage,
+		restorer:     opts.Restorer,
 		cfg:          cfg,
 		logger:       logger,
 		now:          now,
@@ -676,6 +708,8 @@ type executionEvidence struct {
 	policies     *store.PolicyRepository
 	inventory    *store.InventoryRepository
 	intel        *store.ImageIntelRepository
+	// rollbacks answers one READ: is a rollback of this workload in flight.
+	rollbacks *store.RollbackRepository
 }
 
 // NewExecutionEvidence builds the evidence source from the repositories.
@@ -687,6 +721,7 @@ func NewExecutionEvidence(
 	policies *store.PolicyRepository,
 	inventory *store.InventoryRepository,
 	intel *store.ImageIntelRepository,
+	rollbacks *store.RollbackRepository,
 ) ExecutionEvidence {
 	return &executionEvidence{
 		acquisitions: acquisitions,
@@ -696,7 +731,19 @@ func NewExecutionEvidence(
 		policies:     policies,
 		inventory:    inventory,
 		intel:        intel,
+		rollbacks:    rollbacks,
 	}
+}
+
+// RollbackActiveForContainer reports whether a rollback of the named workload
+// is in flight. A nil repository -- a build that wired no rollback store --
+// reports an error rather than "no", because a check that cannot be performed
+// establishes nothing.
+func (e *executionEvidence) RollbackActiveForContainer(ctx context.Context, containerName string) (bool, error) {
+	if e.rollbacks == nil {
+		return false, errors.New("the rollback repository is not wired, so rollback activity cannot be established")
+	}
+	return e.rollbacks.ActiveForContainer(ctx, containerName, "")
 }
 
 func (e *executionEvidence) Acquisition(ctx context.Context, id string) (domain.Acquisition, error) {
@@ -743,4 +790,18 @@ func (e *executionEvidence) Intel(ctx context.Context, reference string) (domain
 // whether one stands. There is nothing on this interface that writes.
 type PlanApprovals interface {
 	ApprovalFor(ctx context.Context, plan domain.ChangePlan) (domain.PlanApprovalRefusal, error)
+}
+
+// Restorer is the rollback service's request surface, as the execution service
+// sees it.
+//
+// Three reads and one request submission, and no Docker interface: the
+// execution service asks for a rollback exactly as an HTTP handler or the
+// automation follower does, and learns what became of it by the request key it
+// chose. The rollback service decides, against the live host, whether the ask
+// is safe.
+type Restorer interface {
+	Enabled() bool
+	Request(ctx context.Context, request RollbackRequest) (domain.Rollback, error)
+	ByRequestKey(ctx context.Context, key string) (domain.Rollback, bool, error)
 }

@@ -95,6 +95,10 @@ type pipeline struct {
 
 	replacementID string
 	checkpoint    domain.ExecutionCheckpoint
+	// quarantineName is the name the replacement was actually moved to, set
+	// only once that rename has landed. The decision derives the name; this
+	// says the host carries it.
+	quarantineName string
 	// operationID names the dependency operation recorded for this recreation,
 	// when the container is a namespace provider. Empty for an ordinary
 	// container, which gets no record.
@@ -105,6 +109,18 @@ type pipeline struct {
 	mutationAttempted bool
 
 	verification domain.ExecutionVerification
+}
+
+// forAdoption renders the pipeline's state as the record the adoption decision
+// reads: the request row, the checkpoint reached so far, and the approved
+// target.
+func (p *pipeline) forAdoption() domain.Execution {
+	execution := p.execution
+	execution.Checkpoint = p.checkpoint
+	execution.ReplacementID = p.replacementID
+	execution.ContainerName = p.decision.ContainerName
+	execution.Target = p.decision.Target
+	return execution
 }
 
 // execute runs one recreation from end to end.
@@ -144,6 +160,11 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 		// the FINAL state back from the store instead, so a path that reaches
 		// a conclusion is audited whether or not its author remembered to.
 		s.reportOutcome(ctx, execution)
+
+		// And a failed manual update is restored from the same place, for the
+		// same reason: it reads the settled record rather than trusting a path
+		// to say what it did.
+		s.restoreAfterFailure(ctx, execution.ExecutionID)
 	}()
 
 	// ---- claim -----------------------------------------------------------
@@ -318,7 +339,18 @@ func (s *ExecutionService) execute(ctx context.Context, execution domain.Executi
 // allows a ten-minute startup does not have its recreations cut off at five --
 // and so the bound is visibly derived from settings an operator can see.
 func (s *ExecutionService) mutationBudget() time.Duration {
-	return s.cfg.StopTimeout + s.cfg.StartupTimeout + s.cfg.StabilityPeriod + executionMutationMargin
+	// The health wait may run to the healthcheck-derived cap rather than the
+	// configured timeout, so the budget allows for the larger of the two.
+	return s.cfg.StopTimeout + s.healthWaitCeiling() + s.cfg.StabilityPeriod + executionMutationMargin
+}
+
+// healthWaitCeiling is the most the health wait can take: the configured cap,
+// which the constructor holds at or above the startup timeout.
+func (s *ExecutionService) healthWaitCeiling() time.Duration {
+	if s.cfg.MaxHealthWait > s.cfg.StartupTimeout {
+		return s.cfg.MaxHealthWait
+	}
+	return s.cfg.StartupTimeout
 }
 
 // mutate runs the half of the pipeline that changes the host.
@@ -331,12 +363,18 @@ func (s *ExecutionService) mutate(ctx, parent context.Context, work *pipeline) {
 	id := work.execution.ExecutionID
 	decision := work.decision
 
+	// The original's restart policy, recorded BEFORE anything is stopped. The
+	// park below sets it to "no" so a daemon restart cannot bring the parked
+	// container back; this is what a rollback restores.
+	originalPolicy := work.captured.Detail().Overview.RestartPolicy
+
 	moved, err := s.store.Advance(ctx, store.ExecutionChange{
-		ExecutionID: id,
-		From:        []domain.ExecutionState{domain.ExecutionCapturing},
-		To:          domain.ExecutionCreating,
-		Detail:      "stopping the original container and creating its replacement",
-		ParkedName:  decision.ParkedName,
+		ExecutionID:           id,
+		From:                  []domain.ExecutionState{domain.ExecutionCapturing},
+		To:                    domain.ExecutionCreating,
+		Detail:                "stopping the original container and creating its replacement",
+		ParkedName:            decision.ParkedName,
+		OriginalRestartPolicy: originalPolicy.Encode(),
 	}, s.now().UTC())
 	if err != nil || !moved {
 		// Could not even record the intent. Nothing has been changed, so
@@ -394,6 +432,23 @@ func (s *ExecutionService) mutate(ctx, parent context.Context, work *pipeline) {
 		return
 	}
 
+	// The parked original must not come back by itself. Its restart policy is
+	// recorded on the row above and restored by a rollback; here it is set to
+	// "no" so a daemon restart cannot start it beside the replacement.
+	//
+	// A suspension that fails STOPS the recreation, here, before anything is
+	// created. Continuing would put a replacement holding the name and the
+	// ports beside a parked container that could start by itself after a
+	// daemon restart -- the race the suspension exists to prevent -- and the
+	// record would go on to call that original safely parked. The original is
+	// parked and intact, the record says why, and the rollback restores it
+	// without a replacement to move.
+	if err := s.suspendRestart(ctx, work, work.execution.ContainerID, originalPolicy, "the parked original"); err != nil {
+		s.failAfterMutation(parent, work, classifyMutationFailure(err, domain.ExecutionFailureRestartPolicy),
+			domain.ExecutionFailureRestartPolicy.Explain())
+		return
+	}
+
 	// ---- create the replacement -------------------------------------------
 
 	if s.shuttingDown(parent, work) {
@@ -410,8 +465,19 @@ func (s *ExecutionService) mutate(ctx, parent context.Context, work *pipeline) {
 		Image:             decision.Target,
 		Name:              decision.ContainerName,
 		TrackingReference: tracking.Canonical,
+		ExecutionID:       id,
 	})
 	if err != nil {
+		// A create that fails on the client may have completed on the daemon.
+		// If a container now holds the production name and carries THIS
+		// execution's ownership labels, it is the replacement, and it is
+		// recorded here so the quarantine below can move it off the name and a
+		// rollback can act on it. A container that carries anything else is a
+		// stranger and is left alone.
+		if adopted, ok := s.adoptUnrecordedReplacement(ctx, work.forAdoption()); ok {
+			work.replacementID = adopted
+			work.checkpoint = domain.CheckpointReplacementCreated
+		}
 		s.failAfterMutation(parent, work, classifyMutationFailure(err, domain.ExecutionFailureCreate),
 			domain.ExecutionFailureCreate.Explain())
 		return
@@ -553,7 +619,7 @@ func (s *ExecutionService) succeed(ctx, parent context.Context, work *pipeline) 
 			slog.String("parkedName", work.decision.ParkedName),
 			slog.String("error", err.Error()))
 
-		plan := domain.BuildRecoveryPlan(s.recoveryContext(work))
+		plan := domain.BuildRecoveryPlan(s.recoveryContext(work, domain.ExecutionFailureNone))
 		if _, writeErr := s.store.Advance(parent, store.ExecutionChange{
 			ExecutionID: id,
 			From:        []domain.ExecutionState{domain.ExecutionSucceeded},
@@ -702,7 +768,7 @@ func (s *ExecutionService) failBeforeMutation(
 	writeCtx, cancel := GraceContext(ctx, executionWriteGrace, executionWriteGrace)
 	defer cancel()
 
-	plan := domain.BuildRecoveryPlan(s.recoveryContext(work))
+	plan := domain.BuildRecoveryPlan(s.recoveryContext(work, failure))
 
 	if _, err := s.store.Advance(writeCtx, store.ExecutionChange{
 		ExecutionID:  work.execution.ExecutionID,
@@ -726,7 +792,8 @@ func (s *ExecutionService) failBeforeMutation(
 //
 // It does not roll back. The original is not renamed back, not restarted, and
 // not touched at all -- it is exactly where the pipeline left it, stopped and
-// parked. The replacement is stopped and renamed aside so that a container
+// parked. Putting it back is the rollback service's work, asked for from the
+// pipeline's deferred conclusion once this record is durable. The replacement is stopped and renamed aside so that a container
 // which failed verification is not left serving under the production name, and
 // neither container is removed, because both are evidence.
 //
@@ -749,8 +816,11 @@ func (s *ExecutionService) failAfterMutation(
 	defer cancel()
 
 	quarantined := s.quarantine(writeCtx, work, failure)
+	if quarantined {
+		work.quarantineName = work.decision.QuarantineName
+	}
 
-	plan := domain.BuildRecoveryPlan(s.recoveryContext(work))
+	plan := domain.BuildRecoveryPlan(s.recoveryContext(work, failure))
 
 	change := store.ExecutionChange{
 		ExecutionID:   id,
@@ -784,14 +854,48 @@ func (s *ExecutionService) failAfterMutation(
 		return
 	}
 
+	// ONE line an operator can act on without opening HarborMaster: both
+	// containers by id, both images, where the pipeline stopped, whether the
+	// service is down, and whether a rollback can put it back. Identifiers and
+	// verdicts only -- no environment value, label value, or command line can
+	// reach this line, because none of those is an argument here.
 	s.logger.ErrorContext(ctx, "container recreation failed after changing the host",
 		slog.String("executionId", id),
 		slog.String("containerName", work.decision.ContainerName),
+		slog.String("containerId", domain.ShortenID(work.execution.ContainerID)),
+		slog.String("replacementId", domain.ShortenID(work.replacementID)),
 		slog.String("checkpoint", string(work.checkpoint)),
 		slog.String("failure", string(failure)),
+		slog.String("fromImage", work.execution.OldImage),
+		slog.String("toDigest", work.decision.Target.Digest),
 		slog.String("parkedName", work.decision.ParkedName),
+		slog.String("quarantineName", quarantineNameOrEmpty(quarantined, work)),
+		slog.Bool("serviceInterrupted", plan != nil && plan.ServiceInterrupted),
+		slog.Bool("rollbackEligible", rollbackEligible(work)),
 		slog.Bool("originalPreserved", true),
 		slog.Bool("replacementPreserved", work.replacementID != ""))
+}
+
+// quarantineNameOrEmpty reports the quarantine name only once the rename that
+// gives it meaning has landed.
+func quarantineNameOrEmpty(quarantined bool, work *pipeline) string {
+	if !quarantined {
+		return ""
+	}
+	return work.decision.QuarantineName
+}
+
+// rollbackEligible reports whether the rollback service would accept this
+// arrangement: the same rule its preflight applies to the record, evaluated
+// here so the failure line says whether "roll back" is an answer.
+func rollbackEligible(work *pipeline) bool {
+	if !domain.RollbackSufficientCheckpoint(work.checkpoint) {
+		return false
+	}
+	if work.replacementID == "" {
+		return domain.RollbackRestoresWithoutReplacement(work.checkpoint)
+	}
+	return work.checkpoint != domain.CheckpointOriginalStopped
 }
 
 // quarantine stops a failed replacement and renames it aside.
@@ -836,6 +940,23 @@ func (s *ExecutionService) quarantine(
 		return false
 	}
 
+	// The replacement was created from the original's configuration, so it
+	// carries the same restart policy -- and a replacement that was created
+	// and never started was never explicitly stopped, which is precisely the
+	// case in which `unless-stopped` comes back after a daemon restart.
+	//
+	// A suspension that fails leaves the replacement stopped and off the
+	// production name, which protects the service NOW, but not neutralised.
+	// The checkpoint below is what calls it quarantined, and "quarantined"
+	// means it cannot come back -- so the checkpoint is withheld, the record
+	// keeps the name so the operator can find it, and the plan names the
+	// hazard and the command. The rollback that follows parks it under its
+	// own name and suspends it again, which is its second chance.
+	if err := s.suspendRestart(ctx, work, work.replacementID,
+		work.captured.Detail().Overview.RestartPolicy, "the quarantined replacement"); err != nil {
+		return true
+	}
+
 	// Best effort, like everything in this function: a quarantine that is done
 	// but unrecorded is better than one that is not done at all, and the
 	// terminal record below carries the name regardless.
@@ -854,6 +975,44 @@ func (s *ExecutionService) quarantine(
 	return true
 }
 
+// suspendRestart sets a parked or quarantined container's restart policy to
+// "no", so it cannot come back by itself after a daemon restart.
+//
+// # A failure is reported, never absorbed
+//
+// The suspension is what makes "parked" and "quarantined" mean what the record
+// says they mean: set aside AND unable to come back. A container HarborMaster
+// could not neutralise must never be described as safely set aside, so the
+// error is returned and each caller decides what the host state allows -- the
+// pipeline stops before creating anything; the quarantine withholds the
+// checkpoint that would call the replacement quarantined. Logged at ERROR as
+// well: an operator with a `restart: always` fleet needs to know.
+//
+// A container whose policy is already "no" is not touched: there is nothing to
+// suspend, and a write that changes nothing is still a write against a
+// privileged socket.
+func (s *ExecutionService) suspendRestart(
+	ctx context.Context,
+	work *pipeline,
+	containerID string,
+	policy domain.RestartPolicy,
+	role string,
+) error {
+	if !policy.RestartsUnattended() {
+		return nil
+	}
+	if err := s.mutator.SuspendRestart(ctx, docker.SuspendRestartRequest{ContainerID: containerID}); err != nil {
+		s.logger.ErrorContext(ctx, "could not suspend a parked container's restart policy; a daemon restart could start it",
+			slog.String("executionId", work.execution.ExecutionID),
+			slog.String("containerId", domain.ShortenID(containerID)),
+			slog.String("role", role),
+			slog.String("restartPolicy", policy.Encode()),
+			slog.String("error", err.Error()))
+		return err
+	}
+	return nil
+}
+
 // quarantineBudget bounds the cleanup after a failure.
 //
 // Enough for one stop and one rename, and no more. Cleanup must not become the
@@ -863,18 +1022,26 @@ func (s *ExecutionService) quarantineBudget() time.Duration {
 }
 
 // recoveryContext assembles what a recovery plan is built from.
-func (s *ExecutionService) recoveryContext(work *pipeline) domain.RecoveryContext {
-	return domain.RecoveryContext{
+//
+// The failure is part of it: together with the checkpoint it is what says
+// whether a container HarborMaster set aside could still start by itself, and
+// the plan must name that hazard rather than call the container safe.
+func (s *ExecutionService) recoveryContext(work *pipeline, failure domain.ExecutionFailure) domain.RecoveryContext {
+	context := domain.RecoveryContext{
 		ExecutionID:       work.execution.ExecutionID,
 		ContainerName:     work.execution.ContainerName,
 		OriginalID:        work.execution.ContainerID,
 		ParkedName:        work.decision.ParkedName,
 		ReplacementID:     work.replacementID,
-		QuarantineName:    work.decision.QuarantineName,
+		QuarantineName:    work.quarantineName,
 		Checkpoint:        work.checkpoint,
-		Failure:           domain.ExecutionFailureNone,
+		Failure:           failure,
 		MutationAttempted: work.mutationAttempted,
 	}
+	if work.captured != nil {
+		context.OriginalRestartPolicy = work.captured.Detail().Overview.RestartPolicy.Encode()
+	}
+	return context
 }
 
 // newVerification returns a verification with every proof UNKNOWN.
@@ -995,7 +1162,7 @@ func (s *ExecutionService) reportOutcome(ctx context.Context, requested domain.E
 		// next, and the two answers are a product promise apart.
 		NotifyExecutionFailed(s.notifier, final.ContainerName, final.ExecutionID,
 			executionOutcomeReason(final), final.Checkpoint.HostChanged(),
-			final.Automatic())
+			final.Automatic(), s.willRestore(final))
 	}
 }
 

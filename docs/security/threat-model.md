@@ -325,7 +325,8 @@ and less impressive, and it cannot make a bad situation worse.
 **Manual rollback (Phase 10) does not weaken that.** It is the same decision
 with the person put back in: a rollback happens only when an operator asks for
 it, on one recorded recreation at a time, after HarborMaster has re-verified
-both container identities against the live host. It derives every identity from
+both container identities against the live host (or the original alone, when
+the recreation failed before it created a replacement). It derives every identity from
 its own record of that recreation — the request body has an execution id and
 nothing else — and it removes nothing, so the failed replacement remains
 available as evidence. When a rollback itself fails after changing the host it

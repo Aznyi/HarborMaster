@@ -45,6 +45,9 @@ type hostContainer struct {
 	imageID string
 	running bool
 	removed bool
+	// manuallyStopped records an explicit stop, which is the fact the daemon
+	// consults for `unless-stopped` on restart. Never reported by inspect.
+	manuallyStopped bool
 	// health is what successive inspections report. The last entry repeats, so
 	// a container can be modelled as permanently unhealthy.
 	health []domain.HealthState
@@ -86,6 +89,18 @@ type unattendedHost struct {
 	// failStartOf makes StartContainer fail for a container name, modelling a
 	// replacement the daemon will not start.
 	failStartOf string
+	// failCreateOf makes CreateContainer fail for a container name, modelling a
+	// daemon that refuses the create after the original is already parked.
+	failCreateOf string
+	// failSuspendOf makes SuspendRestart fail for a container whose current
+	// name contains this marker, modelling a daemon that refuses to change the
+	// restart policy of one parked or quarantined container.
+	failSuspendOf string
+	// createLandsButFails makes CreateContainer create the container and THEN
+	// report failure, modelling a create the daemon completed after the client
+	// gave up on it. The container holds the production name and no record
+	// names it.
+	createLandsButFails string
 	// badImage models an image whose process exits the moment it starts.
 	//
 	// The most common real update failure, and a deterministic one: a container
@@ -369,9 +384,13 @@ func (h *unattendedHost) CreateContainer(
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	source, known := h.containers[request.Captured.ContainerID]
-	if !known {
+	if _, known := h.containers[request.Captured.ContainerID]; !known {
 		return "", docker.ErrContainerVanished
+	}
+
+	if h.failCreateOf != "" && request.Name == h.failCreateOf {
+		h.record("create-refused:" + request.Name)
+		return "", errors.New("the daemon refused to create the container")
 	}
 
 	h.created++
@@ -385,7 +404,11 @@ func (h *unattendedHost) CreateContainer(
 		name:    request.Name,
 		image:   reference,
 		imageID: imageIDForDigest(request.Image.Digest),
-		detail:  source.detail,
+		// From the CAPTURE, as the real adapter creates: the live original has
+		// been parked and had its restart policy suspended by now, and the
+		// replacement must carry what was captured before any of that. Plus the
+		// ownership labels the adapter writes.
+		detail: withOwnershipLabels(request.Captured.Detail(), request),
 	}
 	replacement.health = []domain.HealthState{domain.HealthHealthy}
 
@@ -398,6 +421,12 @@ func (h *unattendedHost) CreateContainer(
 	h.mu.Unlock()
 	h.capturer.AddContainer(mirror)
 	h.mu.Lock()
+	if h.createLandsButFails != "" && request.Name == h.createLandsButFails {
+		// The daemon finished; the client did not hear. Recorded distinctly so
+		// a test can prove the create happened exactly once.
+		h.record("create-landed:" + request.Name)
+		return "", errors.New("the client lost the daemon's answer")
+	}
 	return id, nil
 }
 
@@ -439,6 +468,7 @@ func (h *unattendedHost) StopContainer(
 		return docker.ErrContainerVanished
 	}
 	c.running = false
+	c.manuallyStopped = true
 	h.record("stop:" + c.name)
 	return nil
 }
@@ -496,6 +526,7 @@ func (h *unattendedHost) StopReplacement(
 		return docker.ErrContainerVanished
 	}
 	c.running = false
+	c.manuallyStopped = true
 	h.record("rb-stop:" + c.name)
 	return nil
 }
@@ -562,3 +593,140 @@ var (
 	_ docker.ContainerMutator    = (*unattendedHost)(nil)
 	_ docker.ContainerRollbacker = (*unattendedHost)(nil)
 )
+
+// ------------------------------------------------- restart policy modelling --
+
+// setRestartPolicy configures a container's restart policy on the modelled
+// host, in every view of it: the summary the runtime lists, the detail the
+// inspection reports, and the capture the mutator reads.
+func (h *unattendedHost) setRestartPolicy(id string, policy domain.RestartPolicy) {
+	h.mu.Lock()
+	c, known := h.containers[id]
+	if known {
+		c.detail.Overview.RestartPolicy = policy
+	}
+	h.mu.Unlock()
+	if known {
+		if mirror := h.capturer.Containers[id]; mirror != nil {
+			mirror.Detail.Overview.RestartPolicy = policy
+		}
+	}
+}
+
+// restartPolicyOf reports a container's restart policy, removed or not.
+func (h *unattendedHost) restartPolicyOf(id string) domain.RestartPolicy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c, known := h.containers[id]; known {
+		return c.detail.Overview.RestartPolicy
+	}
+	return domain.RestartPolicy{}
+}
+
+// runningNames reports every running container by name.
+func (h *unattendedHost) runningNames() map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]string{}
+	for _, c := range h.containers {
+		if !c.removed && c.running {
+			out[c.name] = c.id
+		}
+	}
+	return out
+}
+
+// restartDaemon models the Docker daemon's restore pass after a restart.
+//
+// The rule is the daemon's own (daemon/daemon.go, restore): a stopped
+// container with `always` is started whatever stopped it; one with
+// `unless-stopped` is started unless an explicit stop was issued; every other
+// policy is left alone. A container that was created and never started counts
+// as never explicitly stopped, which is exactly why a quarantined replacement
+// that failed to start is a hazard.
+func (h *unattendedHost) restartDaemon() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.containers {
+		if c.removed || c.running {
+			continue
+		}
+		switch c.detail.Overview.RestartPolicy.Name {
+		case "always":
+			c.running = true
+			h.record("daemon-restarted:" + c.name)
+		case "unless-stopped":
+			if !c.manuallyStopped {
+				c.running = true
+				h.record("daemon-restarted:" + c.name)
+			}
+		}
+	}
+}
+
+func (h *unattendedHost) SuspendRestart(
+	_ context.Context, request docker.SuspendRestartRequest,
+) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	c, known := h.containers[request.ContainerID]
+	if !known || c.removed {
+		return docker.ErrContainerVanished
+	}
+	if !domain.IsHarborMasterDerivedName(c.name) &&
+		!strings.Contains(c.name, domain.RollbackParkedNameSuffix) {
+		return docker.ErrMutationRefused
+	}
+	if h.failSuspendOf != "" && strings.Contains(c.name, h.failSuspendOf) {
+		h.record("suspend-refused:" + c.name)
+		return errors.New("the daemon refused to change the restart policy")
+	}
+	h.record("suspend-restart:" + c.name)
+	c.detail.Overview.RestartPolicy = domain.RestartPolicy{Name: "no"}
+	return nil
+}
+
+func (h *unattendedHost) RestoreRestart(
+	_ context.Context, request docker.RestoreRestartRequest,
+) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	c, known := h.containers[request.ContainerID]
+	if !known || c.removed {
+		return docker.ErrContainerVanished
+	}
+	if domain.IsHarborMasterDerivedName(c.name) ||
+		strings.Contains(c.name, domain.RollbackParkedNameSuffix) {
+		return docker.ErrMutationRefused
+	}
+	h.record("restore-restart:" + c.name + ":" + request.Policy.Encode())
+	c.detail.Overview.RestartPolicy = request.Policy
+	return nil
+}
+
+// ------------------------------------------------ ownership label modelling --
+
+// withOwnershipLabels stamps the labels the real adapter writes onto a created
+// container's detail, so the adoption path has the evidence it reads.
+func withOwnershipLabels(detail domain.ContainerDetail, request docker.CreateRequest) domain.ContainerDetail {
+	kept := make([]domain.Label, 0, len(detail.Labels)+2)
+	for _, label := range detail.Labels {
+		if label.Key == domain.LabelExecutionOwner || label.Key == domain.LabelReplacementOf {
+			continue
+		}
+		kept = append(kept, label)
+	}
+	detail.Labels = append(kept,
+		domain.Label{Key: domain.LabelExecutionOwner, Value: request.ExecutionID, Source: domain.LabelSourceHarborMaster},
+		domain.Label{Key: domain.LabelReplacementOf, Value: request.Captured.ContainerID, Source: domain.LabelSourceHarborMaster},
+	)
+	return detail
+}

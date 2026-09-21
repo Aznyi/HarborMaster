@@ -211,25 +211,31 @@ func NotifyExecutionSucceeded(notifier Notifier, containerName, imageRef, execut
 func NotifyExecutionFailed(
 	notifier Notifier,
 	containerName, executionID, reason string,
-	hostChanged, automatic bool,
+	hostChanged, automatic, restoring bool,
 ) {
 	body := reason
 	if hostChanged {
 		body += " This container was left changed and needs attention."
 	}
 	// What happens NEXT, which is the question an operator reading this at two
-	// in the morning actually has. The two answers are different products, not
-	// different phrasings: HarborMaster never undoes an update a person asked
-	// for, and saying nothing here has let a manual failure read as though
-	// something were coming to fix it.
+	// in the morning actually has. Three answers, and they are different
+	// products rather than different phrasings; saying nothing here has let a
+	// failure read as though something were coming to fix it when nothing was,
+	// and the reverse would have an operator start a rollback by hand beside
+	// the one already running.
 	//
-	// Deliberately hedged for the automatic case. Whether a rollback is
-	// permitted is the governing policy's business and is decided after this
-	// message leaves, so this promises an attempt at most. The recovered or
-	// rollback-failed message that follows is the one that states the outcome.
-	if automatic {
+	// Every promise here is hedged. Whether a rollback is permitted is the
+	// governing policy's business, and whether a restore is SAFE is the
+	// rollback preflight's, and both are decided after this message leaves.
+	// The recovered or could-not-be-restored message that follows is the one
+	// that states the outcome.
+	switch {
+	case automatic:
 		body += " HarborMaster will attempt to roll it back if the policy allows."
-	} else {
+	case restoring && hostChanged:
+		body += " HarborMaster is restoring the previous container automatically, " +
+			"if that can be done safely; the next message says whether it succeeded."
+	default:
 		body += " HarborMaster does not roll back an update you asked for; " +
 			"roll it back from the update page if you want the previous image."
 	}
@@ -298,7 +304,32 @@ func NotifyRollbackSucceeded(notifier Notifier, containerName, rollbackID string
 func NotifyUpdateRecovered(
 	notifier Notifier,
 	containerName, attemptedImage, restoredImage, rollbackID, executionID string,
+	manual bool,
 ) {
+	// The same outcome for a manual update, in words that describe what
+	// happened to it: no unattended update, no policy, and no pause, because
+	// there was none of those. A person asked for the update; HarborMaster put
+	// the original back when it failed.
+	if manual {
+		raise(notifier, domain.Notification{
+			Event:    domain.EventUpdateRecovered,
+			Severity: domain.NotifyWarning,
+			Title:    containerName + " failed to update and was restored",
+			Body: "The update to " + attemptedImage + " did not pass verification, so " +
+				"HarborMaster restored the previous container. It is running " + restoredImage +
+				" again and passed verification. The failed replacement is kept, stopped, " +
+				"so you can find out why the new image did not work.",
+			ContainerName: containerName,
+			Fields: []domain.NotificationField{
+				field("Attempted", attemptedImage),
+				field("Running", restoredImage),
+				field("Execution", executionID),
+				field("Rollback", rollbackID),
+			},
+			DedupKey: "rollback:" + rollbackID + ":recovered",
+		})
+		return
+	}
 	raise(notifier, domain.Notification{
 		Event:    domain.EventUpdateRecovered,
 		Severity: domain.NotifyWarning,
@@ -336,18 +367,23 @@ func NotifyUpdateRecovered(
 func NotifyRollbackFailed(
 	notifier Notifier,
 	containerName, rollbackID, reason string,
-	automatic bool,
+	automatic, manualRestore bool,
 ) {
-	// Both need a person now. They are different sentences because they
+	// All three need a person now. They are different sentences because they
 	// describe different situations: one operator is watching a rollback they
-	// started, the other has not been told anything yet except that an
-	// unattended update failed.
+	// started; one has been told an unattended update failed; one asked for an
+	// update and was told HarborMaster was restoring the original.
 	title := containerName + " could not be rolled back"
 	lead := "The rollback did not complete. This container needs attention: "
-	if automatic {
+	switch {
+	case automatic:
 		title = containerName + " failed to update and could NOT be restored"
 		lead = "The unattended update failed and the automatic rollback did " +
 			"not complete either. This container needs attention now: "
+	case manualRestore:
+		title = containerName + " failed to update and could NOT be restored"
+		lead = "The update failed and the automatic restore of the previous container " +
+			"did not complete either. This container needs attention now: "
 	}
 	raise(notifier, domain.Notification{
 		Event:         domain.EventRollbackFailed,

@@ -608,7 +608,10 @@ func renderLabels(labels []Label) string {
 	}
 	parts := make([]string, 0, len(labels))
 	for _, label := range labels {
-		if label.Key == LineageLabel {
+		// The ownership labels are excluded for the same reason as the lineage
+		// label: HarborMaster stamps them onto every replacement, and a second
+		// recreation captures an original already carrying the previous ones.
+		if label.Key == LineageLabel || label.Key == LabelExecutionOwner || label.Key == LabelReplacementOf {
 			continue
 		}
 		parts = append(parts, label.Key+unitSeparator+label.Value)

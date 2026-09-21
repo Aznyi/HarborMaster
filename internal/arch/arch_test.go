@@ -254,19 +254,26 @@ func TestTheMutationInterfaceCannotTouchAContainer(t *testing.T) {
 //
 // Four things are pinned, each separately so a failure says which one changed:
 //
-//  1. The mutation interface has exactly five methods, with exactly these names.
+//  1. The mutation interface has exactly six methods, with exactly these names.
 //  2. It cannot reach an image, a volume, a network, or an exec.
 //  3. The captured configuration exposes no field or method that could carry a
 //     secret out of internal/docker.
 //  4. No package outside the execution service can name any of it.
 
-// TestTheContainerMutationSurfaceIsExactlyFiveMethods pins the whole container
+// TestTheContainerMutationSurfaceIsExactlySixMethods pins the whole container
 // write capability.
+//
+// The sixth method, SuspendRestart, was added in the P1 reliability pass: it
+// writes restart policy "no" onto a container HarborMaster has parked or
+// quarantined, so a daemon restart cannot bring it back beside the serving
+// container. It is typed to that one write, refuses any container whose
+// current name carries no HarborMaster marker, and is tested in
+// internal/docker/restart_policy_test.go.
 //
 // If this test needs editing, the change under review is HarborMaster gaining a
 // new power over running containers on a privileged socket. That is the point:
 // the diff cannot be quiet.
-func TestTheContainerMutationSurfaceIsExactlyFiveMethods(t *testing.T) {
+func TestTheContainerMutationSurfaceIsExactlySixMethods(t *testing.T) {
 	mutatorType := reflect.TypeOf((*docker.ContainerMutator)(nil)).Elem()
 
 	want := map[string]bool{
@@ -275,6 +282,7 @@ func TestTheContainerMutationSurfaceIsExactlyFiveMethods(t *testing.T) {
 		"StopContainer":   true,
 		"RenameContainer": true,
 		"RemoveContainer": true,
+		"SuspendRestart":  true,
 	}
 
 	if got := mutatorType.NumMethod(); got != len(want) {
@@ -305,12 +313,12 @@ func TestTheContainerMutationSurfaceIsExactlyFiveMethods(t *testing.T) {
 
 // forbiddenMutatorVerbs are capabilities the container mutator must never gain.
 //
-// Recreating a container needs five verbs. These are the ones that would turn
+// Recreating a container needs six verbs. These are the ones that would turn
 // it into something else: a way to run commands inside a container, to read or
 // write its filesystem, to delete data, or to touch the image store.
 //
 // "container" is deliberately absent even though every legal method contains
-// it, and the five legal names are checked by the exact-set test above rather
+// it, and the six legal names are checked by the exact-set test above rather
 // than by this one.
 var forbiddenMutatorVerbs = []string{
 	"attach", "build", "commit", "connect", "copy", "delete", "disconnect",

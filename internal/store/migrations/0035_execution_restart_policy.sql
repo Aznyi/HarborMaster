@@ -1,0 +1,27 @@
+-- 0035_execution_restart_policy: remember the restart policy a recreation
+-- suspended.
+--
+-- # Why the recreation records it
+--
+-- When HarborMaster parks an original it now sets the container's restart
+-- policy to "no", so a daemon restart cannot bring the parked container back to
+-- race the replacement for its ports. That write is reversible only if the
+-- policy it replaced is remembered somewhere durable: the captured
+-- configuration lives in process memory, and a rollback may run in a different
+-- process days later.
+--
+-- So the policy is recorded on the execution row, at the transition into
+-- `creating`, from the capture taken before anything was stopped. A rollback
+-- reads it back and writes it onto the original after restoring its name and
+-- before starting it. A row without one describes a recreation that predates
+-- this migration and suspended nothing, and a rollback of it leaves the policy
+-- alone.
+--
+-- # The recorded form
+--
+-- The policy name, or "on-failure:N" for a bounded on-failure policy. Written
+-- and read only by domain.RestartPolicy.Encode and domain.ParseRestartPolicy,
+-- which refuse anything outside the daemon's own vocabulary before the value
+-- is sent back to a privileged socket.
+
+ALTER TABLE executions ADD COLUMN original_restart_policy TEXT NOT NULL DEFAULT '';

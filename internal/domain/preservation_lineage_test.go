@@ -161,3 +161,44 @@ func TestPreservationStillComparesWhenOnlyTheLineageLabelRemains(t *testing.T) {
 			"an empty label set is a known state, not an absence of evidence")
 	}
 }
+
+// TestOwnershipLabelsAreExcludedFromPreservation: the execution and original
+// labels are stamped onto every replacement, and the second recreation of a
+// workload captures an original that already carries the previous
+// execution's. Neither side's values are the operator's configuration, and
+// comparing them would fail every recreation for a difference HarborMaster
+// caused itself.
+func TestOwnershipLabelsAreExcludedFromPreservation(t *testing.T) {
+	base := detailFor(strings.Repeat("a", 64), "web")
+
+	original := labelled(base,
+		label("app", "web"),
+		label(domain.LabelExecutionOwner, "exec_00112233445566778899"),
+		label(domain.LabelReplacementOf, strings.Repeat("1", 64)),
+	)
+	replacement := labelled(base,
+		label("app", "web"),
+		label(domain.LabelExecutionOwner, "exec_ffffffffffffffffffff"),
+		label(domain.LabelReplacementOf, strings.Repeat("a", 64)),
+	)
+
+	report := domain.ComparePreservation(
+		domain.BuildPreservationSummary(original, nil),
+		domain.BuildPreservationSummary(replacement, nil))
+	if report.Status != domain.VerificationPassed {
+		t.Fatalf("ownership labels failed preservation: %+v", report)
+	}
+
+	// An OPERATOR label still fails.
+	changed := labelled(base,
+		label("app", "api"),
+		label(domain.LabelExecutionOwner, "exec_ffffffffffffffffffff"),
+		label(domain.LabelReplacementOf, strings.Repeat("a", 64)),
+	)
+	report = domain.ComparePreservation(
+		domain.BuildPreservationSummary(original, nil),
+		domain.BuildPreservationSummary(changed, nil))
+	if report.Status == domain.VerificationPassed {
+		t.Fatal("a changed operator label passed preservation")
+	}
+}

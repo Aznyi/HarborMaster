@@ -241,6 +241,12 @@ type realRig struct {
 	rollbacks    *service.RollbackService
 	automation   *service.AutomationService
 	cleanup      *service.ImageCleanupService
+	assurance    *service.SnapshotAssurance
+
+	// options is what this rig was built with, kept so a restart rebuilds the
+	// same rig -- the same fault wrappers, the same timings -- over the same
+	// database file.
+	options realRigOptions
 
 	notifier *recordingNotifier
 
@@ -283,6 +289,34 @@ type realRigOptions struct {
 	// the UI seeding run wants this: the browser has to have something to look
 	// at after the Go test that made it has finished.
 	keepWorkload bool
+
+	// ---- release-qualification knobs (unattended_realdocker_rc_test.go) ----
+
+	// runArgs are extra `docker run` flags for the disposable workload: a
+	// restart policy, a published port, a mount, a network.
+	runArgs []string
+	// healthArgs replace the default health timings (interval, retries,
+	// timeout, start period) when set.
+	healthArgs []string
+	// healthyWait bounds how long the workload may take to first report
+	// healthy; zero means the default minute.
+	healthyWait time.Duration
+	// mutator wraps the real client's recreation capability, so a scenario
+	// can make ONE named operation fail or stall while every other call still
+	// reaches the daemon. Nil means the real client, unwrapped.
+	mutator func(*docker.Client) docker.ContainerMutator
+	// rollbacker does the same for the rollback capability.
+	rollbacker func(*docker.Client) docker.ContainerRollbacker
+	// restoreOff leaves a failed manual update where it fell instead of asking
+	// the rollback service to put the original back.
+	restoreOff bool
+	// rollbackOff builds the rollback service disabled, as a deployment that
+	// never opted in would.
+	rollbackOff bool
+	// startupTimeout and maxHealthWait override the execution and rollback
+	// health budgets when non-zero.
+	startupTimeout time.Duration
+	maxHealthWait  time.Duration
 }
 
 func newRealRig(t *testing.T, tune func(*realRigOptions)) *realRig {
@@ -332,21 +366,32 @@ func newRealRig(t *testing.T, tune func(*realRigOptions)) *realRig {
 		"run", "-d", "--name", options.name,
 		"--user", "65532:65532",
 		"--health-cmd", health,
-		"--health-interval", "1s",
-		"--health-retries", "2",
-		"--health-timeout", "2s",
-		"--health-start-period", "1s",
+	}
+	if len(options.healthArgs) > 0 {
+		create = append(create, options.healthArgs...)
+	} else {
+		create = append(create,
+			"--health-interval", "1s",
+			"--health-retries", "2",
+			"--health-timeout", "2s",
+			"--health-start-period", "1s",
+		)
 	}
 	for key, value := range options.labels {
 		create = append(create, "--label", key+"="+value)
 	}
+	create = append(create, options.runArgs...)
 	create = append(create, rig.currentRef, "sleep", "3600")
 	dockerRun(t, create...)
 
 	// Wait for the workload to be healthy before HarborMaster looks at it. A
 	// container still in `starting` is not a baseline anything can be compared
 	// against.
-	deadlineAt := time.Now().Add(60 * time.Second)
+	healthyWait := options.healthyWait
+	if healthyWait == 0 {
+		healthyWait = 60 * time.Second
+	}
+	deadlineAt := time.Now().Add(healthyWait)
 	for healthOf(options.name) != "healthy" {
 		if time.Now().After(deadlineAt) {
 			t.Fatalf("%s never became healthy; status %q",
@@ -373,6 +418,7 @@ func newRealRig(t *testing.T, tune func(*realRigOptions)) *realRig {
 		}
 	})
 
+	rig.options = options
 	rig.open(options)
 	return rig
 }
@@ -444,6 +490,7 @@ func (r *realRig) open(options realRigOptions) {
 	assurance := service.NewSnapshotAssurance(service.SnapshotAssuranceOptions{
 		Capturer: snapshots, Logger: quiet,
 	})
+	r.assurance = assurance
 	preparer := service.NewSnapshotPreparer(service.SnapshotPreparerOptions{
 		Assurance: assurance, Policies: db.UpdatePolicies, Targets: db.Containers,
 		Baselines: db.Snapshots, Self: self, Logger: quiet,
@@ -507,37 +554,64 @@ func (r *realRig) open(options realRigOptions) {
 		Store: db.PlanApprovals, Plans: db.Plans, Logger: quiet,
 	})
 
-	r.executions = service.NewExecutionService(service.ExecutionOptions{
-		Lineage: db.Lineage, Store: db.Executions,
-		Evidence: service.NewExecutionEvidence(
-			db.Acquisitions, db.Plans, db.Containers,
-			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
-		Runtime: client, Capturer: client, Mutator: client,
-		Assurance: assurance, Approvals: planApprovals, Self: self,
-		Dependencies: dependencies, Hasher: hasher, Notify: r.notifier,
-		Config: config.Execution{
-			Enabled: true, RequireSnapshot: true,
-			StartupTimeout: 30 * time.Second, StabilityPeriod: 2 * time.Second,
-			HealthPollInterval: 200 * time.Millisecond, StopTimeout: 10 * time.Second,
-			MaxConcurrent: 1, RequestTTL: time.Hour,
-			AcquisitionFreshness: time.Hour, InventoryFreshness: time.Hour,
-			SweepInterval: 5 * time.Millisecond, MaxEventsPerExecution: 200,
-		},
-		Logger: quiet, Now: clock,
-	})
+	// The capabilities, wrapped when a scenario asks for a fault. The wrapper
+	// forwards everything to the real client except the one operation the
+	// scenario names.
+	var mutator docker.ContainerMutator = client
+	if options.mutator != nil {
+		mutator = options.mutator(client)
+	}
+	var rollbacker docker.ContainerRollbacker = client
+	if options.rollbacker != nil {
+		rollbacker = options.rollbacker(client)
+	}
+	startupTimeout := options.startupTimeout
+	if startupTimeout == 0 {
+		startupTimeout = 30 * time.Second
+	}
+	maxHealthWait := options.maxHealthWait
+	if maxHealthWait == 0 {
+		maxHealthWait = 5 * time.Minute
+	}
 
+	// Rollbacks before executions, as the composition root builds them: the
+	// execution service asks the rollback service to restore a failed manual
+	// update, so it needs the request surface at construction.
 	r.rollbacks = service.NewRollbackService(service.RollbackOptions{
 		Lineage: db.Lineage, Store: db.Rollbacks,
 		Evidence:   service.NewRollbackEvidence(db.Executions, db.Inventory),
 		Runtime:    client,
-		Rollbacker: client,
+		Rollbacker: rollbacker,
 		Hasher:     hasher, Notify: r.notifier,
 		Config: config.Rollback{
-			Enabled: true, MaxConcurrent: 1, RequestTTL: time.Hour,
-			StartupTimeout: 30 * time.Second, StabilityPeriod: 2 * time.Second,
+			Enabled: !options.rollbackOff, MaxConcurrent: 1, RequestTTL: time.Hour,
+			StartupTimeout: startupTimeout, MaxHealthWait: maxHealthWait,
+			StabilityPeriod:    2 * time.Second,
 			HealthPollInterval: 200 * time.Millisecond, StopTimeout: 10 * time.Second,
 			InventoryFreshness: time.Hour,
 			SweepInterval:      5 * time.Millisecond, MaxEventsPerRollback: 200,
+		},
+		Logger: quiet, Now: clock,
+	})
+
+	r.executions = service.NewExecutionService(service.ExecutionOptions{
+		Lineage: db.Lineage, Store: db.Executions,
+		Evidence: service.NewExecutionEvidence(
+			db.Acquisitions, db.Plans, db.Containers,
+			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel, db.Rollbacks),
+		Runtime: client, Capturer: client, Mutator: mutator,
+		Assurance: assurance, Approvals: planApprovals, Self: self,
+		Dependencies: dependencies, Hasher: hasher, Notify: r.notifier,
+		Restorer: r.rollbacks,
+		Config: config.Execution{
+			Enabled: true, RequireSnapshot: true,
+			RestoreOnFailure: !options.restoreOff,
+			StartupTimeout:   startupTimeout, MaxHealthWait: maxHealthWait,
+			StabilityPeriod:    2 * time.Second,
+			HealthPollInterval: 200 * time.Millisecond, StopTimeout: 10 * time.Second,
+			MaxConcurrent: 1, RequestTTL: time.Hour,
+			AcquisitionFreshness: time.Hour, InventoryFreshness: time.Hour,
+			SweepInterval: 5 * time.Millisecond, MaxEventsPerExecution: 200,
 		},
 		Logger: quiet, Now: clock,
 	})
@@ -654,7 +728,7 @@ func (r *realRig) stop() {
 func (r *realRig) restart() {
 	r.t.Helper()
 	r.stop()
-	r.open(realRigOptions{name: r.name})
+	r.open(r.options)
 	r.start()
 }
 

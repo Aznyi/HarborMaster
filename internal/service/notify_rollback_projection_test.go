@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Aznyi/HarborMaster/internal/domain"
@@ -192,7 +193,7 @@ func TestReportingTheSameOutcomeTwiceIsOneLogicalNotification(t *testing.T) {
 	// re-reading a settled row would do.
 	service.NotifyUpdateRecovered(harness.notifier, final.ContainerName,
 		final.ReplacementImage, final.OriginalImage,
-		final.RollbackID, final.ExecutionID)
+		final.RollbackID, final.ExecutionID, false)
 
 	sent := harness.notifier.all()
 	if sent[len(sent)-1].DedupKey != first[0].DedupKey {
@@ -243,5 +244,46 @@ func TestANotifierThatPanicsOnEveryCallStillLetsARollbackSucceed(t *testing.T) {
 			"A container that was correctly restored must not be recorded as "+
 			"anything else because a notification could not be raised.",
 			final.State)
+	}
+}
+
+// TestASuccessfulManualRestoreReportsRecoveredInManualWords: the rollback the
+// execution service requests on behalf of a failed MANUAL update is reported
+// as the update's outcome -- failed, then restored -- in words that do not
+// describe an unattended update or an automation pause, because there was
+// neither.
+func TestASuccessfulManualRestoreReportsRecoveredInManualWords(t *testing.T) {
+	harness := newRollbackHarness(t, func(h *rbHarness) {
+		h.notifier = &recordingNotifier{}
+	})
+	rollback, err := harness.service.Request(context.Background(), service.RollbackRequest{
+		ExecutionID: rbExecutionID,
+		RequestKey:  domain.ManualRestoreRequestKey(rbExecutionID),
+		RequestedBy: domain.Requester{UserID: "usr_0011223344556677889a", Username: "colby"},
+	})
+	if err != nil {
+		t.Fatalf("restore refused: %v", err)
+	}
+	if !rollback.ManualRestore() {
+		t.Fatal("the rollback does not read as a manual restore")
+	}
+
+	final := harness.runOnce(t, rollback)
+	if final.State != domain.RollbackSucceeded {
+		t.Fatalf("the restore did not succeed: %q", final.State)
+	}
+
+	sent := harness.notifier.all()
+	if len(sent) != 1 || sent[0].Event != domain.EventUpdateRecovered {
+		t.Fatalf("events = %v, want exactly update.recovered", eventsOf(sent))
+	}
+	body := strings.ToLower(sent[0].Body)
+	for _, forbidden := range []string{"unattended", "paused", "automation"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("a manual restore is described with %q: %s", forbidden, sent[0].Body)
+		}
+	}
+	if !strings.Contains(body, "restored") && !strings.Contains(body, "put back") {
+		t.Errorf("the message never says the original was restored: %s", sent[0].Body)
 	}
 }

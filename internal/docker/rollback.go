@@ -76,6 +76,15 @@ type ContainerRollbacker interface {
 	RestoreOriginalName(ctx context.Context, request RollbackRestoreRequest) error
 	// StartOriginal starts the preserved original, by exact id.
 	StartOriginal(ctx context.Context, request RollbackStartRequest) error
+	// SuspendRestart sets the parked replacement to restart policy "no", so a
+	// daemon restart cannot bring it back beside the restored original.
+	// Refused for any container whose current name carries no HarborMaster
+	// marker. See restart_policy.go.
+	SuspendRestart(ctx context.Context, request SuspendRestartRequest) error
+	// RestoreRestart writes the original's configured restart policy back,
+	// after its name has been restored and before it is started. Refused for
+	// any container whose current name carries a HarborMaster marker.
+	RestoreRestart(ctx context.Context, request RestoreRestartRequest) error
 }
 
 // -------------------------------------------------------------- requests --
@@ -253,7 +262,7 @@ func (c *Client) ParkReplacement(ctx context.Context, request RollbackParkReques
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	if _, err := c.mutateAPI.ContainerRename(ctx, request.ReplacementID, client.ContainerRenameOptions{
@@ -270,7 +279,7 @@ func (c *Client) RestoreOriginalName(ctx context.Context, request RollbackRestor
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	if _, err := c.mutateAPI.ContainerRename(ctx, request.OriginalID, client.ContainerRenameOptions{
@@ -287,7 +296,7 @@ func (c *Client) StartOriginal(ctx context.Context, request RollbackStartRequest
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.mutationTimeout())
 	defer cancel()
 
 	if _, err := c.mutateAPI.ContainerStart(ctx, request.OriginalID,

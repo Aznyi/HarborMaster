@@ -85,6 +85,7 @@ export type ExecutionFailure =
   | "rename"
   | "create"
   | "start"
+  | "restartPolicy"
   | "healthTimeout"
   | "unhealthy"
   | "notStable"
@@ -244,6 +245,18 @@ export interface Execution {
   /** `<name>.hm-failed-<executionId>`. Where to find a failed replacement. */
   quarantineName?: string;
   originalRemoved: boolean;
+  /**
+   * The restart policy the original carried before the recreation parked it and
+   * set it to "no". A rollback writes it back. Absent on older records.
+   */
+  originalRestartPolicy?: { name: string; maximumRetryCount?: number };
+  /**
+   * What became of restoring the original after a MANUAL update failed after
+   * the mutation point. Absent when no restore applies. `restored` means the
+   * original is serving again; every other settled state means the service is
+   * still down and a person is needed.
+   */
+  restore?: ExecutionRestore;
 
   verification: ExecutionVerification;
   recovery?: RecoveryPlan;
@@ -398,6 +411,7 @@ export const EXECUTION_FAILURE_LABELS: Record<ExecutionFailure, string> = {
   rename: "Could not rename",
   create: "Could not create the replacement",
   start: "Replacement would not start",
+  restartPolicy: "Parked original could not be made restart-safe",
   healthTimeout: "Never became healthy",
   unhealthy: "Reported unhealthy",
   notStable: "Did not stay running",
@@ -481,4 +495,33 @@ export function verificationPassed(verification: ExecutionVerification): boolean
 export function pinnedReference(target: ExecutionTarget): string {
   if (!target.registry || !target.repository || !target.digest) return "";
   return `${target.registry}/${target.repository}@${target.digest}`;
+}
+
+/** Where the automatic restore of a failed manual update has got to. */
+export type ExecutionRestoreState =
+  | "requested"
+  | "restored"
+  | "failed"
+  | "refused"
+  | "unavailable";
+
+export interface ExecutionRestore {
+  state?: ExecutionRestoreState;
+  /** The rollback performing, or that performed, the restore. */
+  rollbackId?: string;
+  /** HarborMaster's own sentence about a refusal, a failure, or an absent capability. */
+  detail?: string;
+}
+
+export const EXECUTION_RESTORE_LABELS: Record<ExecutionRestoreState, string> = {
+  requested: "Restoring the original",
+  restored: "Original restored",
+  failed: "Restore failed",
+  refused: "Restore refused",
+  unavailable: "Restore unavailable",
+};
+
+/** Whether the original is serving again after a failed update. */
+export function serviceRestored(execution: Execution): boolean {
+  return execution.restore?.state === "restored";
 }

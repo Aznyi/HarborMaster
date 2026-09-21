@@ -22,7 +22,9 @@ by the time HarborMaster can change a container it can already undo it.
 >    [Safe image acquisition](#safe-image-acquisition).
 > 2. **Recreating ONE container** on an image it already downloaded and
 >    verified, preserving that container's configuration. The original is kept
->    until the replacement is proved, and there is **no automatic rollback**.
+>    until the replacement is proved. If the replacement fails, HarborMaster
+>    asks its own rollback (below) to put the original back, and records
+>    whether that worked on the update.
 >    See [Manual container recreation](#manual-container-recreation).
 > 3. **Rolling ONE recreation back**, when a person asks. It stops the
 >    replacement, starts the original that recreation preserved, and proves it.
@@ -1589,9 +1591,9 @@ All four must pass. A check that was never reached reads `unknown`, and an
 | **Configuration** | Its configuration matches the original's, field by field — including capabilities, security options, read-only rootfs, namespaces, limits, mounts, and ports |
 | **Network** | It is attached to every network the original was on, with the same aliases |
 
-### There is no automatic rollback
+### A failed recreation is restored
 
-Deliberately. When a recreation fails after the first mutation, HarborMaster:
+When a recreation fails after the first mutation, HarborMaster:
 
 - stops the replacement and renames it `<name>.hm-failed-<executionId>`, so a
   container that failed its checks is not left serving under the production
@@ -1600,14 +1602,21 @@ Deliberately. When a recreation fails after the first mutation, HarborMaster:
 - records a manual recovery plan naming both by name and id, with the exact
   commands to restore service.
 
-An automatic undo would be another unattended mutation, performed at exactly the
-moment HarborMaster has demonstrated that its model of the host is wrong. The
-UI, the API, and the record all say this in as many words, and the confirmation
-dialog says it before you act.
+Then, unless `HARBORMASTER_EXECUTION_RESTORE_ON_FAILURE` is off, it asks its
+own rollback service to put the original back -- the same request the **Roll
+back** button makes, with the same checks against the live host. The rollback
+may refuse (a container HarborMaster did not create is holding the name, say),
+and the update record says exactly what came of it: `restore.state` is
+`restored` when the original is serving again, and `failed`, `refused`, or
+`unavailable` when it is not and a person is needed. The failed replacement is
+kept, stopped, either way.
 
-Undoing a recreation *afterwards*, when a person decides to, is a separate
-feature with its own permission and its own record. See
-[Manual rollback](#manual-rollback).
+The recreation pipeline itself never undoes its own work: at the moment it has
+demonstrated that its model of the host is wrong, another mutation on the
+strength of that model would be the wrong thing. The restore is a separate,
+separately checkpointed rollback -- see [Manual rollback](#manual-rollback) --
+and it needs `HARBORMASTER_ROLLBACK_ENABLED=true`. Without it a failed manual
+update is recorded as not restorable and the recovery plan is what you have.
 
 ## Manual rollback
 

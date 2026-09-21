@@ -133,6 +133,8 @@ export function RollbackFailureBadge({ failure }: { failure: RollbackFailure }) 
     rename:
       "A container could not be renamed, so the names on this host may not be the ones you expect",
     start: "The original container would not start",
+    restartPolicy:
+      "The original holds its name again but its restart policy could not be put back, so it was not started",
     healthTimeout: "The original did not become healthy within its time budget",
     unhealthy: "The original reported unhealthy",
     notStable:
@@ -183,7 +185,9 @@ export function RollbackWarningNotice() {
       <strong>A rollback is started either by a person or by the update policy
       that made the failed change</strong> — never on a schedule, and only ever
       one recreation at a time. A policy rolls back only when it is set to, and a
-      rollback it starts pauses the container afterwards. The replacement is
+      rollback it starts pauses the container afterwards. An update a person
+      asked for that fails after its original was stopped is rolled back on
+      their behalf, and the update record says whether that worked. The replacement is
       kept, stopped and renamed aside, as the evidence of why the recreation was
       backed out; nothing is removed.
     </p>
@@ -267,8 +271,9 @@ export function RollbackContainerIdentities({ rollback }: { rollback: Rollback }
 
       <dt className="text-content-muted">Replacement container</dt>
       <dd className="font-mono break-all text-content">
-        {rollback.replacementParkedName || rollback.containerName} (
-        {rollback.replacementId.slice(0, 12)})
+        {rollback.replacementId
+          ? `${rollback.replacementParkedName || rollback.containerName} (${rollback.replacementId.slice(0, 12)})`
+          : "none was created"}
       </dd>
 
       <dt className="text-content-muted">Production name</dt>

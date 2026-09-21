@@ -78,7 +78,10 @@ type unattendedRig struct {
 	acquisitions *service.AcquisitionService
 	executions   *service.ExecutionService
 	rollbacks    *service.RollbackService
-	automation   *service.AutomationService
+	// assurance captures a configuration snapshot the way an operator's UI does
+	// before a manual update, so the plan is assessed against one.
+	assurance  *service.SnapshotAssurance
+	automation *service.AutomationService
 
 	notifier *recordingNotifier
 
@@ -194,6 +197,7 @@ func (r *unattendedRig) open(options rigOptions) {
 		Capturer: snapshots,
 		Logger:   quiet,
 	})
+	r.assurance = assurance
 	preparer := service.NewSnapshotPreparer(service.SnapshotPreparerOptions{
 		Assurance: assurance,
 		Policies:  db.UpdatePolicies,
@@ -286,32 +290,9 @@ func (r *unattendedRig) open(options rigOptions) {
 		Logger: quiet,
 	})
 
-	r.executions = service.NewExecutionService(service.ExecutionOptions{
-		Lineage: db.Lineage,
-		Store:   db.Executions,
-		Evidence: service.NewExecutionEvidence(
-			db.Acquisitions, db.Plans, db.Containers,
-			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel),
-		Runtime:      r.host,
-		Capturer:     r.host,
-		Mutator:      r.host,
-		Assurance:    assurance,
-		Approvals:    planApprovals,
-		Self:         self,
-		Dependencies: dependencies,
-		Hasher:       hasher,
-		Notify:       r.notifier,
-		Config: config.Execution{
-			Enabled: true, RequireSnapshot: true,
-			StartupTimeout: 2 * time.Second, StabilityPeriod: time.Millisecond,
-			HealthPollInterval: time.Millisecond, StopTimeout: time.Second,
-			MaxConcurrent: 1, RequestTTL: time.Hour,
-			AcquisitionFreshness: time.Hour, InventoryFreshness: time.Hour,
-			SweepInterval: 2 * time.Millisecond, MaxEventsPerExecution: 100,
-		},
-		Logger: quiet,
-	})
-
+	// The rollback service first: the execution service is handed it as the
+	// restorer it asks to put a failed manual update's original back, and it
+	// depends on nothing the execution service builds.
 	if !options.rollbackDisabled {
 		r.rollbacks = service.NewRollbackService(service.RollbackOptions{
 			Lineage:    db.Lineage,
@@ -331,6 +312,39 @@ func (r *unattendedRig) open(options rigOptions) {
 			Logger: quiet,
 		})
 	}
+
+	var restorer service.Restorer
+	if r.rollbacks != nil {
+		restorer = r.rollbacks
+	}
+
+	r.executions = service.NewExecutionService(service.ExecutionOptions{
+		Lineage: db.Lineage,
+		Store:   db.Executions,
+		Evidence: service.NewExecutionEvidence(
+			db.Acquisitions, db.Plans, db.Containers,
+			db.Snapshots, db.Policies, db.Inventory, db.ImageIntel, db.Rollbacks),
+		Runtime:      r.host,
+		Capturer:     r.host,
+		Mutator:      r.host,
+		Assurance:    assurance,
+		Approvals:    planApprovals,
+		Self:         self,
+		Restorer:     restorer,
+		Dependencies: dependencies,
+		Hasher:       hasher,
+		Notify:       r.notifier,
+		Config: config.Execution{
+			Enabled: true, RequireSnapshot: true,
+			RestoreOnFailure: true,
+			StartupTimeout:   2 * time.Second, StabilityPeriod: time.Millisecond,
+			HealthPollInterval: time.Millisecond, StopTimeout: time.Second,
+			MaxConcurrent: 1, RequestTTL: time.Hour,
+			AcquisitionFreshness: time.Hour, InventoryFreshness: time.Hour,
+			SweepInterval: 2 * time.Millisecond, MaxEventsPerExecution: 100,
+		},
+		Logger: quiet,
+	})
 
 	r.automation = service.NewAutomationService(service.AutomationOptions{
 		Store:    db.Automation,

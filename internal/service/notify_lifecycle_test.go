@@ -33,9 +33,9 @@ func TestTheThreeUpdateOutcomesAreThreeDifferentEvents(t *testing.T) {
 	notifier := &recordingNotifier{}
 
 	service.NotifyExecutionSucceeded(notifier, "web", "nginx:1.27.1", "exec_1")
-	service.NotifyExecutionFailed(notifier, "web", "exec_2", "it did not verify.", true, false)
+	service.NotifyExecutionFailed(notifier, "web", "exec_2", "it did not verify.", true, false, false)
 	service.NotifyUpdateRecovered(notifier, "web",
-		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_3")
+		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_3", false)
 
 	sent := notifier.all()
 	if len(sent) != 3 {
@@ -68,7 +68,7 @@ func TestARecoveredUpdateIsNeverCalledSuccessful(t *testing.T) {
 	// image they approved is running, and it is not.
 	notifier := &recordingNotifier{}
 	service.NotifyUpdateRecovered(notifier, "web",
-		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_3")
+		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_3", false)
 
 	recovered := notifier.all()[0]
 
@@ -109,7 +109,7 @@ func TestARecoveredUpdateCarriesTheContextToUnderstandIt(t *testing.T) {
 
 	notifier := &recordingNotifier{}
 	service.NotifyUpdateRecovered(notifier, "web",
-		"nginx:1.27.1", "nginx:1.27.0", "rb_0123456789abcdef0123", "exec_0123456789abcdef")
+		"nginx:1.27.1", "nginx:1.27.0", "rb_0123456789abcdef0123", "exec_0123456789abcdef", false)
 
 	recovered := notifier.all()[0]
 
@@ -137,23 +137,37 @@ func TestARecoveredUpdateCarriesTheContextToUnderstandIt(t *testing.T) {
 
 // ------------------------------------------------- manual versus automatic --
 
-func TestAManualFailureDoesNotImplyAutomaticRecovery(t *testing.T) {
+func TestAManualFailureSaysWhetherARestoreIsUnderWay(t *testing.T) {
 	t.Parallel()
 
-	// The product promise. HarborMaster does NOT undo an update a person asked
-	// for. A message that leaves that open is a message an operator waits on.
+	// Two products, and the message must say which one the operator has. With
+	// restore on, HarborMaster is putting the original back and the operator
+	// should wait for the outcome; with it off, nothing is handling it and
+	// silence would read as though something were.
 	notifier := &recordingNotifier{}
 	service.NotifyExecutionFailed(notifier, "web", "exec_1",
-		"it did not pass verification.", true, false)
-
-	body := strings.ToLower(notifier.all()[0].Body)
-
-	if !strings.Contains(body, "does not roll back") {
-		t.Errorf("a manual failure does not say HarborMaster will not undo it:\n\t%s\n\n"+
-			"Silence here reads as 'something is handling it'. Nothing is.", body)
+		"it did not pass verification.", true, false, true)
+	restoring := strings.ToLower(notifier.all()[0].Body)
+	if !strings.Contains(restoring, "restor") {
+		t.Errorf("a manual failure with restore on never says the original is being put back: %s", restoring)
 	}
-	if strings.Contains(body, "will attempt to roll it back") {
-		t.Errorf("a manual failure promises an automatic rollback:\n\t%s", body)
+	if strings.Contains(restoring, "does not roll back") {
+		t.Errorf("a manual failure with restore on denies the restore that is under way: %s", restoring)
+	}
+	// Hedged: the rollback service may still refuse.
+	if !strings.Contains(restoring, "if that can be done safely") {
+		t.Errorf("a manual failure promises the restore unconditionally: %s", restoring)
+	}
+
+	notifier = &recordingNotifier{}
+	service.NotifyExecutionFailed(notifier, "web", "exec_1",
+		"it did not pass verification.", true, false, false)
+	off := strings.ToLower(notifier.all()[0].Body)
+	if !strings.Contains(off, "does not roll back") {
+		t.Errorf("a manual failure with restore off does not say nothing is handling it: %s", off)
+	}
+	if strings.Contains(off, "will attempt to roll it back") {
+		t.Errorf("a manual failure with restore off promises an automatic rollback: %s", off)
 	}
 }
 
@@ -162,7 +176,7 @@ func TestAnAutomaticFailurePromisesOnlyAnAttempt(t *testing.T) {
 
 	notifier := &recordingNotifier{}
 	service.NotifyExecutionFailed(notifier, "web", "exec_1",
-		"it did not pass verification.", true, true)
+		"it did not pass verification.", true, true, false)
 
 	body := strings.ToLower(notifier.all()[0].Body)
 
@@ -223,8 +237,8 @@ func TestAFailedAutomaticRollbackSaysTheUpdateIsUnrecovered(t *testing.T) {
 	t.Parallel()
 
 	notifier := &recordingNotifier{}
-	service.NotifyRollbackFailed(notifier, "web", "rb_1", "it did not verify.", true)
-	service.NotifyRollbackFailed(notifier, "api", "rb_2", "it did not verify.", false)
+	service.NotifyRollbackFailed(notifier, "web", "rb_1", "it did not verify.", true, false)
+	service.NotifyRollbackFailed(notifier, "api", "rb_2", "it did not verify.", false, false)
 
 	sent := notifier.all()
 	for _, notification := range sent {
@@ -264,10 +278,10 @@ func TestEveryLifecycleNotificationKeysOnADurableIdentity(t *testing.T) {
 	notifier := &recordingNotifier{}
 
 	service.NotifyExecutionSucceeded(notifier, "web", "nginx:1.27.1", "exec_A")
-	service.NotifyExecutionFailed(notifier, "web", "exec_B", "no.", false, true)
-	service.NotifyUpdateRecovered(notifier, "web", "a", "b", "rb_C", "exec_D")
+	service.NotifyExecutionFailed(notifier, "web", "exec_B", "no.", false, true, false)
+	service.NotifyUpdateRecovered(notifier, "web", "a", "b", "rb_C", "exec_D", false)
 	service.NotifyRollbackSucceeded(notifier, "web", "rb_E")
-	service.NotifyRollbackFailed(notifier, "web", "rb_F", "no.", false)
+	service.NotifyRollbackFailed(notifier, "web", "rb_F", "no.", false, false)
 	service.NotifyApprovalRequired(notifier, "web", "plan_G", "a major change.")
 
 	wantIdentity := []string{"exec_A", "exec_B", "rb_C", "rb_E", "rb_F", "plan_G"}
@@ -305,7 +319,7 @@ func TestARecoveredUpdateAndAPlainRollbackDoNotShareAKey(t *testing.T) {
 	// cooldown would deliver whichever arrived first and silently drop the
 	// other -- and the one that matters is the recovered one.
 	notifier := &recordingNotifier{}
-	service.NotifyUpdateRecovered(notifier, "web", "a", "b", "rb_1", "exec_1")
+	service.NotifyUpdateRecovered(notifier, "web", "a", "b", "rb_1", "exec_1", false)
 	service.NotifyRollbackSucceeded(notifier, "web", "rb_1")
 
 	sent := notifier.all()
@@ -404,13 +418,13 @@ func TestNoLifecycleNotificationCarriesSensitiveMaterial(t *testing.T) {
 	// secret, and none of the helpers has a parameter one could arrive through.
 	service.NotifyExecutionSucceeded(notifier, "web", "nginx:1.27.1", "exec_1")
 	service.NotifyExecutionFailed(notifier, "web", "exec_2",
-		"the recreation did not succeed (imageMismatch).", true, true)
+		"the recreation did not succeed (imageMismatch).", true, true, false)
 	service.NotifyUpdateRecovered(notifier, "web",
-		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_2")
+		"nginx:1.27.1", "nginx:1.27.0", "rb_1", "exec_2", false)
 	service.NotifyRollbackStarted(notifier, "web", "rb_2")
 	service.NotifyRollbackSucceeded(notifier, "web", "rb_2")
 	service.NotifyRollbackFailed(notifier, "web", "rb_3",
-		"the rollback did not succeed (verify).", true)
+		"the rollback did not succeed (verify).", true, false)
 	service.NotifyApprovalRequired(notifier, "web", "plan_1", "a major version change.")
 
 	for _, notification := range notifier.all() {

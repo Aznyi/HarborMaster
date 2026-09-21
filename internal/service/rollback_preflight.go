@@ -49,7 +49,23 @@ type rollbackDecision struct {
 	ContainerName string
 	OriginalID    string
 	ParkedName    string
+	// ReplacementID is EMPTY for a recreation that failed before it created
+	// anything. The pipeline then has one container to put back and none to
+	// stop; see domain.RollbackRestoresWithoutReplacement.
 	ReplacementID string
+
+	// OriginalHoldsName reports that the original already answers to the
+	// production name on the LIVE host, so the restore rename must be skipped:
+	// the daemon refuses to rename a container to the name it already holds.
+	// Established by verifyIdentities, never read from the record, because the
+	// record can say "rename failed" about a rename that landed.
+	OriginalHoldsName bool
+
+	// OriginalRestartPolicy is the policy the recreation recorded before it
+	// parked the original and suspended it. Written back after the name is
+	// restored and before the start. Zero for a record that predates the
+	// recording, which describes a recreation that suspended nothing.
+	OriginalRestartPolicy domain.RestartPolicy
 
 	OriginalImage    string
 	OriginalImageID  string
@@ -141,6 +157,7 @@ func (s *RollbackService) assessRecords(
 	decision.OriginalImageID = execution.OldImageID
 	decision.OriginalDigest = execution.OldImageDigest
 	decision.ReplacementImage = execution.Target.Reference
+	decision.OriginalRestartPolicy = execution.OriginalRestartPolicy
 
 	if execution.State.Active() {
 		return decision, domain.RollbackRefusalExecutionActive, nil
@@ -165,10 +182,27 @@ func (s *RollbackService) assessRecords(
 		return decision, domain.RollbackRefusalNothingToRollBack, nil
 	}
 
-	// Both identities must be recorded. A record naming only one could not be
-	// rolled back safely, and could not be recovered after a restart.
-	if decision.OriginalID == "" || decision.ReplacementID == "" ||
+	// The original's identity must be recorded. A record without it could not
+	// be rolled back safely, and could not be recovered after a restart.
+	if decision.OriginalID == "" ||
 		decision.ContainerName == "" || decision.ParkedName == "" {
+		return decision, domain.RollbackRefusalNothingToRollBack, nil
+	}
+	// The replacement's identity is required only when the recreation got far
+	// enough to have created one. A create or a park rename that failed left
+	// the original stopped and NOTHING else on the host, and that is the
+	// arrangement an operator most needs undone: the workload is down. A later
+	// checkpoint with no replacement id is an inconsistent record, refused
+	// rather than acted on in either direction.
+	if decision.ReplacementID == "" &&
+		!domain.RollbackRestoresWithoutReplacement(execution.Checkpoint) {
+		return decision, domain.RollbackRefusalNothingToRollBack, nil
+	}
+	// The converse contradiction: a replacement cannot exist before the park,
+	// because the pipeline creates only after the parked checkpoint has landed.
+	// A record that names one at originalStopped is not describing a host this
+	// code understands, and is refused rather than reasoned about.
+	if decision.ReplacementID != "" && execution.Checkpoint == domain.CheckpointOriginalStopped {
 		return decision, domain.RollbackRefusalNothingToRollBack, nil
 	}
 	if !domain.RollbackableContainerName(decision.ContainerName) {
@@ -252,6 +286,14 @@ func (s *RollbackService) assessHost(
 	if refusal != domain.RollbackRefusalNone {
 		return decision, refusal, nil
 	}
+	// The baseline is what the restored original is compared against, and the
+	// rollback deliberately changes one thing about it: the restart policy the
+	// recreation suspended goes back. So the baseline carries the RECORDED
+	// policy, not the suspended one the inspection reports -- which turns the
+	// post-restore comparison into a check that the restore actually landed.
+	if decision.OriginalRestartPolicy.RestartsUnattended() {
+		baseline.Overview.RestartPolicy = decision.OriginalRestartPolicy
+	}
 	decision.BaselineDetail = baseline
 
 	// ---- the production name is free, or held by the replacement -----------
@@ -308,8 +350,18 @@ func (s *RollbackService) verifyIdentities(
 	// different name means somebody has already been rearranging, and a
 	// rollback on top of that would be undoing something other than what the
 	// record describes.
+	//
+	// With no replacement recorded, the original may instead still hold its
+	// OWN name: the recreation stopped it and the park rename failed -- or the
+	// record says it failed while the daemon completed it, which is why the
+	// live name decides whether the restore is needed, not the checkpoint.
 	currentName := domain.NormaliseContainerName(original.Detail.Overview.Name)
-	if currentName != decision.ParkedName {
+	switch {
+	case currentName == decision.ParkedName:
+		decision.OriginalHoldsName = false
+	case decision.ReplacementID == "" && currentName == decision.ContainerName:
+		decision.OriginalHoldsName = true
+	default:
 		return domain.RollbackRefusalOriginalIdentity, empty, nil
 	}
 
@@ -321,6 +373,13 @@ func (s *RollbackService) verifyIdentities(
 	}
 
 	// ---- the replacement ---------------------------------------------------
+
+	if decision.ReplacementID == "" {
+		// Nothing was created, so there is nothing to verify here. Whether the
+		// production name is free is nameHeldSafely's question, and it is asked
+		// next.
+		return domain.RollbackRefusalNone, original.Detail, nil
+	}
 
 	replacement, err := s.runtime.InspectContainer(ctx, decision.ReplacementID)
 	if err != nil || replacement == nil {
@@ -346,9 +405,16 @@ func (s *RollbackService) verifyIdentities(
 // nameHeldSafely checks that the production name is not held by a third
 // container.
 //
-// The name must be free, or held by the replacement itself. Held by anything
+// The name must be free, or held by the replacement itself, or held by the
+// original itself (a recreation whose park rename failed). Held by anything
 // else means restoring it would collide, and the rollback would fail after
 // having already stopped the replacement.
+//
+// The third case matters most when NO replacement was recorded: a create that
+// timed out on the client may have completed on the daemon, and the container
+// it produced holds the production name without appearing in any record.
+// Refusing here is what keeps that container from being renamed over or
+// stopped on the strength of a record that does not know it exists.
 func (s *RollbackService) nameHeldSafely(
 	ctx context.Context,
 	decision rollbackDecision,
@@ -366,7 +432,10 @@ func (s *RollbackService) nameHeldSafely(
 		if domain.NormaliseContainerName(container.Name) != decision.ContainerName {
 			continue
 		}
-		if container.ID == decision.ReplacementID {
+		if decision.ReplacementID != "" && container.ID == decision.ReplacementID {
+			continue
+		}
+		if container.ID == decision.OriginalID {
 			continue
 		}
 		return domain.RollbackRefusalNameUnavailable

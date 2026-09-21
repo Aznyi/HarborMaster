@@ -73,12 +73,14 @@ func TestASuccessfulRollbackRestoresTheOriginalAndKeepsTheReplacement(t *testing
 
 	// ---- the order ---------------------------------------------------------
 	//
-	// Exactly four mutations, exactly once each. The order is the safety
+	// Exactly five mutations, exactly once each. The order is the safety
 	// property: the replacement must be off the name before the original can
-	// take it back, and the original must hold its own name before it starts.
+	// take it back, its restart must be suspended once it is parked, and the
+	// original must hold its own name before it starts.
 	want := []string{
 		"stop:" + rbReplacementID,
 		"park:" + parked,
+		"suspend:" + rbReplacementID,
 		"restore:" + rbContainerName,
 		"start:" + rbOriginalID,
 	}
@@ -174,7 +176,11 @@ func TestEveryEligibilityRefusal(t *testing.T) {
 			want: domain.RollbackRefusalNothingToRollBack,
 		},
 		{
-			name: "the recreation stopped short of parking the original",
+			// The fixture still names a replacement, which cannot exist before
+			// the park: a record that contradicts itself is refused. A GENUINE
+			// stop-short record -- no replacement id -- is rolled back; see
+			// rollback_norepl_test.go.
+			name: "the recreation stopped short of parking the original but names a replacement",
 			world: func(h *rbHarness) {
 				h.evidence.execution.Checkpoint = domain.CheckpointOriginalStopped
 			},
@@ -705,10 +711,12 @@ func TestACheckpointThatCannotBeWrittenStopsThePipeline(t *testing.T) {
 		// wantOps is how many host mutations should have run before the stop.
 		wantOps int
 	}{
+		// The suspend of the parked replacement's restart policy follows the park
+		// checkpoint, so it counts from originalRestored onward.
 		{domain.RollbackCheckpointReplacementStopped, 1},
 		{domain.RollbackCheckpointReplacementParked, 2},
-		{domain.RollbackCheckpointOriginalRestored, 3},
-		{domain.RollbackCheckpointOriginalStarted, 4},
+		{domain.RollbackCheckpointOriginalRestored, 4},
+		{domain.RollbackCheckpointOriginalStarted, 5},
 	}
 
 	for _, testCase := range cases {
@@ -785,10 +793,11 @@ func TestAStateTransitionThatCannotBeWrittenStopsThePipeline(t *testing.T) {
 		if final.Failure != domain.RollbackFailurePersistence {
 			t.Errorf("failure %q, want persistence", final.Failure)
 		}
-		// Stopped, parked, restored -- and stopped there rather than starting
-		// the original on the strength of an unrecorded intent.
-		if ops := harness.host.operations(); len(ops) != 3 {
-			t.Errorf("%d host operations (%v), want 3", len(ops), ops)
+		// Stopped, parked, restart suspended, restored -- and stopped there
+		// rather than starting the original on the strength of an unrecorded
+		// intent.
+		if ops := harness.host.operations(); len(ops) != 4 {
+			t.Errorf("%d host operations (%v), want 4", len(ops), ops)
 		}
 		if final.Recovery == nil {
 			t.Error("no recovery plan after a failure that changed the host")
@@ -819,12 +828,12 @@ func TestADaemonThatGoesAwayMidRollbackIsRecordedAsSuch(t *testing.T) {
 		{
 			name:    "the restore cannot be issued",
 			inject:  func(h *rollbackHost) { h.restoreErr = errRollbackDaemonGone },
-			wantOps: 3,
+			wantOps: 4,
 		},
 		{
 			name:    "the start cannot be issued",
 			inject:  func(h *rollbackHost) { h.startErr = errRollbackDaemonGone },
-			wantOps: 4,
+			wantOps: 5,
 		},
 	}
 
@@ -884,9 +893,10 @@ func TestARenameCollisionIsARollbackFailureNotACorrection(t *testing.T) {
 	if final.Failure != domain.RollbackFailureRename {
 		t.Errorf("failure %q, want rename", final.Failure)
 	}
-	// Three operations, and no attempt to undo the first two.
-	if ops := harness.host.operations(); len(ops) != 3 {
-		t.Errorf("%d host operations (%v), want 3", len(ops), ops)
+	// Four operations -- stop, park, suspend the parked replacement's restart,
+	// restore -- and no attempt to undo any of them.
+	if ops := harness.host.operations(); len(ops) != 4 {
+		t.Errorf("%d host operations (%v), want 4", len(ops), ops)
 	}
 }
 
@@ -1401,4 +1411,75 @@ func equalStates(got, want []domain.RollbackState) bool {
 		}
 	}
 	return true
+}
+
+// TestTwoRequestsRacingOnTheSameKeyGetTheOneRollback: the request key is
+// checked before the preflight, so two requests carrying the same key can both
+// miss it before either has written. Against a real daemon the pipeline's own
+// restore of a failed manual update and the sweep that re-asks for it did
+// exactly that: the second was refused as conflicting with the first, and the
+// update recorded its restore as refused while that rollback went on to
+// succeed. The second ask must get the rollback the first made.
+func TestTwoRequestsRacingOnTheSameKeyGetTheOneRollback(t *testing.T) {
+	harness := newRollbackHarness(t)
+
+	first, err := harness.service.Request(context.Background(), service.RollbackRequest{
+		ExecutionID: rbExecutionID,
+		RequestKey:  "manual-restore:" + rbExecutionID,
+	})
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+
+	// The second request's lookup lands before the first one's write is
+	// visible; its preflight then sees the first rollback active.
+	harness.store.mu.Lock()
+	harness.store.keyLookupMisses = 1
+	harness.store.mu.Unlock()
+
+	second, err := harness.service.Request(context.Background(), service.RollbackRequest{
+		ExecutionID: rbExecutionID,
+		RequestKey:  "manual-restore:" + rbExecutionID,
+	})
+	if err != nil {
+		t.Fatalf("the racing request was refused: %v", err)
+	}
+	if second.RollbackID != first.RollbackID {
+		t.Errorf("the racing request got %q, want the first rollback %q", second.RollbackID, first.RollbackID)
+	}
+	if got := len(harness.store.records); got != 1 {
+		t.Errorf("%d rollbacks recorded, want 1", got)
+	}
+
+	// The other face of the same race: the first rollback is not seen as a
+	// per-container conflict but counts against the concurrency limit. Same
+	// key, same answer.
+	harness.store.mu.Lock()
+	harness.store.keyLookupMisses = 1
+	harness.store.containerConflictsInvisible = true
+	harness.store.mu.Unlock()
+	third, err := harness.service.Request(context.Background(), service.RollbackRequest{
+		ExecutionID: rbExecutionID,
+		RequestKey:  "manual-restore:" + rbExecutionID,
+	})
+	if err != nil || third.RollbackID != first.RollbackID {
+		t.Errorf("the request turned back by the limit got %q, %v; want the first rollback %q", third.RollbackID, err, first.RollbackID)
+	}
+	harness.store.mu.Lock()
+	harness.store.containerConflictsInvisible = false
+	harness.store.mu.Unlock()
+
+	// A DIFFERENT key racing the same conflict is still a refusal: the key
+	// says the asks are the same ask, and these are not.
+	harness.store.mu.Lock()
+	harness.store.keyLookupMisses = 1
+	harness.store.mu.Unlock()
+	_, err = harness.service.Request(context.Background(), service.RollbackRequest{
+		ExecutionID: rbExecutionID,
+		RequestKey:  "operator-button-0002",
+	})
+	var refused service.RollbackRefusedError
+	if !errors.As(err, &refused) || refused.Refusal != domain.RollbackRefusalConflict {
+		t.Errorf("a different key racing an active rollback got %v, want a conflict refusal", err)
+	}
 }

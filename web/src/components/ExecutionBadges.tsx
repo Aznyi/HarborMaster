@@ -2,12 +2,14 @@ import type {
   Execution,
   ExecutionCheckpoint,
   ExecutionFailure,
+  ExecutionRestoreState,
   ExecutionState,
   VerificationResult,
 } from "../api/executionTypes";
 import {
   EXECUTION_CHECKPOINT_LABELS,
   EXECUTION_FAILURE_LABELS,
+  EXECUTION_RESTORE_LABELS,
   EXECUTION_STATE_LABELS,
   EXECUTION_STATE_MEANING,
   hostChanged,
@@ -134,6 +136,8 @@ export function ExecutionFailureBadge({ failure }: { failure: ExecutionFailure }
     create:
       "The replacement could not be created. The original is stopped and preserved",
     start: "The replacement was created but would not start",
+    restartPolicy:
+      "The parked original's restart policy could not be set to no, so no replacement was created. Until it is restored the original could start by itself after a daemon restart",
     healthTimeout: "The replacement did not become healthy within its time budget",
     unhealthy: "The replacement reported unhealthy",
     notStable: "The replacement did not stay running long enough to be considered stable",
@@ -208,7 +212,7 @@ export function VerificationBadge({
  *
  * Stated once, plainly, and never conditionally. An operator who reads nothing
  * else on the page should still leave knowing that this feature stops
- * containers and does not roll back.
+ * containers, and what happens if the replacement then fails.
  */
 export function RecreationWarningNotice() {
   return (
@@ -220,11 +224,14 @@ export function RecreationWarningNotice() {
       <strong>stops it and replaces it with a new one</strong> built from its own
       configuration and an image already downloaded to this host. The original is
       kept until the replacement passes every check, and then removed.{" "}
-      <strong>A recreation you start here is not rolled back automatically</strong>{" "}
-      — if the replacement fails, both containers are left in place and
-      HarborMaster records the manual steps to restore service. Only an
-      unattended update run by an update policy can roll itself back, and only
-      when that policy asks for it.
+      <strong>
+        If the replacement fails after the original has been stopped, HarborMaster
+        restores the original automatically
+      </strong>{" "}
+      when that can be done safely and manual rollback is enabled on this
+      installation. Otherwise both containers are left in place and the record
+      carries the manual steps to restore service. An unattended update run by
+      an update policy is restored the same way, when that policy asks for it.
     </p>
   );
 }
@@ -265,17 +272,88 @@ export function ExecutionHostState({ execution }: { execution: Execution }) {
     return null;
   }
 
+  // A failed update whose original was put back, or is being put back. The
+  // four settled restore states and the pending one each get their own sentence,
+  // because "the service is back" and "the service is still down" are the two
+  // things an operator opens this page to learn.
+  const restore = execution.restore?.state;
+  if (restore === "restored") {
+    return (
+      <p
+        role="status"
+        className="rounded-lg border border-ok/40 bg-ok-soft px-3 py-2 text-sm text-ok"
+      >
+        Update failed — original container restored. {execution.containerName} is
+        running its previous image again and passed verification
+        {execution.restore?.rollbackId ? ` (rollback )` : ""}.
+        The failed replacement is kept, stopped, as evidence.
+      </p>
+    );
+  }
+  if (restore === "requested") {
+    return (
+      <p
+        role="status"
+        className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-sm text-content"
+      >
+        Update failed — HarborMaster is restoring the original container
+        {execution.restore?.rollbackId ? ` (rollback )` : ""}.
+        {execution.recovery?.serviceInterrupted ? `  is NOT running yet.` : ""}
+      </p>
+    );
+  }
+
+  const restoreOutcome =
+    restore === "failed"
+      ? "Update failed — the automatic restore also failed. Operator action required."
+      : restore === "refused"
+        ? "Update failed — automatic recovery was not safe. Operator action required."
+        : restore === "unavailable"
+          ? "Update failed — no automatic recovery is available on this installation. Operator action required."
+          : "This recreation changed this host and did not finish.";
+
   return (
     <p
       role="alert"
       className="rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger"
     >
-      This recreation changed this host and did not finish.{" "}
+      {restoreOutcome}{" "}
       {execution.recovery?.serviceInterrupted
-        ? `${execution.containerName} is NOT running.`
-        : `${execution.containerName} needs checking.`}{" "}
+        ? ` is NOT running.`
+        : ` needs checking.`}{" "}
+      {execution.restore?.detail ? ` ` : ""}
       The recovery steps below say exactly what was left and what to do.
     </p>
+  );
+}
+
+const restoreTones: Record<ExecutionRestoreState, BadgeTone> = {
+  requested: "warn",
+  restored: "ok",
+  failed: "danger",
+  refused: "danger",
+  unavailable: "danger",
+};
+
+/**
+ * Whether the service is back after a failed update.
+ *
+ * Rendered beside the failure so a list reader can tell "failed, restored"
+ * from "failed, still down" without opening the record.
+ */
+export function ExecutionRestoreBadge({ state }: { state: ExecutionRestoreState }) {
+  return (
+    <StatusBadge
+      tone={restoreTones[state]}
+      label={EXECUTION_RESTORE_LABELS[state]}
+      title={
+        state === "restored"
+          ? "The original container is serving again and passed verification"
+          : state === "requested"
+            ? "A rollback is putting the original container back"
+            : "The service is still down and a person is needed"
+      }
+    />
   );
 }
 

@@ -139,6 +139,24 @@ const (
 // HarborMaster's own label keys.
 const (
 	LabelHarborMasterEnabled = "io.harbormaster.enabled"
+
+	// LabelExecutionOwner and LabelReplacementOf are written onto every
+	// replacement a recreation creates: the execution that created it and the
+	// original it replaces, by full container id.
+	//
+	// They exist for one purpose. A create the daemon completes after the
+	// client has given up on it leaves a container holding the production
+	// name that no record names. These labels are the evidence -- combined with
+	// the name, the approved image, and HarborMaster's own durable record --
+	// by which that container is identified as this execution's and adopted.
+	// They are IDENTITY EVIDENCE, never authorisation by themselves: a label
+	// anyone can write with `docker run -l` is checked against a record only
+	// HarborMaster wrote, and a mismatch on any part refuses.
+	//
+	// Neither is compared by the preservation check, and the adapter writes
+	// HarborMaster's values over any the source container carried.
+	LabelExecutionOwner = "io.harbormaster.execution"
+	LabelReplacementOf  = "io.harbormaster.original"
 )
 
 // ClassifyLabel reports which convention a label key belongs to.
@@ -443,4 +461,82 @@ type DeviceRequest struct {
 type Logging struct {
 	Driver  string   `json:"driver,omitempty"`
 	Options []EnvVar `json:"options,omitempty"`
+}
+
+// ---- restart policies, as HarborMaster reasons about them ------------------
+
+// Valid reports whether the policy is one the daemon accepts and HarborMaster
+// would write. A retry count is meaningful only with on-failure.
+func (p RestartPolicy) Valid() bool {
+	name := p.Name
+	if name == "" {
+		name = "no"
+	}
+	known := false
+	for _, candidate := range RestartPolicyNames {
+		if candidate == name {
+			known = true
+		}
+	}
+	if !known {
+		return false
+	}
+	if p.MaximumRetryCount < 0 {
+		return false
+	}
+	if p.MaximumRetryCount > 0 && name != "on-failure" {
+		return false
+	}
+	return true
+}
+
+// RestartsUnattended reports whether the daemon could start this container
+// again without a person asking.
+//
+// Everything but "no". `always` is restored after a daemon restart whatever
+// stopped it; `unless-stopped` is restored unless an explicit stop was issued,
+// which the daemon records and never reports; `on-failure` keeps restarting a
+// container that is in backoff when it is put aside. HarborMaster cannot
+// observe which of those states a parked container is in, so every policy
+// that can act by itself is treated alike.
+func (p RestartPolicy) RestartsUnattended() bool {
+	return p.Name != "" && p.Name != "no"
+}
+
+// Encode renders the policy in the form HarborMaster records it: the name, and
+// for on-failure with a bound, "on-failure:N". The daemon's unset policy is
+// recorded as "no", which is what the daemon applies.
+func (p RestartPolicy) Encode() string {
+	name := p.Name
+	if name == "" {
+		name = "no"
+	}
+	if name == "on-failure" && p.MaximumRetryCount > 0 {
+		return name + ":" + strconv.Itoa(p.MaximumRetryCount)
+	}
+	return name
+}
+
+// ParseRestartPolicy reads a policy back from its recorded form.
+//
+// Returns false for anything this file would not have written. The value is
+// about to be sent to a privileged socket, so it is validated by shape here
+// rather than trusted because of where it was stored.
+func ParseRestartPolicy(encoded string) (RestartPolicy, bool) {
+	name, retries, bounded := strings.Cut(encoded, ":")
+	policy := RestartPolicy{Name: name}
+	if bounded {
+		if name != "on-failure" {
+			return RestartPolicy{}, false
+		}
+		count, err := strconv.Atoi(retries)
+		if err != nil || count <= 0 {
+			return RestartPolicy{}, false
+		}
+		policy.MaximumRetryCount = count
+	}
+	if name == "" || !policy.Valid() {
+		return RestartPolicy{}, false
+	}
+	return policy, true
 }

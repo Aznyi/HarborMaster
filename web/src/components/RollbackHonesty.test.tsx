@@ -31,14 +31,24 @@ import { RollbackWarningNotice } from "./RollbackBadges";
 // ------------------------------------------------------------ the notices --
 
 describe("the recreation notice", () => {
-  it("scopes the no-rollback promise to operator-requested recreations", () => {
+  it("says a failed recreation is restored, and under what conditions", () => {
     render(<RecreationWarningNotice />);
     const note = screen.getByRole("note");
 
-    // Accurate: THIS recreation is not undone for you.
-    expect(note).toHaveTextContent(/not rolled back automatically/i);
-    // And the exception is named rather than omitted.
+    // Accurate: THIS recreation is put back for you when that is safe.
+    expect(note).toHaveTextContent(/restores the original automatically/i);
+    // And the preconditions are named rather than omitted: it must be safe,
+    // and the rollback capability must exist.
+    expect(note).toHaveTextContent(/when that can be done safely/i);
+    expect(note).toHaveTextContent(/manual rollback is enabled/i);
+    // The policy path is named too.
     expect(note).toHaveTextContent(/update policy/i);
+  });
+
+  it("does not promise a restore will succeed", () => {
+    render(<RecreationWarningNotice />);
+    const text = screen.getByRole("note").textContent ?? "";
+    expect(text).not.toMatch(/always (works|succeeds)|guaranteed|will restore service/i);
   });
 });
 

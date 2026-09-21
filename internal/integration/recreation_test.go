@@ -174,6 +174,8 @@ func TestARealRecreationPreservesTheConfiguration(t *testing.T) {
 		Captured: captured,
 		Image:    target,
 		Name:     name,
+		// Every replacement names the execution that owns it; here a fixed one.
+		ExecutionID: "exec_0123456789abcdef0123",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -277,6 +279,8 @@ func TestAnAnonymousVolumeIsCarriedForward(t *testing.T) {
 		Captured: captured,
 		Image:    digestTargetFor(t, recreationImage),
 		Name:     name,
+		// Every replacement names the execution that owns it; here a fixed one.
+		ExecutionID: "exec_0123456789abcdef0123",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)

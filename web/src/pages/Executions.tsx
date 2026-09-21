@@ -15,6 +15,7 @@ import {
 import {
   ExecutionCheckpointBadge,
   ExecutionFailureBadge,
+  ExecutionRestoreBadge,
   ExecutionStateBadge,
   RecreationWarningNotice,
 } from "../components/ExecutionBadges";
@@ -280,6 +281,9 @@ function ExecutionRow({ execution }: { execution: Execution }) {
             <ExecutionStateBadge state={execution.state} />
             {execution.failure && (
               <ExecutionFailureBadge failure={execution.failure} />
+            )}
+            {execution.restore?.state && (
+              <ExecutionRestoreBadge state={execution.restore.state} />
             )}
             {/* The checkpoint is shown on anything that is not a clean
                 success, because it is what says what is on the host. */}

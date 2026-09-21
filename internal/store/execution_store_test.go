@@ -823,3 +823,221 @@ func TestControlCharactersAreStrippedFromStoredText(t *testing.T) {
 		t.Errorf("control characters survived into a stored message: %q", read.Message)
 	}
 }
+
+// TestAdoptionCandidatesAreFailedParkedRecordsWithoutAReplacement pins the
+// reconciliation query: a failed recreation that parked the original and
+// recorded no replacement is a candidate; everything else is not.
+func TestAdoptionCandidatesAreFailedParkedRecordsWithoutAReplacement(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	fail := func(containerID, acquisitionID string, checkpoint domain.ExecutionCheckpoint, replacement string) domain.Execution {
+		t.Helper()
+		created, err := db.Executions.Create(ctx, executionFor(containerID, acquisitionID), now)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+			ExecutionID: created.ExecutionID, To: domain.ExecutionCreating,
+			ParkedName: "web.hm-old-" + created.ExecutionID,
+		}, now); err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+		if checkpoint != domain.CheckpointNone {
+			if err := db.Executions.Checkpoint(ctx, store.ExecutionCheckpointWrite{
+				ExecutionID: created.ExecutionID, Checkpoint: checkpoint,
+				ReplacementID: replacement, MarkMutated: true,
+			}, now); err != nil {
+				t.Fatalf("checkpoint: %v", err)
+			}
+		}
+		if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+			ExecutionID: created.ExecutionID, To: domain.ExecutionFailed,
+			Failure: domain.ExecutionFailureCreate,
+		}, now); err != nil {
+			t.Fatalf("fail: %v", err)
+		}
+		return created
+	}
+
+	candidate := fail("container-a", "acq_0011223344556677889a", domain.CheckpointOriginalParked, "")
+	fail("container-b", "acq_0011223344556677889b", domain.CheckpointOriginalStopped, "")
+	fail("container-c", "acq_0011223344556677889c", domain.CheckpointReplacementCreated, strings.Repeat("b", 64))
+	fail("container-d", "acq_0011223344556677889d", domain.CheckpointNone, "")
+
+	candidates, err := db.Executions.AdoptionCandidates(ctx, now.Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatalf("adoption candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ExecutionID != candidate.ExecutionID {
+		t.Fatalf("candidates = %+v, want only %s", candidates, candidate.ExecutionID)
+	}
+
+	// Once a replacement is recorded the row leaves the candidate set, which is
+	// what makes reconciliation converge.
+	if err := db.Executions.Checkpoint(ctx, store.ExecutionCheckpointWrite{
+		ExecutionID: candidate.ExecutionID, Checkpoint: domain.CheckpointReplacementCreated,
+		ReplacementID: strings.Repeat("c", 64),
+	}, now); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	candidates, err = db.Executions.AdoptionCandidates(ctx, now.Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatalf("adoption candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("an adopted record is still a candidate: %+v", candidates)
+	}
+
+	// The window is bounded: a record completed before the cutoff is not
+	// rescanned on every sweep forever.
+	old := fail("container-e", "acq_0011223344556677889e", domain.CheckpointOriginalParked, "")
+	candidates, err = db.Executions.AdoptionCandidates(ctx, now.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("adoption candidates: %v", err)
+	}
+	for _, c := range candidates {
+		if c.ExecutionID == old.ExecutionID {
+			t.Fatal("a record completed before the cutoff was returned")
+		}
+	}
+}
+
+// ---- automatic restoration ---------------------------------------------
+
+func TestTheRestoreOutcomeRoundTrips(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	created, err := db.Executions.Create(ctx, executionFor("container-a", "acq_0011223344556677889a"), now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+		ExecutionID: created.ExecutionID, To: domain.ExecutionFailed,
+		Failure: domain.ExecutionFailureCreate,
+		Restore: &domain.ExecutionRestore{State: domain.RestoreRequested, RollbackID: "rbk_0123456789abcdef0123"},
+	}, now); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	read, err := db.Executions.Get(ctx, created.ExecutionID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if read.Restore.State != domain.RestoreRequested || read.Restore.RollbackID != "rbk_0123456789abcdef0123" {
+		t.Fatalf("restore = %+v after the first write", read.Restore)
+	}
+
+	// A transition that says nothing about the restore leaves it alone.
+	if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+		ExecutionID: created.ExecutionID, From: []domain.ExecutionState{domain.ExecutionFailed},
+		To: domain.ExecutionFailed, Failure: domain.ExecutionFailureCreate, Detail: "plan rewritten",
+	}, now); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	read, _ = db.Executions.Get(ctx, created.ExecutionID)
+	if read.Restore.State != domain.RestoreRequested {
+		t.Fatalf("a silent transition blanked the restore state: %+v", read.Restore)
+	}
+
+	// And the settlement replaces it wholesale, detail included.
+	if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+		ExecutionID: created.ExecutionID, From: []domain.ExecutionState{domain.ExecutionFailed},
+		To: domain.ExecutionFailed, Failure: domain.ExecutionFailureCreate,
+		Restore: &domain.ExecutionRestore{State: domain.RestoreFailed, RollbackID: "rbk_0123456789abcdef0123", Detail: "the original would not start"},
+	}, now); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	read, _ = db.Executions.Get(ctx, created.ExecutionID)
+	if read.Restore.State != domain.RestoreFailed || read.Restore.Detail != "the original would not start" {
+		t.Fatalf("restore = %+v after settlement", read.Restore)
+	}
+}
+
+func TestRestoresPendingListsOnlyRequestedRestores(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	settle := func(containerID, acquisitionID string, restore *domain.ExecutionRestore) domain.Execution {
+		t.Helper()
+		created, err := db.Executions.Create(ctx, executionFor(containerID, acquisitionID), now)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+			ExecutionID: created.ExecutionID, To: domain.ExecutionFailed,
+			Failure: domain.ExecutionFailureCreate, Restore: restore,
+		}, now); err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+		return created
+	}
+
+	pending := settle("container-a", "acq_0011223344556677889a", &domain.ExecutionRestore{State: domain.RestoreRequested})
+	settle("container-b", "acq_0011223344556677889b", &domain.ExecutionRestore{State: domain.RestoreRestored})
+	settle("container-c", "acq_0011223344556677889c", nil)
+
+	rows, err := db.Executions.RestoresPending(ctx, now.Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ExecutionID != pending.ExecutionID {
+		t.Fatalf("pending = %+v, want only %s", rows, pending.ExecutionID)
+	}
+	rows, err = db.Executions.RestoresPending(ctx, now.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("a restore completed before the cutoff was returned: %+v", rows)
+	}
+}
+
+// TestAdoptionCandidatesRespectTheCutoff pins the window: a candidate that
+// completed at or before `since` is not returned, however well it otherwise
+// qualifies. This is what bounds how long a failed record is re-read against
+// the daemon.
+func TestAdoptionCandidatesRespectTheCutoff(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	created, err := db.Executions.Create(ctx, executionFor("container-a", "acq_0011223344556677889a"), now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+		ExecutionID: created.ExecutionID, To: domain.ExecutionCreating,
+		ParkedName: "web.hm-old-" + created.ExecutionID,
+	}, now); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if err := db.Executions.Checkpoint(ctx, store.ExecutionCheckpointWrite{
+		ExecutionID: created.ExecutionID, Checkpoint: domain.CheckpointOriginalParked, MarkMutated: true,
+	}, now); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := db.Executions.Advance(ctx, store.ExecutionChange{
+		ExecutionID: created.ExecutionID, To: domain.ExecutionFailed, Failure: domain.ExecutionFailureCreate,
+	}, now); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	within, err := db.Executions.AdoptionCandidates(ctx, now.Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatalf("within the window: %v", err)
+	}
+	if len(within) != 1 {
+		t.Fatalf("within the window: %d candidates, want 1", len(within))
+	}
+	past, err := db.Executions.AdoptionCandidates(ctx, now.Add(time.Minute), 10)
+	if err != nil {
+		t.Fatalf("past the window: %v", err)
+	}
+	if len(past) != 0 {
+		t.Fatalf("past the window: %d candidates, want 0", len(past))
+	}
+}

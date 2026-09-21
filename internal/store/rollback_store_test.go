@@ -802,3 +802,34 @@ func TestNoRollbackColumnCanHoldASecret(t *testing.T) {
 		}
 	}
 }
+
+// TestARollbackWithoutAReplacementIsAccepted: a recreation that failed at the
+// create or the park rename has an original to restore and no replacement to
+// stop. The record must be storable with an empty replacement id, and it must
+// still refuse a record that does not name the original.
+func TestARollbackWithoutAReplacementIsAccepted(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	record := rollbackFor("exec_00112233445566778899", rollbackStoreContainer)
+	record.ReplacementID = ""
+
+	created, err := db.Rollbacks.Create(ctx, record, now)
+	if err != nil {
+		t.Fatalf("create rollback without a replacement: %v", err)
+	}
+	read, err := db.Rollbacks.Get(ctx, created.RollbackID)
+	if err != nil {
+		t.Fatalf("get rollback: %v", err)
+	}
+	if read.ReplacementID != "" {
+		t.Errorf("replacement id = %q, want empty", read.ReplacementID)
+	}
+
+	missingOriginal := rollbackFor("exec_aaaaaaaaaaaaaaaaaaaa", "api")
+	missingOriginal.OriginalID = ""
+	if _, err := db.Rollbacks.Create(ctx, missingOriginal, now); !errors.Is(err, store.ErrRollbackIdentity) {
+		t.Fatalf("create without an original gave %v, want ErrRollbackIdentity", err)
+	}
+}

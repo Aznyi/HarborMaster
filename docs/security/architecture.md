@@ -49,7 +49,7 @@ constructor is handed.**
 | `docker.Runtime` | 7 reads | every service |
 | `docker.ImageAcquirer` | 1 mutation: `PullByDigest` | the acquisition service |
 | `docker.ConfigCapturer` | 1 read: `CaptureConfig` | the execution service |
-| `docker.ContainerMutator` | 5 mutations: create, start, stop, rename, remove | the execution service |
+| `docker.ContainerMutator` | 6 mutations: create, start, stop, rename, remove, suspend-restart (typed: writes restart policy "no" onto a container HarborMaster parked or quarantined, by id, refused for any other name) | the execution service |
 
 Both capabilities are OFF by default and are `nil` unless the deployment opts
 in, so a default HarborMaster holds no write access to its Docker host at all —
@@ -364,7 +364,7 @@ same uncertainty.
 
 | Property | Mechanism | File |
 | --- | --- | --- |
-| The container mutation surface is FIVE methods | `docker.ContainerMutator` pins create, start, stop, rename, remove. Four architecture tests pin the count and names, refuse image/exec/volume/network verbs on it, pin the capture interface at one read, and refuse any package outside the execution service from naming any of it | `internal/arch` |
+| The container mutation surface is SIX methods | `docker.ContainerMutator` pins create, start, stop, rename, remove, suspend-restart. Four architecture tests pin the count and names, refuse image/exec/volume/network verbs on it, pin the capture interface at one read, and refuse any package outside the execution service from naming any of it | `internal/arch` |
 | No SDK option struct is reachable | Every method takes a HarborMaster-owned request. There is no field for a command, a mount, a device, a capability, or a force flag | `internal/docker/recreate.go` |
 | Mutations target a FULL container id | Exactly 64 lowercase hex, validated at the adapter. Nothing can be aimed by name, so no window exists in which a name resolves to a container other than the one that was checked | `validContainerID` |
 | Remove cannot force and cannot delete volumes | Both hardcoded false, and `RemoveRequest` has exactly one field. A container's data is not HarborMaster's to delete, and forcing would discard the caller's evidence that it was stopped | `Client.RemoveContainer` |
@@ -386,10 +386,13 @@ same uncertainty.
 - **A running replacement is not a successful recreation.** Only all four proofs
   together can conclude that, and a proof that was not reached establishes
   nothing.
-- **A failure is not a reason to act again.** HarborMaster does not roll back on
-  its own. It stops, quarantines the replacement, preserves both containers, and
-  records what a person would do. Undoing the recreation afterwards is a
-  separate, separately authorised operation a person asks for — see §3h.
+- **A failure is not a reason for the PIPELINE to act again.** It stops,
+  quarantines the replacement, preserves both containers, and records what a
+  person would do. Putting the original back is the rollback service's work:
+  the pipeline asks for it through the same request an operator's button
+  submits (§3g, "A failed manual update is restored"), and the rollback
+  service refuses whenever the host is not in an arrangement it can undo
+  without guessing.
 - **A recorded state is not a known state after a failed write.** The pipeline
   stops rather than assume.
 - **An empty checkpoint does not always mean "nothing changed".** With
@@ -398,6 +401,89 @@ same uncertainty.
 - **A previous approval does not license a second application.** An acquisition
   is single use; another recreation needs a fresh plan assessed against the
   world as it is now.
+
+### Parked containers cannot restart by themselves
+
+Docker restarts a stopped `always` container when the daemon restarts, and an
+`unless-stopped` one unless an explicit stop was issued -- a fact the daemon
+keeps to itself. A parked original or a quarantined replacement carries the
+workload's policy and its port bindings, so after a reboot it would come back
+and race the serving container for them. The pipeline therefore sets the policy
+to "no" the moment it parks the original and the moment it quarantines a
+replacement, through `SuspendRestart`: a typed write of that one value, by full
+id, refused for any container whose current name carries no HarborMaster
+marker. The original's policy is recorded on the execution row before the stop
+(`original_restart_policy`, migration 0035), and a rollback restores it. A
+failed suspension is logged at ERROR and does not fail the recreation: the
+suspension guards against a future daemon restart, and stopping the recreation
+for it would leave the workload down now.
+
+### An unrecorded replacement is adopted by evidence, never by name
+
+A create that fails on the client may complete on the daemon, leaving a
+container under the production name that no record names. Every replacement is
+created carrying two labels only HarborMaster writes -- `io.harbormaster.execution`
+and `io.harbormaster.original` -- over any value the source carried. After a
+create error, in the restart recovery pass, and on every sweep
+(`ExecutionService.Reconcile`), a failed recreation at checkpoint
+`originalParked` with no replacement id is checked against the live host: a
+container holding the production name is adopted only when both labels name
+this execution and its parked original, the name matches, and the image is the
+approved one. Adoption writes the `replacementCreated` checkpoint and nothing
+else; the quarantine or the rollback then acts on it through its own preflight.
+Anything short of that evidence is a stranger, is logged, and is never touched.
+The labels are identity evidence checked against a record only HarborMaster
+wrote; they are not authorisation.
+
+### A failed manual update is restored
+
+When a manual recreation fails after the mutation point, the execution service
+asks the rollback service to put the original back -- `RollbackRequest{
+ExecutionID}` with the idempotency key `manual-restore:<executionId>`, exactly
+the request the Roll back button submits, so the same preflight runs against
+the live host and the same checkpointed pipeline moves the containers. The
+execution service holds no rollback capability: `ExecutionOptions.Restorer` is
+the rollback service's request surface (enabled, request, look up by key) and
+nothing else. Unattended updates are not handled here; their recovery belongs
+to the automation follower and the governing policy.
+
+The outcome is recorded on the UPDATE, in a closed vocabulary the schema holds:
+`requested`, `restored`, `failed`, `refused`, `unavailable` (migration 0036).
+"requested" is written before the request leaves and advanced by a sweep that
+reads the rollback back by its key; a process that died between the two writes
+is re-asked under the same key, so at most one rollback ever exists for one
+update however many paths run. `restored` rewrites the recovery plan to say the
+service is back; every other settled state leaves it saying the service is down
+and a person is needed. `EXECUTION_RESTORE_ON_FAILURE` (default on) switches
+the ask off; with rollback disabled the outcome is `unavailable` and startup
+says so.
+
+### Parked and quarantined containers are either neutralised or said not to be
+
+The suspension of a parked original's restart policy is not best effort. When
+it fails the recreation stops BEFORE creating a replacement, with its own
+failure word (`restartPolicy`, migration 0036): a parked container that could
+start by itself after a daemon restart, beside a replacement holding its name
+and ports, is the race the suspension exists to prevent. The original is
+parked and intact and the rollback restores it without a replacement to move.
+When the suspension of a quarantined replacement fails, the replacement is
+still stopped and off the production name -- which protects the service now --
+but the `replacementQuarantined` checkpoint is withheld, because that checkpoint
+means "cannot come back"; the record keeps the quarantine name, and the plan
+names the container and the `docker update --restart=no` that neutralises it.
+A rollback that cannot neutralise the replacement it parked still succeeds --
+the original is serving -- and carries an attention plan saying so rather than
+calling the replacement safe. A rollback that cannot write the original's
+policy back does not start it and fails with its own word (`restartPolicy`,
+migration 0037).
+
+### Recreation and rollback exclude each other
+
+The rollback preflight refuses while a recreation of the container is active;
+the recreation preflight now refuses, with `conflict`, while a rollback of the
+workload -- by name, which is what rollbacks contend for -- is active. Both
+checks run at request time and again inside the worker before the first
+mutation, and a lookup that cannot be performed refuses.
 
 ## 3g. Manual rollback
 
@@ -417,7 +503,9 @@ a name, an image, or a Docker option — which makes "roll back to an
 attacker-selected target" structurally impossible rather than merely checked
 for. Both container identities, the production name, and the image identity are
 read from HarborMaster's own record of that recreation and re-verified against
-the live host before anything moves.
+the live host before anything moves. A recreation that failed before it created
+anything has only one identity to verify; the rollback then has nothing to stop
+and restores the original alone, without ever widening what it may touch.
 
 ### The pipeline, and where the point of no return is
 
@@ -447,10 +535,22 @@ left an arrangement that can be undone; the original was not removed; no
 successful rollback of it exists; no rollback or recreation of this container is
 in flight; the concurrency limit is free; the daemon answers; the inventory is
 fresh; the preserved original is present, under the parked name the record
-gives, on the image the record gives; the replacement is present under a name
-HarborMaster derived; the production name is free or held by the replacement;
-the derived parked name fits; and the original's configuration can be projected
-so the result can be proved.
+gives (or, when no replacement was ever created, under its own name), on the
+image the record gives; the replacement, when one was recorded, is present under
+a name HarborMaster derived; the production name is free or held by the
+replacement or by the original itself; the derived parked name fits; and the
+original's configuration can be projected so the result can be proved.
+
+A recreation that stopped the original and then failed at the park rename or at
+the create has no replacement. Its record carries an empty replacement id and a
+checkpoint of `originalStopped` or `originalParked`, and the rollback is the
+last two steps only: restore the name when the LIVE host says the original does
+not already hold it, then start and prove it. Any later checkpoint with no
+replacement id -- or a replacement id at `originalStopped`, before any create
+could have run -- is an inconsistent record and is refused. A container that holds
+the production name without being the recorded original or replacement -- a
+create that timed out on the client and landed on the daemon, or something an
+operator started by hand -- refuses the rollback before anything moves.
 
 ### The checkpoint is what survives a crash
 
@@ -469,7 +569,7 @@ recovery plan.
 
 | Property | Mechanism | File |
 | --- | --- | --- |
-| The rollback surface is FOUR methods | `docker.ContainerRollbacker` pins stop, park, restore, start. Architecture tests pin the count and names, refuse create/remove/exec/image verbs on it, require a full container id on every request, and refuse any package outside the rollback service from naming any of it | `internal/arch/rollback_arch_test.go` |
+| The rollback surface is SIX methods | `docker.ContainerRollbacker` pins stop, park, restore, start, suspend-restart, restore-restart. Architecture tests pin the count and names, refuse create/remove/exec/image verbs on it, require a full container id on every request, and refuse any package outside the rollback service from naming any of it | `internal/arch/rollback_arch_test.go` |
 | **There is no remove method at all** | Deliberately narrower than the spec allowed. The failed replacement is the evidence of why the recreation was backed out, and a capability that could destroy it would eventually be used to. Pinned by `TestTheRollbackInterfaceCannotCreateOrDestroy` | `internal/docker/rollback.go` |
 | The rollback service holds NO other mutation capability | It is handed `docker.Runtime` and `docker.ContainerRollbacker` and nothing else, so it cannot create, remove, or capture. Pinned by test | `internal/arch/rollback_arch_test.go` |
 | Mutations target a FULL container id | Exactly 64 lowercase hex, validated at the adapter. A prefix would let a shorter id match a container the record does not name | `RollbackStopRequest.Validate` and siblings |
@@ -501,6 +601,19 @@ recovery plan.
   does not know where the containers are, and a rollback would be a guess.
 - **A check that could not be PERFORMED is not a pass.** An unreadable container
   listing refuses the rollback rather than assuming the production name is free.
+
+### A rollback restores the restart policy, not merely the process
+
+After the original's name is restored and before it is started, the rollback
+writes back the policy the recreation recorded (`RestoreRestart`, refused for
+any container whose current name carries a HarborMaster marker). A rollback
+that cannot is recorded as failed with the original holding its name and not
+running, and its plan names the exact `docker update --restart=...` to run:
+starting the original with `restart: no` would leave a workload that runs until
+its next crash and then stays down. The parked replacement is suspended the
+same way the recreation suspends a quarantined one. The preservation proof
+compares against a baseline carrying the recorded policy, so it also proves the
+restore landed.
 
 ## 3g-bis. Automated updates
 

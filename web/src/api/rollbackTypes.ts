@@ -80,6 +80,7 @@ export type RollbackFailure =
   | "stop"
   | "rename"
   | "start"
+  | "restartPolicy"
   | "healthTimeout"
   | "unhealthy"
   | "notStable"
@@ -320,6 +321,7 @@ export const ROLLBACK_FAILURE_LABELS: Record<RollbackFailure, string> = {
   stop: "Could not stop the replacement",
   rename: "Could not rename",
   start: "Original would not start",
+  restartPolicy: "Restart policy could not be restored",
   healthTimeout: "Never became healthy",
   unhealthy: "Reported unhealthy",
   notStable: "Did not stay running",
